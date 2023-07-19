@@ -1,0 +1,59 @@
+# Base image
+FROM ubuntu:22.04
+
+# Information
+LABEL maintainer="Slow Ninja <info@slow.ninja>"
+
+# Variables
+ENV DEBIAN_FRONTEND=noninteractive \
+  PGDATABASE=structs \
+  PGPORT=5432 \
+  PGHOST=localhost \
+  PGUSER=structs 
+
+# Install packages
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y \
+        build-essential \
+        git \
+        perl \
+        postgresql \
+        postgresql-client \
+        postgresql-server-dev-all \
+	sqitch \
+	libdbd-pg-perl \ 
+	libdbd-sqlite3-perl \ 
+	sqlite3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Add the user and groups appropriately
+RUN addgroup --system structs && \
+    adduser --system --home /src/structs --shell /bin/bash --group structs
+
+# Clone down structs-pg for database schematics
+WORKDIR /src
+RUN git clone https://github.com/playstructs/structs-pg.git structs
+RUN chown -R structs /src/structs 
+COPY conf/sqitch.conf /src/structs/
+COPY scripts/* /src/structs/
+
+# Deploy Structs PG
+RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    sed -i "/^host.*all.*all.*127\.0\.0\.1\/32.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
+    sed -i "/^host.*all.*all.*::1\/128.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
+    echo "host structs +players ::/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
+    echo "host structs +players 0.0.0.0/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
+    /etc/init.d/postgresql start && \
+    su - postgres -c 'createuser -s structs && createdb -O structs structs' && \ 
+    su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs' && \
+    /etc/init.d/postgresql stop
+
+# Expose ports
+EXPOSE 5432
+
+# Persistence volume
+VOLUME [ "/var/lib/postgresql" ]
+
+# Run Structs
+CMD [ "/src/structs/start_structs_pg.sh" ]
