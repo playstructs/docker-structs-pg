@@ -9,7 +9,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
   PGDATABASE=structs \
   PGPORT=5432 \
   PGHOST=localhost \
-  PGUSER=structs 
+  PGUSER=structs \
+  SSL_DOMAIN=structs.lol
 
 # Install packages
 RUN apt-get update && \
@@ -21,10 +22,11 @@ RUN apt-get update && \
         postgresql \
         postgresql-client \
         postgresql-server-dev-all \
-	sqitch \
-	libdbd-pg-perl \ 
-	libdbd-sqlite3-perl \ 
-	sqlite3 && \
+        openssl \
+	    sqitch \
+	    libdbd-pg-perl \
+	    libdbd-sqlite3-perl \
+	    sqlite3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Add the user and groups appropriately
@@ -45,7 +47,8 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     echo "host structs +players ::/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     echo "host structs +players 0.0.0.0/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     /etc/init.d/postgresql start && \
-    su - postgres -c 'createuser -s structs && createdb -O structs structs' && \ 
+    su - postgres -c 'createuser -s structs && createdb -O structs structs' && \
+    su - postgres -c 'createuser -s structs-indexer' && \
     su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs' && \
     /etc/init.d/postgresql stop
 
@@ -54,6 +57,8 @@ EXPOSE 5432
 
 # Persistence volume
 VOLUME [ "/var/lib/postgresql" ]
+
+
 
 # Run Structs
 CMD [ "/src/structs/start_structs_pg.sh" ]
