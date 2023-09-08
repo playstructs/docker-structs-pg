@@ -29,8 +29,8 @@ then
   echo "ssl_key_file = '/etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/server.key'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf
   echo "ssl_prefer_server_ciphers = on" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf
 
-  echo "hostssl    all    all    0.0.0.0/0    md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
   echo "hostssl    structs    structs-indexer    0.0.0.0/0    trust" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
+  echo "hostssl    all    all    0.0.0.0/0    md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
 
   touch /src/structs/SSL_SETUP
 fi
