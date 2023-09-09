@@ -49,6 +49,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     /etc/init.d/postgresql start && \
     su - postgres -c 'createuser -s structs && createdb -O structs structs' && \
     su - postgres -c 'createuser -s structs_indexer' && \
+    su - postgres -c 'createuser -s structs_webapp' && \
     su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs' && \
     /etc/init.d/postgresql stop
 
