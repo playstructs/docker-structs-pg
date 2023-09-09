@@ -48,7 +48,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     echo "host structs +players 0.0.0.0/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     /etc/init.d/postgresql start && \
     su - postgres -c 'createuser -s structs && createdb -O structs structs' && \
-    su - postgres -c 'createuser -s structs-indexer' && \
+    su - postgres -c 'createuser -s structs_indexer' && \
     su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs' && \
     /etc/init.d/postgresql stop
 
