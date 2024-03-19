@@ -156,3 +156,40 @@ psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
+
+echo "Updating Grid Data"
+GRIDS_BLOB=`curl http://structsd:1317/structs/grid`
+
+GRID_COUNT=`echo ${GRIDS_BLOB} | jq ".gridRecords" | jq length `
+
+for (( p=0; p<GRID_COUNT; p++ ))
+do
+  GRID_BLOB=`echo ${GRIDS_BLOB} | jq ".gridRecords[${p}]"`
+  echo $GRID_BLOB > grid.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < grid.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventGrid',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
+
+
+echo "Updating Permission Data"
+PERMISSIONS_BLOB=`curl http://structsd:1317/structs/substation`
+
+PERMISSION_COUNT=`echo ${PERMISSIONS_BLOB} | jq ".permissionRecords" | jq length `
+
+for (( p=0; p<PERMISSION_COUNT; p++ ))
+do
+  PERMISSION_BLOB=`echo ${PERMISSIONS_BLOB} | jq ".permissionRecords[${p}]"`
+  echo $PERMISSION_BLOB > permission.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < permission.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventPermission',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
