@@ -177,7 +177,7 @@ psql -c "truncate cache.tmp_json"
 
 
 echo "Updating Permission Data"
-PERMISSIONS_BLOB=`curl http://structsd:1317/structs/substation`
+PERMISSIONS_BLOB=`curl http://structsd:1317/structs/permission`
 
 PERMISSION_COUNT=`echo ${PERMISSIONS_BLOB} | jq ".permissionRecords" | jq length `
 
