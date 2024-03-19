@@ -81,7 +81,7 @@ psql -c "truncate cache.tmp_json"
 
 
 echo "Updating Player Data"
-PLAYER_BLOB=`curl http://structsd:1317/structs/player`
+PLAYERS_BLOB=`curl http://structsd:1317/structs/player`
 
 PLAYER_COUNT=`echo ${PLAYERS_BLOB} | jq ".Player" | jq length `
 
