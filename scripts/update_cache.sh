@@ -171,7 +171,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventGrid',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventGrid.GridRecord',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -190,6 +190,6 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventPermission',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventPermission.PermissionRecord',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
