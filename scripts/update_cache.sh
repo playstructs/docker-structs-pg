@@ -17,7 +17,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventAllocation.allocation',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAllocation.allocation',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -36,7 +36,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventGuild.guild',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventGuild.guild',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -55,7 +55,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventInfusion.infusion',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventInfusion.infusion',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -75,7 +75,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventPlanet.planet',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPlanet.planet',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -94,7 +94,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventPlayer.player',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPlayer.player',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -113,7 +113,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventReactor.reactor',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventReactor.reactor',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -133,7 +133,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventStruct.structure',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventStruct.structure',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -152,7 +152,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventSubstation.substation',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventSubstation.substation',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -171,7 +171,7 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventGrid.GridRecord',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventGrid.gridRecord',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
@@ -190,6 +190,6 @@ do
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.EventPermission.PermissionRecord',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPermission.permissionRecord',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
