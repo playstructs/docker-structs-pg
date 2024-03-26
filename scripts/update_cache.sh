@@ -211,3 +211,22 @@ done
 psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPermission.permissionRecord',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
+
+
+echo "Updating Guild Membership Application Data"
+GUILD_MEMBERSHIP_APPLICATIONS_BLOB=`curl http://structsd:1317/structs/guild_membership_application`
+
+GUILD_MEMBERSHIP_APPLICATION_COUNT=`echo ${GUILD_MEMBERSHIP_APPLICATIONS_BLOB} | jq ".guildMembershipApplication" | jq length `
+
+for (( p=0; p<GUILD_MEMBERSHIP_APPLICATION_COUNT; p++ ))
+do
+  GUILD_MEMBERSHIP_APPLICATION_BLOB=`echo ${GUILD_MEMBERSHIP_APPLICATIONS_BLOB} | jq ".guildMembershipApplication[${p}]"`
+  echo GUILD_MEMBERSHIP_APPLICATION_BLOB > guild_membership_application.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < guild_membership_application.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventGuildMembershipApplication.guildMembershipApplication',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
