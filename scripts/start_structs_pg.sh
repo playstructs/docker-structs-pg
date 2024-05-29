@@ -51,7 +51,7 @@ do
   NODE_LIVENESS=`curl http://structsd:26657/status -s -f  | jq -r .result.sync_info.catching_up`
 done
 
-/src/structs/update_cache.sh
+su - structs -c '/src/structs/update_cache.sh'
 
 
 
