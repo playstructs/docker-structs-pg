@@ -48,7 +48,7 @@ echo "Waiting for structsd Node"
 NODE_LIVENESS=""
 while [[ $NODE_LIVENESS == "" ]]
 do
-  NODE_LIVENESS=`curl http://structs-pg:26657/status -s -f | jq -r .jsonrpc`
+  NODE_LIVENESS=`curl http://structsd:26657/status -s -f | jq -r .jsonrpc`
 done
 /src/structs/update_cache.sh
 
