@@ -46,11 +46,11 @@ fi
 echo "Waiting for structsd Node"
 
 NODE_LIVENESS="true"
-while [[ $NODE_LIVENESS ]]
+while [[ $NODE_LIVENESS == "true" ]]
 do
   NODE_LIVENESS=`curl http://structsd:26657/status -s -f  | jq -r .result.sync_info.catching_up`
-`
 done
+
 /src/structs/update_cache.sh
 
 
