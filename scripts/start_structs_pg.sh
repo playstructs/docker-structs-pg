@@ -42,5 +42,17 @@ fi
 ## Start tic.pl
 #su structs -c '/src/structs/monitor.pl | tee /src/structs/monitor.log 2>&1 &'
 
+# Wait for the node to be alive
+echo "Waiting for structsd Node"
+
+NODE_LIVENESS=""
+while [[ $NODE_LIVENESS == "" ]]
+do
+  NODE_LIVENESS=`curl http://structs-pg:26657/status -s -f | jq -r .jsonrpc`
+done
+/src/structs/update_cache.sh
+
+
+
 ## Watch log
 tail -f /var/log/postgresql/postgresql-*.log
