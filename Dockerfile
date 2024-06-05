@@ -24,7 +24,7 @@ RUN apt-get update && \
         postgresql-common \
         openssl
 
-RUN  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh yes && \
+RUN  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      apt-get -y install \
             postgresql-16-cron \
             postgresql \
