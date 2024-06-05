@@ -21,15 +21,21 @@ RUN apt-get update && \
         jq \
         git \
         perl \
-        postgresql \
-        postgresql-client \
-        postgresql-server-dev-all \
-        openssl \
-	    sqitch \
-	    libdbd-pg-perl \
-	    libdbd-sqlite3-perl \
-	    sqlite3 && \
-    rm -rf /var/lib/apt/lists/*
+        postgresql-common \
+        openssl
+
+RUN  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh yes && \
+     apt-get -y install \
+            postgresql-16-cron \
+            postgresql \
+            postgresql-client \
+            postgresql-server-dev-all \
+     	    sqitch \
+     	    libdbd-pg-perl \
+     	    libdbd-sqlite3-perl \
+     	    sqlite3
+
+RUN rm -rf /var/lib/apt/lists/*
 
 # Add the user and groups appropriately
 RUN addgroup --system structs && \
@@ -44,6 +50,7 @@ COPY scripts/* /src/structs/
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     sed -i "/^host.*all.*all.*127\.0\.0\.1\/32.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     sed -i "/^host.*all.*all.*::1\/128.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     #echo "host structs +players ::/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
