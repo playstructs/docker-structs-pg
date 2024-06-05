@@ -24,8 +24,8 @@ RUN apt-get update && \
         postgresql-common \
         openssl
 
-RUN  sed -i "/read enter//g" /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
-     cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
+RUN  sed -i "s/read enter//g" /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      apt-get -y install \
             postgresql-16-cron \
@@ -53,6 +53,7 @@ COPY scripts/* /src/structs/
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    echo "cron.database_name = 'postgres'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     sed -i "/^host.*all.*all.*127\.0\.0\.1\/32.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     sed -i "/^host.*all.*all.*::1\/128.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     #echo "host structs +players ::/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
