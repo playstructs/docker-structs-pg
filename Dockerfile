@@ -24,7 +24,9 @@ RUN apt-get update && \
         postgresql-common \
         openssl
 
-RUN  /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
+RUN  sed -i "/read enter//g" /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
+     cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
+     /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      apt-get -y install \
             postgresql-16-cron \
             postgresql \
