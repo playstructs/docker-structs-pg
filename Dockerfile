@@ -29,9 +29,9 @@ RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      apt-get -y install \
             postgresql-16-cron \
-            postgresql \
-            postgresql-client \
-            postgresql-server-dev-all \
+            postgresql-16 \
+            postgresql-16-client \
+            postgresql-16-server-dev-all \
      	    sqitch \
      	    libdbd-pg-perl \
      	    libdbd-sqlite3-perl \
