@@ -40,7 +40,7 @@ fi
 /etc/init.d/postgresql start
 
 echo "Inserting Genesis Data..."
-su - structs -c 'bash /src/structs/insert_genesis.sh'
+su - structs -c "bash /src/structs/insert_genesis.sh ${NETWORK_VERSION}"
 echo "Genesis Data inserted..."
 
 # Wait for the node to be alive
