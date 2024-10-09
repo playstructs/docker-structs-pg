@@ -39,8 +39,9 @@ fi
 ## Start database
 /etc/init.d/postgresql start
 
-## Start tic.pl
-#su structs -c '/src/structs/monitor.pl | tee /src/structs/monitor.log 2>&1 &'
+echo "Inserting Genesis Data"
+su - structs -c 'bash /src/structs/insert_genesis.sh'
+
 
 # Wait for the node to be alive
 echo "Waiting for structsd Node"

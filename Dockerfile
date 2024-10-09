@@ -10,7 +10,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
   PGPORT=5432 \
   PGHOST=localhost \
   PGUSER=structs \
-  SSL_DOMAIN=structs.lol
+  SSL_DOMAIN=structs.lol \
+  NETWORK_VERSION=main
 
 # Install packages
 RUN apt-get update && \
