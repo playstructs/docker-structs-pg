@@ -39,9 +39,9 @@ fi
 ## Start database
 /etc/init.d/postgresql start
 
-echo "Inserting Genesis Data"
+echo "Inserting Genesis Data..."
 su - structs -c 'bash /src/structs/insert_genesis.sh'
-
+echo "Genesis Data inserted..."
 
 # Wait for the node to be alive
 echo "Waiting for structsd Node"
