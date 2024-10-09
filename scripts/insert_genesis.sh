@@ -2,6 +2,9 @@
 
 echo "Inserting Genesis Data into Structs DB"
 
+echo "Deleting old stuff"
+psql -c "DELETE FROM structs.ledger WHERE action = 'genesis';"
+
 echo "Downloading current genesis..."
 echo $NETWORK_VERSION
 git clone --depth 1 --branch $NETWORK_VERSION https://github.com/playstructs/structs-networks.git
