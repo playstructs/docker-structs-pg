@@ -56,6 +56,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.database_name = 'structs'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.use_background_workers = on" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    echo "shared_buffers = 3072MB" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "max_worker_processes = 20" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     sed -i "/^host.*all.*all.*127\.0\.0\.1\/32.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     sed -i "/^host.*all.*all.*::1\/128.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
