@@ -30,7 +30,7 @@ FLEET_COUNT=`echo ${FLEETS_BLOB} | jq ".Fleet" | jq length `
 for (( p=0; p<FLEET_COUNT; p++ ))
 do
   FLEET_BLOB=`echo ${FLEETS_BLOB} | jq ".Fleet[${p}]"`
-  echo FLEET_BLOB > fleet.json
+  echo $FLEET_BLOB > fleet.json
 
   psql -c "copy cache.tmp_json (data) from stdin" < fleet.json
 
