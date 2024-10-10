@@ -22,6 +22,25 @@ psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
 
+echo "Updating Fleet Data"
+FLEETS_BLOB=`curl http://structsd:1317/structs/fleet`
+
+FLEET_COUNT=`echo ${FLEETS_BLOB} | jq ".Fleet" | jq length `
+
+for (( p=0; p<FLEET_COUNT; p++ ))
+do
+  FLEET_BLOB=`echo ${FLEETS_BLOB} | jq ".Fleet[${p}]"`
+  echo FLEET_BLOB > fleet.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < fleet.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventFleet.fleet',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
+
+
 echo "Updating Guild Data"
 GUILDS_BLOB=`curl http://structsd:1317/structs/guild`
 
@@ -114,6 +133,25 @@ do
 done
 
 psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventReactor.reactor',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
+
+
+echo "Updating Struct Type Data"
+STRUCT_TYPES_BLOB=`curl http://structsd:1317/structs/struct_type`
+
+STRUCT_TYPE_COUNT=`echo ${STRUCT_TYPES_BLOB} | jq ".StructType" | jq length `
+
+for (( p=0; p<STRUCT_TYPE_COUNT; p++ ))
+do
+  STRUCT_TYPE_BLOB=`echo ${STRUCT_TYPES_BLOB} | jq ".StructType[${p}]"`
+  echo $STRUCT_TYPE_BLOB > struct_type.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < struct_type.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventStructType.structType',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
