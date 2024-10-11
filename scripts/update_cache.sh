@@ -196,20 +196,20 @@ psql -c "truncate cache.tmp_json"
 
 
 echo "Updating Address Association Data"
-ADDRESSES_BLOB=`curl http://structsd:1317/structs/address_association`
+ADDRESSES_BLOB=`curl http://structsd:1317/structs/address`
 
-ADDRESS_COUNT=`echo ${ADDRESSES_BLOB} | jq ".addressAssociation" | jq length `
+ADDRESS_COUNT=`echo ${ADDRESSES_BLOB} | jq ".address" | jq length `
 
 for (( p=0; p<ADDRESS_COUNT; p++ ))
 do
-  ADDRESS_BLOB=`echo ${ADDRESSES_BLOB} | jq ".addressAssociation[${p}]"`
+  ADDRESS_BLOB=`echo ${ADDRESSES_BLOB} | jq ".address[${p}]"`
   echo $ADDRESS_BLOB > address.json
 
   psql -c "copy cache.tmp_json (data) from stdin" < address.json
 
 done
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAddressAssociation.addressAssociation',tmp_json.data FROM cache.tmp_json"
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAddress.address',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
