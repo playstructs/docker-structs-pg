@@ -13,6 +13,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
   SSL_DOMAIN=structs.lol \
   NETWORK_VERSION=main
 
+
+
 # Install packages
 RUN apt-get update && \
     apt-get upgrade -y && \
@@ -23,13 +25,22 @@ RUN apt-get update && \
         git \
         perl \
         postgresql-common \
-        openssl
+        lsb-release \
+        apt-transport-https \
+        openssl \
+        wget \
+        gnupg
+
+RUN echo "deb https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main" | tee /etc/apt/sources.list.d/timescaledb.list
+RUN wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg
+
 
 RUN  sed -i "s/read enter//g" /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
 RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      apt-get -y install \
             postgresql-17-cron \
+            timescaledb-2-postgresql-17 \
             postgresql \
             postgresql-client \
             postgresql-server-dev-all \
@@ -37,6 +48,8 @@ RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      	    libdbd-pg-perl \
      	    libdbd-sqlite3-perl \
      	    sqlite3
+
+
 
 RUN rm -rf /var/lib/apt/lists/*
 
@@ -67,6 +80,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     su - postgres -c 'createuser -s structs_indexer' && \
     su - postgres -c 'createuser -s structs_webapp' && \
     su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs' && \
+    timescaledb-tune --quiet --yes \
     /etc/init.d/postgresql stop
 
 # Expose ports
