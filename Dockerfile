@@ -66,7 +66,7 @@ COPY scripts/* /src/structs/
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
-    sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'timescaledb,pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.database_name = 'structs'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.use_background_workers = on" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "shared_buffers = 3072MB" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
