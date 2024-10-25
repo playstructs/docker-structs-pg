@@ -27,7 +27,7 @@ do
     GENESIS_COIN_DENOM=`echo ${ALL_GENESIS_BLOB} | jq -r ".app_state.bank.balances[${p}].coins[${c}].denom"`
     GENESIS_COIN_AMOUNT=`echo ${ALL_GENESIS_BLOB} | jq -r ".app_state.bank.balances[${p}].coins[${c}].amount"`
 
-    QUERY="INSERT INTO structs.ledger(address, amount, block_height, created_at, action, direction, denom) VALUES('${GENESIS_ADDRESS}','${GENESIS_COIN_AMOUNT}', 0, '${ALL_GENESIS_TIME}', 'genesis', 'credit', '${GENESIS_COIN_DENOM}'); "
+    QUERY="INSERT INTO structs.ledger(address, amount, block_height, time, action, direction, denom) VALUES('${GENESIS_ADDRESS}','${GENESIS_COIN_AMOUNT}', 0, '${ALL_GENESIS_TIME}', 'genesis', 'credit', '${GENESIS_COIN_DENOM}'); "
 
     echo "${QUERY}"
 
