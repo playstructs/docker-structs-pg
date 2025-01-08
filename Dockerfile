@@ -50,7 +50,6 @@ RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      	    sqlite3
 
 
-
 RUN rm -rf /var/lib/apt/lists/*
 
 # Add the user and groups appropriately
