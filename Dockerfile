@@ -29,7 +29,8 @@ RUN apt-get update && \
         apt-transport-https \
         openssl \
         wget \
-        gnupg
+        gnupg \
+        vim
 
 RUN echo "deb https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main" | tee /etc/apt/sources.list.d/timescaledb.list
 RUN wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg
