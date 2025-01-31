@@ -81,7 +81,7 @@ psql -c "truncate cache.tmp_json"
 
 
 echo "Updating Planet Data"
-PLANET_BLOB=`curl http://structsd:1317/structs/planet`
+PLANETS_BLOB=`curl http://structsd:1317/structs/planet`
 
 PLANET_COUNT=`echo ${PLANETS_BLOB} | jq ".Planet" | jq length `
 
