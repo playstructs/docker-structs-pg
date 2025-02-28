@@ -21,6 +21,24 @@ psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
+echo "Updating Agreement Data"
+AGREEMENTS_BLOB=`curl http://structsd:1317/structs/agreement`
+
+AGREEMENT_COUNT=`echo ${AGREEMENTS_BLOB} | jq ".Agreement" | jq length `
+
+for (( p=0; p<AGREEMENT_COUNT; p++ ))
+do
+  AGREEMENT_BLOB=`echo ${AGREEMENTS_BLOB} | jq ".Agreement[${p}]"`
+  echo $AGREEMENT_BLOB > agreement.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < agreement.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAgreement.agreement',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
+
 
 echo "Updating Fleet Data"
 FLEETS_BLOB=`curl http://structsd:1317/structs/fleet`
@@ -133,6 +151,26 @@ do
 done
 
 psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventReactor.reactor',tmp_json.data FROM cache.tmp_json"
+psql -c "truncate cache.attributes_tmp"
+psql -c "truncate cache.tmp_json"
+
+
+
+echo "Updating Provider Data"
+PROVIDERS_BLOB=`curl http://structsd:1317/structs/provider`
+
+PROVIDER_COUNT=`echo ${PROVIDERS_BLOB} | jq ".Provider" | jq length `
+
+for (( p=0; p<PROVIDER_COUNT; p++ ))
+do
+  PROVIDER_BLOB=`echo ${PROVIDERS_BLOB} | jq ".Provider[${p}]"`
+  echo $PROVIDER_BLOB > provider.json
+
+  psql -c "copy cache.tmp_json (data) from stdin" < provider.json
+
+done
+
+psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventProvider.provider',tmp_json.data FROM cache.tmp_json"
 psql -c "truncate cache.attributes_tmp"
 psql -c "truncate cache.tmp_json"
 
