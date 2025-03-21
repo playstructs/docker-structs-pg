@@ -40,13 +40,13 @@ fi
 ## Start database
 /etc/init.d/postgresql start
 
-#echo "Adding Guild Meta (if Provided)"
-#if [[ ! -z "${GUILD_ID}" ]]; then
-#  echo "(which it was...)"
-#  echo "insert into structs.guild_meta(id, name, description, tag, logo, socials, denom, website, this_infrastructure, created_at, updated_at) VALUES( '$GUILD_ID','$GUILD_NAME','$GUILD_DESCRIPTION','$GUILD_TAG','$GUILD_LOGO','$GUILD_SOCIALS','$GUILD_DENOM','$GUILD_WEBSITE','t',NOW(),NOW()) ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id, name = EXCLUDED.name, description = EXCLUDED.description, tag = EXCLUDED.tag, logo = EXCLUDED.logo, socials = EXCLUDED.socials, website = EXCLUDED.website, this_infrastructure='t', updated_at = NOW()" >> /src/structs/guild.sql
-#  su - structs -c "psql -f /src/structs/guild.sql"
-#  cat /src/structs/guild.sql
-#fi
+echo "Adding Guild Meta (if Provided)"
+if [[ ! -z "${GUILD_ID}" ]]; then
+  echo "(which it was...)"
+  echo "insert into structs.guild_meta(id, name, description, tag, logo, socials, denom, website, this_infrastructure, created_at, updated_at) VALUES( '$GUILD_ID','$GUILD_NAME','$GUILD_DESCRIPTION','$GUILD_TAG','$GUILD_LOGO','$GUILD_SOCIALS','$GUILD_DENOM','$GUILD_WEBSITE','t',NOW(),NOW()) ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id, name = EXCLUDED.name, description = EXCLUDED.description, tag = EXCLUDED.tag, logo = EXCLUDED.logo, socials = EXCLUDED.socials, website = EXCLUDED.website, this_infrastructure='t', updated_at = NOW()" >> /src/structs/guild.sql
+  su - structs -c "psql -f /src/structs/guild.sql"
+  cat /src/structs/guild.sql
+fi
 
 echo "Inserting Genesis Data..."
 su - structs -c "bash /src/structs/insert_genesis.sh ${NETWORK_VERSION}"
