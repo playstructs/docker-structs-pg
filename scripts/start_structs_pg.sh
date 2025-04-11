@@ -48,9 +48,9 @@ if [[ ! -z "${GUILD_ID}" ]]; then
   cat /src/structs/guild.sql
 fi
 
-echo "Inserting Genesis Data..."
-su - structs -c "bash /src/structs/insert_genesis.sh ${NETWORK_VERSION}"
-echo "Genesis Data inserted..."
+#echo "Inserting Genesis Data..."
+#su - structs -c "bash /src/structs/insert_genesis.sh ${NETWORK_VERSION}"
+#echo "Genesis Data inserted..."
 
 # Wait for the node to be alive
 echo "Waiting for structsd Node"
