@@ -34,3 +34,15 @@ do
     psql -c "${QUERY}"
   done
 done
+
+
+# Yeah, it's stupid, but it'll work for now. TODO Fix to be generic or fix on new genesis
+QUERY="INSERT INTO structs.ledger(address, counterparty, amount_p, block_height, time, action, direction, denom) VALUES('structs1ul8sd7nk573aw2gyzzwn2ahxqzrq0qg70en5e9','structsvaloper1ul8sd7nk573aw2gyzzwn2ahxqzrq0qg7f8g7t2','300000000', 0, '${ALL_GENESIS_TIME}', 'genesis', 'debit', 'ualpha'); "
+echo "${QUERY}"
+psql -c "${QUERY}"
+QUERY="INSERT INTO structs.ledger(address, counterparty, amount_p, block_height, time, action, direction, denom) VALUES('structs1ul8sd7nk573aw2gyzzwn2ahxqzrq0qg70en5e9','structsvaloper1ul8sd7nk573aw2gyzzwn2ahxqzrq0qg7f8g7t2','300000000', 0, '${ALL_GENESIS_TIME}', 'genesis', 'credit', 'ualpha.infused'); "
+echo "${QUERY}"
+psql -c "${QUERY}"
+QUERY="INSERT INTO structs.ledger(counterparty, address, amount_p, block_height, time, action, direction, denom) VALUES('structs1ul8sd7nk573aw2gyzzwn2ahxqzrq0qg70en5e9','structsvaloper1ul8sd7nk573aw2gyzzwn2ahxqzrq0qg7f8g7t2','300000000', 0, '${ALL_GENESIS_TIME}', 'genesis', 'credit', 'ualpha.infused'); "
+echo "${QUERY}"
+psql -c "${QUERY}"
