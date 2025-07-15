@@ -1,308 +1,133 @@
 #!/usr/bin/env bash
 
+# Helper function to fetch all paginated data for a given endpoint
+fetch_all_paginated_data() {
+    local endpoint=$1
+    local data_key=$2
+    local composite_key=$3
+    local temp_file=$4
+    
+    echo "Fetching all $data_key data from $endpoint..."
+    
+    # Initialize variables
+    local next_key=""
+    local total_processed=0
+    local page_count=0
+    
+    while true; do
+        page_count=$((page_count + 1))
+        
+        # Build URL with pagination if needed
+        local url="http://structsd:1317/structs/$endpoint"
+        if [ ! -z "$next_key" ]; then
+            url="$url?pagination.key=$next_key"
+        fi
+        
+        echo "Fetching page $page_count from $url"
+        
+        # Fetch data
+        local response=$(curl -s "$url")
+        
+        # Check if we got valid JSON
+        if ! echo "$response" | jq . >/dev/null 2>&1; then
+            echo "Error: Invalid JSON response from $url"
+            break
+        fi
+        
+        # Get the data array
+        local data_array=$(echo "$response" | jq ".$data_key")
+        
+        # Check if data array exists and has items
+        if [ "$data_array" = "null" ] || [ "$(echo "$data_array" | jq length)" -eq 0 ]; then
+            echo "No more data found for $data_key"
+            break
+        fi
+        
+        # Process each item in the current page
+        local item_count=$(echo "$data_array" | jq length)
+        echo "Processing $item_count items from page $page_count"
+        
+        for (( i=0; i<item_count; i++ ))
+        do
+            local item=$(echo "$data_array" | jq ".[$i]")
+            echo "$item" > "$temp_file"
+            psql -c "copy cache.tmp_json (data) from stdin" < "$temp_file"
+        done
+        
+        total_processed=$((total_processed + item_count))
+        
+        # Check for next page
+        next_key=$(echo "$response" | jq -r '.pagination.next_key // empty')
+        
+        if [ -z "$next_key" ] || [ "$next_key" = "null" ]; then
+            echo "No more pages for $data_key"
+            break
+        fi
+        
+        echo "Next page key: $next_key"
+    done
+    
+    # Insert all collected data
+    if [ $total_processed -gt 0 ]; then
+        echo "Inserting $total_processed total $data_key records into cache"
+        psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT '$composite_key',tmp_json.data FROM cache.tmp_json"
+        psql -c "truncate cache.attributes_tmp"
+        psql -c "truncate cache.tmp_json"
+    else
+        echo "No $data_key data found"
+    fi
+    
+    echo "Completed processing $data_key data"
+}
 
 echo "Updating Structs DB Cache based on chain data"
 
-echo "Updating Allocation Data"
-ALLOCATIONS_BLOB=`curl http://structsd:1317/structs/allocation`
+# Update Allocation Data
+fetch_all_paginated_data "allocation" "Allocation" "structs.structs.EventAllocation.allocation" "allocation.json"
 
-ALLOCATION_COUNT=`echo ${ALLOCATIONS_BLOB} | jq ".Allocation" | jq length `
+# Update Agreement Data
+fetch_all_paginated_data "agreement" "Agreement" "structs.structs.EventAgreement.agreement" "agreement.json"
 
-for (( p=0; p<ALLOCATION_COUNT; p++ ))
-do
-  ALLOCATION_BLOB=`echo ${ALLOCATIONS_BLOB} | jq ".Allocation[${p}]"`
-  echo $ALLOCATION_BLOB > allocation.json
+# Update Fleet Data
+fetch_all_paginated_data "fleet" "Fleet" "structs.structs.EventFleet.fleet" "fleet.json"
 
-  psql -c "copy cache.tmp_json (data) from stdin" < allocation.json
+# Update Guild Data
+fetch_all_paginated_data "guild" "Guild" "structs.structs.EventGuild.guild" "guild.json"
 
-done
+# Update Infusion Data
+fetch_all_paginated_data "infusion" "Infusion" "structs.structs.EventInfusion.infusion" "infusion.json"
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAllocation.allocation',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
+# Update Planet Data
+fetch_all_paginated_data "planet" "Planet" "structs.structs.EventPlanet.planet" "planet.json"
 
-echo "Updating Agreement Data"
-AGREEMENTS_BLOB=`curl http://structsd:1317/structs/agreement`
+# Update Player Data
+fetch_all_paginated_data "player" "Player" "structs.structs.EventPlayer.player" "player.json"
 
-AGREEMENT_COUNT=`echo ${AGREEMENTS_BLOB} | jq ".Agreement" | jq length `
+# Update Reactor Data
+fetch_all_paginated_data "reactor" "Reactor" "structs.structs.EventReactor.reactor" "reactor.json"
 
-for (( p=0; p<AGREEMENT_COUNT; p++ ))
-do
-  AGREEMENT_BLOB=`echo ${AGREEMENTS_BLOB} | jq ".Agreement[${p}]"`
-  echo $AGREEMENT_BLOB > agreement.json
+# Update Provider Data
+fetch_all_paginated_data "provider" "Provider" "structs.structs.EventProvider.provider" "provider.json"
 
-  psql -c "copy cache.tmp_json (data) from stdin" < agreement.json
+# Update Struct Type Data
+fetch_all_paginated_data "struct_type" "StructType" "structs.structs.EventStructType.structType" "struct_type.json"
 
-done
+# Update Struct Data
+fetch_all_paginated_data "struct" "Struct" "structs.structs.EventStruct.structure" "struct.json"
 
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAgreement.agreement',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
+# Update Substation Data
+fetch_all_paginated_data "substation" "Substation" "structs.structs.EventSubstation.substation" "substation.json"
 
+# Update Address Association Data
+fetch_all_paginated_data "address" "address" "structs.structs.EventAddress.address" "address.json"
 
-echo "Updating Fleet Data"
-FLEETS_BLOB=`curl http://structsd:1317/structs/fleet`
+# Update Grid Data
+fetch_all_paginated_data "grid" "gridRecords" "structs.structs.EventGrid.gridRecord" "grid.json"
 
-FLEET_COUNT=`echo ${FLEETS_BLOB} | jq ".Fleet" | jq length `
+# Update Permission Data
+fetch_all_paginated_data "permission" "permissionRecords" "structs.structs.EventPermission.permissionRecord" "permission.json"
 
-for (( p=0; p<FLEET_COUNT; p++ ))
-do
-  FLEET_BLOB=`echo ${FLEETS_BLOB} | jq ".Fleet[${p}]"`
-  echo $FLEET_BLOB > fleet.json
+# Update Guild Membership Application Data
+fetch_all_paginated_data "guild_membership_application" "guildMembershipApplication" "structs.structs.EventGuildMembershipApplication.guildMembershipApplication" "guild_membership_application.json"
 
-  psql -c "copy cache.tmp_json (data) from stdin" < fleet.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventFleet.fleet',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Guild Data"
-GUILDS_BLOB=`curl http://structsd:1317/structs/guild`
-
-GUILD_COUNT=`echo ${GUILDS_BLOB} | jq ".Guild" | jq length `
-
-for (( p=0; p<GUILD_COUNT; p++ ))
-do
-  GUILD_BLOB=`echo ${GUILDS_BLOB} | jq ".Guild[${p}]"`
-  echo $GUILD_BLOB > guild.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < guild.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventGuild.guild',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Infusion Data"
-INFUSIONS_BLOB=`curl http://structsd:1317/structs/infusion`
-
-INFUSION_COUNT=`echo ${INFUSIONS_BLOB} | jq ".Infusion" | jq length `
-
-for (( p=0; p<INFUSION_COUNT; p++ ))
-do
-  INFUSION_BLOB=`echo ${INFUSIONS_BLOB} | jq ".Infusion[${p}]"`
-  echo $INFUSION_BLOB > infusion.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < infusion.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventInfusion.infusion',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-
-echo "Updating Planet Data"
-PLANETS_BLOB=`curl http://structsd:1317/structs/planet`
-
-PLANET_COUNT=`echo ${PLANETS_BLOB} | jq ".Planet" | jq length `
-
-for (( p=0; p<PLANET_COUNT; p++ ))
-do
-  PLANET_BLOB=`echo ${PLANETS_BLOB} | jq ".Planet[${p}]"`
-  echo $PLANET_BLOB > planet.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < planet.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPlanet.planet',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Player Data"
-PLAYERS_BLOB=`curl http://structsd:1317/structs/player`
-
-PLAYER_COUNT=`echo ${PLAYERS_BLOB} | jq ".Player" | jq length `
-
-for (( p=0; p<PLAYER_COUNT; p++ ))
-do
-  PLAYER_BLOB=`echo ${PLAYERS_BLOB} | jq ".Player[${p}]"`
-  echo $PLAYER_BLOB > player.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < player.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPlayer.player',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Reactor Data"
-REACTORS_BLOB=`curl http://structsd:1317/structs/reactor`
-
-REACTOR_COUNT=`echo ${REACTORS_BLOB} | jq ".Reactor" | jq length `
-
-for (( p=0; p<REACTOR_COUNT; p++ ))
-do
-  REACTOR_BLOB=`echo ${REACTORS_BLOB} | jq ".Reactor[${p}]"`
-  echo $REACTOR_BLOB > reactor.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < reactor.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventReactor.reactor',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-
-echo "Updating Provider Data"
-PROVIDERS_BLOB=`curl http://structsd:1317/structs/provider`
-
-PROVIDER_COUNT=`echo ${PROVIDERS_BLOB} | jq ".Provider" | jq length `
-
-for (( p=0; p<PROVIDER_COUNT; p++ ))
-do
-  PROVIDER_BLOB=`echo ${PROVIDERS_BLOB} | jq ".Provider[${p}]"`
-  echo $PROVIDER_BLOB > provider.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < provider.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventProvider.provider',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Struct Type Data"
-STRUCT_TYPES_BLOB=`curl http://structsd:1317/structs/struct_type`
-
-STRUCT_TYPE_COUNT=`echo ${STRUCT_TYPES_BLOB} | jq ".StructType" | jq length `
-
-for (( p=0; p<STRUCT_TYPE_COUNT; p++ ))
-do
-  STRUCT_TYPE_BLOB=`echo ${STRUCT_TYPES_BLOB} | jq ".StructType[${p}]"`
-  echo $STRUCT_TYPE_BLOB > struct_type.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < struct_type.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventStructType.structType',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-
-echo "Updating Struct Data"
-STRUCTS_BLOB=`curl http://structsd:1317/structs/struct`
-
-STRUCT_COUNT=`echo ${STRUCTS_BLOB} | jq ".Struct" | jq length `
-
-for (( p=0; p<STRUCT_COUNT; p++ ))
-do
-  STRUCT_BLOB=`echo ${STRUCTS_BLOB} | jq ".Struct[${p}]"`
-  echo $STRUCT_BLOB > struct.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < struct.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventStruct.structure',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Substation Data"
-SUBSTATIONS_BLOB=`curl http://structsd:1317/structs/substation`
-
-SUBSTATION_COUNT=`echo ${SUBSTATIONS_BLOB} | jq ".Substation" | jq length `
-
-for (( p=0; p<SUBSTATION_COUNT; p++ ))
-do
-  SUBSTATION_BLOB=`echo ${SUBSTATIONS_BLOB} | jq ".Substation[${p}]"`
-  echo $SUBSTATION_BLOB > substation.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < substation.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventSubstation.substation',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Address Association Data"
-ADDRESSES_BLOB=`curl http://structsd:1317/structs/address`
-
-ADDRESS_COUNT=`echo ${ADDRESSES_BLOB} | jq ".address" | jq length `
-
-for (( p=0; p<ADDRESS_COUNT; p++ ))
-do
-  ADDRESS_BLOB=`echo ${ADDRESSES_BLOB} | jq ".address[${p}]"`
-  echo $ADDRESS_BLOB > address.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < address.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventAddress.address',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-echo "Updating Grid Data"
-GRIDS_BLOB=`curl http://structsd:1317/structs/grid`
-
-GRID_COUNT=`echo ${GRIDS_BLOB} | jq ".gridRecords" | jq length `
-
-for (( p=0; p<GRID_COUNT; p++ ))
-do
-  GRID_BLOB=`echo ${GRIDS_BLOB} | jq ".gridRecords[${p}]"`
-  echo $GRID_BLOB > grid.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < grid.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventGrid.gridRecord',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Permission Data"
-PERMISSIONS_BLOB=`curl http://structsd:1317/structs/permission`
-
-PERMISSION_COUNT=`echo ${PERMISSIONS_BLOB} | jq ".permissionRecords" | jq length `
-
-for (( p=0; p<PERMISSION_COUNT; p++ ))
-do
-  PERMISSION_BLOB=`echo ${PERMISSIONS_BLOB} | jq ".permissionRecords[${p}]"`
-  echo $PERMISSION_BLOB > permission.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < permission.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventPermission.permissionRecord',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
-
-
-echo "Updating Guild Membership Application Data"
-GUILD_MEMBERSHIP_APPLICATIONS_BLOB=`curl http://structsd:1317/structs/guild_membership_application`
-
-GUILD_MEMBERSHIP_APPLICATION_COUNT=`echo ${GUILD_MEMBERSHIP_APPLICATIONS_BLOB} | jq ".guildMembershipApplication" | jq length `
-
-for (( p=0; p<GUILD_MEMBERSHIP_APPLICATION_COUNT; p++ ))
-do
-  GUILD_MEMBERSHIP_APPLICATION_BLOB=`echo ${GUILD_MEMBERSHIP_APPLICATIONS_BLOB} | jq ".guildMembershipApplication[${p}]"`
-  echo GUILD_MEMBERSHIP_APPLICATION_BLOB > guild_membership_application.json
-
-  psql -c "copy cache.tmp_json (data) from stdin" < guild_membership_application.json
-
-done
-
-psql -c "INSERT INTO cache.attributes_tmp(composite_key, value) SELECT 'structs.structs.EventGuildMembershipApplication.guildMembershipApplication',tmp_json.data FROM cache.tmp_json"
-psql -c "truncate cache.attributes_tmp"
-psql -c "truncate cache.tmp_json"
+echo "Cache update completed!"
