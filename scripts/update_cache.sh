@@ -49,8 +49,8 @@ fetch_all_paginated_data() {
         
         for (( i=0; i<item_count; i++ ))
         do
-            local item=$(echo "$data_array" | jq ".[$i]")
-            echo "$item" > "$temp_file"
+            local item=$(echo "$data_array" | jq -c ".[$i]")
+            printf '%s\n' "$item" > "$temp_file"
             psql -c "copy cache.tmp_json (data) from stdin" < "$temp_file"
         done
         
