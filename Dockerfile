@@ -60,8 +60,7 @@ RUN addgroup --system structs && \
 
 # Clone down structs-pg for database schematics
 WORKDIR /src
-RUN mkdir structs && \
-    mkdir scripts
+RUN mkdir /src/scripts
 
 RUN git clone https://github.com/playstructs/structs-pg.git structs
 RUN chown -R structs /src/structs 
