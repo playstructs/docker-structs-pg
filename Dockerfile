@@ -64,7 +64,6 @@ WORKDIR /src
 RUN mkdir /src/scripts
 
 RUN git clone https://github.com/playstructs/structs-pg.git structs
-RUN chown -R structs /src/structs 
 COPY conf/sqitch.conf /src/structs/
 COPY scripts/ /src/scripts/
 
