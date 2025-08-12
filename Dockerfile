@@ -63,7 +63,7 @@ WORKDIR /src
 RUN git clone https://github.com/playstructs/structs-pg.git structs
 RUN chown -R structs /src/structs 
 COPY conf/sqitch.conf /src/structs/
-COPY scripts/* /src/structs/
+COPY scripts/ /src/scripts/
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
@@ -92,4 +92,4 @@ EXPOSE 5432
 # VOLUME [ "/var/lib/postgresql" ]
 
 # Run Structs
-CMD [ "/src/structs/database-start.sh" ]
+CMD [ "/src/scripts/database-start.sh" ]
