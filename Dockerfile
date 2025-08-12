@@ -12,7 +12,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
   PGUSER=structs \
   SSL_DOMAIN=structs.lol \
   NETWORK_VERSION=main \
-  AUTO_MIGRATE_SLEEP=120
+  AUTO_MIGRATE_SLEEP=120 \
+  SQITCH_PG_CONNECTION=postgres://structs@structs-pg:5432/structs
 
 
 
