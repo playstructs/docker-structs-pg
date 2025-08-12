@@ -3,11 +3,14 @@
 # launch the Structs database
 
 # Variables
-PORT=5432
+PORT=${PGPORT}
 
-# Logic
+
+# SSL Config
 if [ ! -f /src/structs/SSL_SETUP ]
 then
+  echo "Configuring SSL..."
+
   export DOMAIN=structs-pg
   export DATA_DIR=/etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main
 
@@ -37,33 +40,6 @@ then
   touch /src/structs/SSL_SETUP
 fi
 
-## Start database
-/etc/init.d/postgresql start
+echo "Initialization Done"
 
-echo "Adding Guild Meta (if Provided)"
-if [[ ! -z "${GUILD_ID}" ]]; then
-  echo "(which it was...)"
-  echo "insert into structs.guild_meta(id, name, description, tag, logo, socials, denom, website, this_infrastructure, created_at, updated_at) VALUES( '$GUILD_ID','$GUILD_NAME','$GUILD_DESCRIPTION','$GUILD_TAG','$GUILD_LOGO','$GUILD_SOCIALS','$GUILD_DENOM','$GUILD_WEBSITE','t',NOW(),NOW()) ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id, name = EXCLUDED.name, description = EXCLUDED.description, tag = EXCLUDED.tag, logo = EXCLUDED.logo, socials = EXCLUDED.socials, website = EXCLUDED.website, this_infrastructure='t', updated_at = NOW()" >> /src/structs/guild.sql
-  su - structs -c "psql -f /src/structs/guild.sql"
-  cat /src/structs/guild.sql
-fi
-
-#echo "Inserting Genesis Data..."
-#su - structs -c "bash /src/structs/insert_genesis.sh ${NETWORK_VERSION}"
-#echo "Genesis Data inserted..."
-
-# Wait for the node to be alive
-echo "Waiting for structsd Node"
-
-NODE_LIVENESS="true"
-while [[ $NODE_LIVENESS == "true" ]]
-do
-  NODE_LIVENESS=`curl http://structsd:26657/status -s -f  | jq -r .result.sync_info.catching_up`
-done
-
-su - structs -c 'bash /src/structs/update_cache.sh'
-
-
-
-## Watch log
-tail -f /var/log/postgresql/postgresql-*.log
+exit 0

@@ -11,7 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
   PGHOST=localhost \
   PGUSER=structs \
   SSL_DOMAIN=structs.lol \
-  NETWORK_VERSION=main
+  NETWORK_VERSION=main \
+  AUTO_MIGRATE_SLEEP=120
 
 
 
@@ -91,4 +92,4 @@ EXPOSE 5432
 # VOLUME [ "/var/lib/postgresql" ]
 
 # Run Structs
-CMD [ "/src/structs/start_structs_pg.sh" ]
+CMD [ "/src/structs/database-start.sh" ]
