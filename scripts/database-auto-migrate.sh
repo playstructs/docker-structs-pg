@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 echo "Auto Migrator Running every ${AUTO_MIGRATE_SLEEP}"
-ca /src/structs
+cd /src/structs
 
 while true; do
   git pull
