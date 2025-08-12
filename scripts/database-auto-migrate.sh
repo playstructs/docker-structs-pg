@@ -3,7 +3,7 @@
 echo "Auto Migrator Running every ${AUTO_MIGRATE_SLEEP}"
 cd /src/structs-pg
 
-sed -i "s#SQITCH_PG_CONNECTION#${SQITCH_PG_CONNECTION}#" /src/structs/sqitch.conf
+sed -i "s#SQITCH_PG_CONNECTION#${SQITCH_PG_CONNECTION}#" /src/structs-pg/sqitch.conf
 
 while true; do
   git pull

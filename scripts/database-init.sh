@@ -45,7 +45,7 @@ echo "Checking database starts..."
 /etc/init.d/postgresql start
 
 echo "Pushing latest database schema..."
-sed -i "s#SQITCH_PG_CONNECTION#${SQITCH_PG_CONNECTION}#" /src/structs/sqitch.conf
+sed -i "s#SQITCH_PG_CONNECTION#${SQITCH_PG_CONNECTION}#" /src/structs-pg/sqitch.conf
 cd /src/structs-pg
 sqitch deploy
 
