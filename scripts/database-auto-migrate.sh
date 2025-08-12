@@ -5,6 +5,6 @@ cd /src/structs
 
 while true; do
   git pull
-  sqitch deploy db:pg:structs
+  sqitch deploy
   sleep ${AUTO_MIGRATE_SLEEP}
 done
