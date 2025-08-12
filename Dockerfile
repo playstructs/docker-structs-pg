@@ -63,8 +63,8 @@ RUN addgroup --system structs && \
 WORKDIR /src
 RUN mkdir /src/scripts
 
-RUN git clone https://github.com/playstructs/structs-pg.git structs
-COPY conf/sqitch.conf /src/structs/
+RUN git clone https://github.com/playstructs/structs-pg.git structs-pg
+COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
 
 # Deploy Structs PG

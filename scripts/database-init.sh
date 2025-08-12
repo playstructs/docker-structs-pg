@@ -46,7 +46,7 @@ echo "Checking database starts..."
 
 echo "Pushing latest database schema..."
 sed -i "s#SQITCH_PG_CONNECTION#${SQITCH_PG_CONNECTION}#" /src/structs/sqitch.conf
-cd /src/structs
+cd /src/structs-pg
 sqitch deploy
 
 echo "Shutting down database..."
