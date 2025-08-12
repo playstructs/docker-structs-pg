@@ -6,7 +6,7 @@
 PORT=${PGPORT}
 
 # SSL Config
-if [ ! -f /src/structs/SSL_SETUP ]
+if [ ! -f /etc/postgresql/SSL_SETUP ]
 then
   echo "Configuring SSL..."
 
@@ -37,7 +37,7 @@ then
   echo "hostssl    structs    structs_webapp    0.0.0.0/0    trust" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
   echo "hostssl    all    all    0.0.0.0/0    md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
 
-  touch /src/structs/SSL_SETUP
+  touch /etc/postgresql/SSL_SETUP
   echo "SSL Configured"
 fi
 
