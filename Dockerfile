@@ -60,6 +60,9 @@ RUN addgroup --system structs && \
 
 # Clone down structs-pg for database schematics
 WORKDIR /src
+RUN mkdir /src/structs && \
+    mkdir /src/scripts
+
 RUN git clone https://github.com/playstructs/structs-pg.git structs
 RUN chown -R structs /src/structs 
 COPY conf/sqitch.conf /src/structs/
@@ -81,7 +84,6 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     su - postgres -c 'createuser -s structs_indexer' && \
     su - postgres -c 'createuser -s structs_crawler' && \
     su - postgres -c 'createuser -s structs_webapp' && \
-    su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs' && \
     timescaledb-tune --quiet --yes \
     /etc/init.d/postgresql stop
 

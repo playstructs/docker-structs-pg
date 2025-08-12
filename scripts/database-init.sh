@@ -5,7 +5,6 @@
 # Variables
 PORT=${PGPORT}
 
-
 # SSL Config
 if [ ! -f /src/structs/SSL_SETUP ]
 then
@@ -32,13 +31,24 @@ then
   echo "ssl_key_file = '/etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/server.key'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf
   echo "ssl_prefer_server_ciphers = on" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf
 
+  echo "hostssl    structs    structs    0.0.0.0/0    trust" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
   echo "hostssl    structs    structs_indexer    0.0.0.0/0    trust" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
   echo "hostssl    structs    structs_crawler    0.0.0.0/0    trust" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
   echo "hostssl    structs    structs_webapp    0.0.0.0/0    trust" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
   echo "hostssl    all    all    0.0.0.0/0    md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf
 
   touch /src/structs/SSL_SETUP
+  echo "SSL Configured"
 fi
+
+echo "Checking database starts..."
+/etc/init.d/postgresql start
+
+echo "Pushing latest database schema..."
+su - structs -c 'cd /src/structs && sqitch deploy db:pg:structs'
+
+echo "Shutting down database..."
+/etc/init.d/postgresql stop
 
 echo "Initialization Done"
 
