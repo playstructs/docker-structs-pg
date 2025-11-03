@@ -42,8 +42,8 @@ RUN  sed -i "s/read enter//g" /usr/share/postgresql-common/pgdg/apt.postgresql.o
 RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
      apt-get -y install \
-            postgresql-17-cron \
-            timescaledb-2-postgresql-17 \
+            postgresql-18-cron \
+            timescaledb-2-postgresql-18 \
             postgresql \
             postgresql-client \
             postgresql-server-dev-all \
