@@ -100,6 +100,9 @@ fetch_all_paginated_data "infusion" "Infusion" "structs.structs.EventInfusion.in
 # Update Planet Data
 fetch_all_paginated_data "planet" "Planet" "structs.structs.EventPlanet.planet" "planet.json"
 
+# Update Planet Attribute Data
+fetch_all_paginated_data "planet_attribute" "planetAttributeRecords" "structs.structs.EventPlanetAttribute.planetAttributeRecord" "planet_attribute.json"
+
 # Update Player Data
 fetch_all_paginated_data "player" "Player" "structs.structs.EventPlayer.player" "player.json"
 
@@ -114,6 +117,9 @@ fetch_all_paginated_data "struct_type" "StructType" "structs.structs.EventStruct
 
 # Update Struct Data
 fetch_all_paginated_data "struct" "Struct" "structs.structs.EventStruct.structure" "struct.json"
+
+# Update Struct Attribute Data
+fetch_all_paginated_data "struct_attribute" "structAttributeRecords" "structs.structs.EventStructAttribute.structAttributeRecord" "struct_attribute.json"
 
 # Update Substation Data
 fetch_all_paginated_data "substation" "Substation" "structs.structs.EventSubstation.substation" "substation.json"
