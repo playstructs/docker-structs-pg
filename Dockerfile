@@ -1,3 +1,10 @@
+# Build update-cache Go binary
+FROM golang:1.25 AS go-builder
+WORKDIR /build
+COPY update-cache/ .
+RUN go mod download && \
+    CGO_ENABLED=0 go build -o /update-cache ./cmd/
+
 # Base image
 FROM ubuntu:24.04
 
@@ -66,6 +73,9 @@ RUN mkdir /src/scripts
 RUN git clone https://github.com/playstructs/structs-pg.git structs-pg
 COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
+
+# Copy pre-built Go binary from builder stage
+COPY --from=go-builder /update-cache /usr/local/bin/update-cache
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
