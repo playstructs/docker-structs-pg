@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -128,13 +129,6 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 // + NOW() — the SQL trigger reads current_block which is racy with
 // out-of-order processing; bctx is replay-safe and partitions
 // correctly into the TimescaleDB hypertable.
-const infusionLedgerInsertSQL = `
-INSERT INTO structs.ledger (
-    address, counterparty, amount_p, block_height, time, action, direction, denom
-) VALUES
-    ($1, $2, $3::numeric, $4, $5, 'infused', 'debit',  'ualpha'),
-    ($1, $2, $3::numeric, $4, $5, 'infused', 'credit', 'ualpha.infused')`
-
 func emitInfusionLedger(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Infusion, prevFuelKnown bool, prevFuel *big.Int) error {
 	newFuel := new(big.Int)
 	if s := p.Fuel.String(); s != "" {
@@ -156,14 +150,12 @@ func emitInfusionLedger(ctx context.Context, tx pgx.Tx, bctx BlockContext, p pay
 		amount = new(big.Int).Sub(newFuel, prevFuel)
 	}
 
-	if _, err := tx.Exec(ctx, infusionLedgerInsertSQL,
-		p.Address,
-		p.DestinationID, // counterparty = the struct being infused
-		amount.String(),
-		bctx.Height,
-		bctx.BlockTime.UTC(),
-	); err != nil {
-		return err
-	}
+	t := bctx.BlockTime.UTC()
+	amtStr := amount.String()
+	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
+		buffers.LedgerRow{Address: p.Address, Counterparty: p.DestinationID, AmountP: amtStr, BlockHeight: bctx.Height, Time: t, Action: "infused", Direction: "debit", Denom: "ualpha"},
+		buffers.LedgerRow{Address: p.Address, Counterparty: p.DestinationID, AmountP: amtStr, BlockHeight: bctx.Height, Time: t, Action: "infused", Direction: "credit", Denom: "ualpha.infused"},
+	)
+	_ = tx
 	return nil
 }

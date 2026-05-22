@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/objecttype"
 	"sync-state/internal/payload"
 )
@@ -78,10 +79,9 @@ ON CONFLICT (id) DO UPDATE
        updated_at = EXCLUDED.updated_at
  WHERE structs.struct_attribute.val IS DISTINCT FROM EXCLUDED.val`
 
-const (
-	statStructHealthInsertSQL = `INSERT INTO structs.stat_struct_health (time, object_index, value, block_height) VALUES (NOW(), $1, $2, $3)`
-	statStructStatusInsertSQL = `INSERT INTO structs.stat_struct_status (time, object_index, value, block_height) VALUES (NOW(), $1, $2, $3)`
-)
+// stat_struct_health / stat_struct_status emits move through the
+// per-block buffer (see internal/buffers); the legacy SQL constants
+// were removed when the bulk-COPY path landed.
 
 // structDestroyedUpdateSQL applies the destruction stamp when a status
 // upsert lands a value with bit 32 set. No IS DISTINCT FROM guard — the
@@ -154,13 +154,19 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 
 	switch attrType {
 	case 0: // health
-		if _, err := tx.Exec(ctx, statStructHealthInsertSQL, objIndex, val, bctx.Height); err != nil {
-			return fmt.Errorf("struct_attribute stat_struct_health id=%s: %w", p.AttributeID, err)
-		}
+		bctx.Buf.StatStructHealth = append(bctx.Buf.StatStructHealth, buffers.StatRow{
+			Time:        bctx.BlockTime.UTC(),
+			ObjectIndex: objIndex,
+			Value:       val,
+			BlockHeight: bctx.Height,
+		})
 	case 1: // status
-		if _, err := tx.Exec(ctx, statStructStatusInsertSQL, objIndex, val, bctx.Height); err != nil {
-			return fmt.Errorf("struct_attribute stat_struct_status id=%s: %w", p.AttributeID, err)
-		}
+		bctx.Buf.StatStructStatus = append(bctx.Buf.StatStructStatus, buffers.StatRow{
+			Time:        bctx.BlockTime.UTC(),
+			ObjectIndex: objIndex,
+			Value:       val,
+			BlockHeight: bctx.Height,
+		})
 		if val&structDestroyedBit != 0 {
 			if _, err := tx.Exec(ctx, structDestroyedUpdateSQL, rawObjectID, bctx.Height); err != nil {
 				return fmt.Errorf("struct_attribute destroy stamp id=%s: %w", rawObjectID, err)
@@ -195,9 +201,12 @@ func structAttrDelete(ctx context.Context, tx pgx.Tx, bctx BlockContext, attribu
 		return nil
 	}
 	if attrType == 0 {
-		if _, err := tx.Exec(ctx, statStructHealthInsertSQL, objIndex, int64(0), bctx.Height); err != nil {
-			return fmt.Errorf("struct_attribute stat_struct_health (delete branch) id=%s: %w", attributeID, err)
-		}
+		bctx.Buf.StatStructHealth = append(bctx.Buf.StatStructHealth, buffers.StatRow{
+			Time:        bctx.BlockTime.UTC(),
+			ObjectIndex: objIndex,
+			Value:       0,
+			BlockHeight: bctx.Height,
+		})
 	}
 	if attrType == 5 && oldVal > 0 {
 		// protectedStructIndex delete → fixed-bug emit (see comment above).
@@ -262,10 +271,6 @@ func emitStructAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockConte
 	return nil
 }
 
-const structAttrActivityInsertSQL = `
-INSERT INTO structs.planet_activity (time, seq, planet_id, category, detail, block_height)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6)`
-
 // emitStructAttributeOnStructPlanet anchors the activity on the planet
 // the struct currently sits on. Uses getActivityLocationID (Go port of
 // structs.GET_ACTIVITY_LOCATION_ID). Honors the SQL's IS NOT NULL guard:
@@ -325,16 +330,14 @@ func insertStructAttrActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
-	if _, err := tx.Exec(ctx, structAttrActivityInsertSQL,
-		bctx.BlockTime.UTC(),
-		seq,
-		planetID,
-		category,
-		detailJSON,
-		bctx.Height,
-	); err != nil {
-		return fmt.Errorf("insert planet_activity planet=%s category=%s: %w", planetID, category, err)
-	}
+	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
+		Time:        bctx.BlockTime.UTC(),
+		Seq:         int64(seq),
+		PlanetID:    planetID,
+		Category:    category,
+		Detail:      detailJSON,
+		BlockHeight: bctx.Height,
+	})
 	return nil
 }
 

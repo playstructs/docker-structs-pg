@@ -64,6 +64,7 @@ func TestPhase7_PlayerGuildChange_PropagatesToAddresses(t *testing.T) {
 		if err := (playerHandler{}).Handle(ctx, tx, bc, first); err != nil {
 			t.Fatalf("player insert: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		// Seed two addresses pointing at the player with guild A.
 		seedPlayerAddress(t, tx, "structs1addr1", playerID, "4-A")
 		seedPlayerAddress(t, tx, "structs1addr2", playerID, "4-A")
@@ -77,6 +78,7 @@ func TestPhase7_PlayerGuildChange_PropagatesToAddresses(t *testing.T) {
 		if err := (playerHandler{}).Handle(ctx, tx, bc, second); err != nil {
 			t.Fatalf("player update: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Both addresses should now have guild B.
 		var addrs []string
@@ -119,6 +121,7 @@ func TestPhase7_PlayerInsertOnly_NoPropagation(t *testing.T) {
 		if err := (playerHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("player: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var got string
 		err := tx.QueryRow(ctx,
 			`SELECT guild_id FROM structs.player_address WHERE address='structs1stale'`).Scan(&got)
@@ -147,6 +150,7 @@ func TestPhase7_PlayerNoGuildChange_NoPropagation(t *testing.T) {
 		if err := (playerHandler{}).Handle(ctx, tx, bc, first); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		// Use a NULL-guild address — should stay NULL even after
 		// a no-op player update.
 		seedPlayerAddress(t, tx, "structs1nullguild", playerID, "")
@@ -160,6 +164,7 @@ func TestPhase7_PlayerNoGuildChange_NoPropagation(t *testing.T) {
 		if err := (playerHandler{}).Handle(ctx, tx, bc, second); err != nil {
 			t.Fatalf("update: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var guild *string
 		_ = tx.QueryRow(ctx,
 			`SELECT guild_id FROM structs.player_address WHERE address='structs1nullguild'`).Scan(&guild)
@@ -188,6 +193,7 @@ func TestPhase7_Infusion_StructInsertWritesLedgerPair(t *testing.T) {
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("infusion: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var debitAmount, creditAmount int64
 		err := tx.QueryRow(ctx,
 			`SELECT
@@ -240,12 +246,14 @@ func TestPhase7_Infusion_UpdateWritesDelta(t *testing.T) {
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, mustJSON(t, base)); err != nil {
 			t.Fatalf("first infusion: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Bump fuel — delta = 700000-500000 = 200000.
 		base["fuel"] = "700000"
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, mustJSON(t, base)); err != nil {
 			t.Fatalf("second infusion: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		var debits []int64
 		rows, err := tx.Query(ctx,
@@ -285,12 +293,14 @@ func TestPhase7_Infusion_DefuseWritesNegativeDelta(t *testing.T) {
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, mustJSON(t, base)); err != nil {
 			t.Fatalf("first: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Defuse half.
 		base["fuel"] = "400000"
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, mustJSON(t, base)); err != nil {
 			t.Fatalf("defuse: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Second debit row should be -400000.
 		var amounts []int64
@@ -331,9 +341,11 @@ func TestPhase7_Infusion_NoOpUpdateSkipsLedger(t *testing.T) {
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, base); err != nil {
 			t.Fatalf("first: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, base); err != nil {
 			t.Fatalf("repeat: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var n int
 		_ = tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.ledger
@@ -362,6 +374,7 @@ func TestPhase7_Infusion_NonStructDestinationNoLedger(t *testing.T) {
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("infusion: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var n int
 		_ = tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.ledger WHERE address=$1`, "structs1infuser5").Scan(&n)
@@ -391,6 +404,7 @@ func TestPhase7_Infusion_NonStruct_NoLedger(t *testing.T) {
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("infusion: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var n int
 		_ = tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.ledger WHERE address=$1`, "structs1infuser6").Scan(&n)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -113,10 +114,6 @@ func (structHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 // still "on" that planet for activity-stream purposes).
 const structMovementFleetLookupSQL = `SELECT location_id FROM structs.fleet WHERE id = $1`
 
-const structMovementInsertSQL = `
-INSERT INTO structs.planet_activity (time, seq, planet_id, category, detail, block_height)
-VALUES ($1, $2, $3, 'struct_move', $4::jsonb, $5)`
-
 func emitStructMovementActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Struct) error {
 	planetID := p.LocationID
 	if p.LocationType == "fleet" && p.LocationID != "" {
@@ -153,15 +150,14 @@ func emitStructMovementActivity(ctx context.Context, tx pgx.Tx, bctx BlockContex
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
-	if _, err := tx.Exec(ctx, structMovementInsertSQL,
-		bctx.BlockTime.UTC(),
-		seq,
-		planetID,
-		detail,
-		bctx.Height,
-	); err != nil {
-		return err
-	}
+	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
+		Time:        bctx.BlockTime.UTC(),
+		Seq:         int64(seq),
+		PlanetID:    planetID,
+		Category:    "struct_move",
+		Detail:      detail,
+		BlockHeight: bctx.Height,
+	})
 	return nil
 }
 

@@ -146,6 +146,7 @@ func TestPhase6_Raid_EmitsRaidStatusOnInsert(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("raid: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-555", "raid_status"); got != 1 {
 			t.Errorf("planet_activity raid_status rows = %d; want 1", got)
 		}
@@ -168,6 +169,7 @@ func TestPhase6_Raid_NoEmitOnSeizedOreOnlyUpdate(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, first); err != nil {
 			t.Fatalf("raid first: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Identical fleet+status, only seized_ore differs → IS DISTINCT
 		// FROM guard filters the UPDATE, no rows affected, no activity.
@@ -180,6 +182,7 @@ func TestPhase6_Raid_NoEmitOnSeizedOreOnlyUpdate(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, second); err != nil {
 			t.Fatalf("raid second: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-556", "raid_status"); got != 1 {
 			t.Errorf("planet_activity raid_status rows = %d; want 1 (seized_ore-only update should not re-emit)", got)
 		}
@@ -209,6 +212,7 @@ func TestPhase6_Struct_NoEmitOnFirstInsert(t *testing.T) {
 		if err := (structHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct insert: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-700", "struct_move"); got != 0 {
 			t.Errorf("struct_move on first insert = %d; want 0", got)
 		}
@@ -238,6 +242,7 @@ func TestPhase6_Struct_EmitsMoveOnLocationChange(t *testing.T) {
 		if err := (structHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct move: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-702", "struct_move"); got != 1 {
 			t.Errorf("struct_move at NEW location = %d; want 1", got)
 		}
@@ -278,6 +283,7 @@ func TestPhase6_Struct_OnFleetResolvesFleetPlanet(t *testing.T) {
 		if err := (structHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		// Activity should land on the FLEET'S planet (2-704), not the
 		// fleet ID itself.
 		if got := countPlanetActivity(t, tx, "2-704", "struct_move"); got != 1 {
@@ -318,6 +324,7 @@ func TestPhase6_Fleet_EmitsDepartAndArrive(t *testing.T) {
 		if err := (fleetHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("fleet: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-720", "fleet_depart"); got != 1 {
 			t.Errorf("fleet_depart on OLD planet = %d; want 1", got)
 		}
@@ -357,6 +364,7 @@ func TestPhase6_Fleet_AwayStatusIncludesFleetList(t *testing.T) {
 		if err := (fleetHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("fleet: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var detail string
 		if err := tx.QueryRow(ctx,
 			`SELECT detail::text FROM structs.planet_activity
@@ -388,6 +396,7 @@ func TestPhase6_StructAttr_StatusEmitsActivity(t *testing.T) {
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct_attribute: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-730", "struct_status"); got != 1 {
 			t.Errorf("struct_status emit = %d; want 1", got)
 		}
@@ -411,6 +420,7 @@ func TestPhase6_StructAttr_BlockStartOreMineEmits(t *testing.T) {
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct_attribute: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-731", "struct_block_ore_mine_start"); got != 1 {
 			t.Errorf("struct_block_ore_mine_start emit = %d; want 1", got)
 		}
@@ -440,6 +450,7 @@ func TestPhase6_StructAttr_ProtectedIndexDeleteEmitsDefenseRemove(t *testing.T) 
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, setup); err != nil {
 			t.Fatalf("setup: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		// Sanity: defense_add fired on protected planet.
 		if got := countPlanetActivity(t, tx, "2-732", "struct_defense_add"); got != 1 {
 			t.Fatalf("setup struct_defense_add = %d; want 1", got)
@@ -455,6 +466,7 @@ func TestPhase6_StructAttr_ProtectedIndexDeleteEmitsDefenseRemove(t *testing.T) 
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, clear); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-732", "struct_defense_remove"); got != 1 {
 			t.Errorf("struct_defense_remove on delete = %d; want 1 (SQL bug fixed)", got)
 		}
@@ -478,10 +490,12 @@ func TestPhase6_StructAttr_NoOpUpsertSkipsEmit(t *testing.T) {
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("status 1: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		// Re-send same value → IS DISTINCT FROM guard skips the UPDATE.
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("status 2: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-734", "struct_status"); got != 1 {
 			t.Errorf("struct_status emit count = %d; want 1 (no-op repeat should not re-emit)", got)
 		}
@@ -507,6 +521,7 @@ func TestPhase6_Raid_NoEmitWhenUpsertIsNoOp(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("raid first: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		got1 := countPlanetActivity(t, tx, "2-557", "raid_status")
 		// Second call with same (fleet, status) — even with different
 		// seized_ore — should not emit again because the upsert
@@ -514,6 +529,7 @@ func TestPhase6_Raid_NoEmitWhenUpsertIsNoOp(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("raid second: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		got2 := countPlanetActivity(t, tx, "2-557", "raid_status")
 		if got2 != got1 {
 			t.Errorf("no-op upsert re-emitted planet_activity: was=%d now=%d", got1, got2)

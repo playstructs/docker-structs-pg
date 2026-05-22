@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"sync-state/internal/buffers"
 )
 
 // connect opens a single connection to the integration PG. Skips the
@@ -52,7 +54,11 @@ func inTx(t *testing.T, conn *pgx.Conn, body func(tx pgx.Tx)) {
 	body(tx)
 }
 
-// bctx returns a BlockContext suitable for handler tests.
+// bctx returns a BlockContext suitable for handler tests. The Buf is
+// pre-populated so the Phase-2 handlers (which push rows into
+// bctx.Buf.*) don't nil-dereference. Tests that read from the
+// append-only tables (ledger / defusion / planet_activity / stat_*)
+// should flush the buffer before asserting — see flushBuf.
 func bctx() BlockContext {
 	return BlockContext{
 		ChainID:   "test",
@@ -60,6 +66,39 @@ func bctx() BlockContext {
 		BlockTime: time.Now(),
 		TipHeight: 100,
 		TxIndex:   -1, MsgIndex: -1, EventIndex: 0,
+		Buf: buffers.New(),
+	}
+}
+
+// flushBuf empties bc.Buf into tx via pgx.CopyFrom — call after Handle
+// when the test reads back the buffered tables. Safe to call when bc.Buf
+// is nil (no-op).
+func flushBuf(t *testing.T, ctx context.Context, tx pgx.Tx, bc BlockContext) {
+	t.Helper()
+	if bc.Buf == nil {
+		return
+	}
+	if err := bc.Buf.Flush(ctx, tx); err != nil {
+		t.Fatalf("flush buffer: %v", err)
+	}
+}
+
+// handle is the test-time analog of one router dispatch: it ensures bc
+// has a Buf, runs h.Handle, then flushes the buffer so subsequent SELECTs
+// see any rows the handler pushed into ledger / defusion / planet_activity
+// / stat_*. Tests that need to share buffered rows across multiple
+// Handle calls should use a `bc := bctx()` variable directly and call
+// flushBuf themselves at the end.
+func handle(t *testing.T, ctx context.Context, tx pgx.Tx, h Handler, bc BlockContext, raw json.RawMessage) {
+	t.Helper()
+	if bc.Buf == nil {
+		bc.Buf = buffers.New()
+	}
+	if err := h.Handle(ctx, tx, bc, raw); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if err := bc.Buf.Flush(ctx, tx); err != nil {
+		t.Fatalf("flush buffer: %v", err)
 	}
 }
 

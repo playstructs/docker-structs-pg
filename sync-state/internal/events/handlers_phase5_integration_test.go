@@ -21,10 +21,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"sync-state/internal/buffers"
 )
 
 // fixedBctx returns a BlockContext with a pinned BlockTime so tests can
-// assert exact equality on time-series columns.
+// assert exact equality on time-series columns. Buf is pre-allocated so
+// Phase-2 handlers can append without a nil deref; callers that read
+// from the buffered tables should flushBuf before asserting.
 func fixedBctx(height int64) BlockContext {
 	return BlockContext{
 		ChainID:    "test",
@@ -34,6 +38,7 @@ func fixedBctx(height int64) BlockContext {
 		TxIndex:    -1,
 		MsgIndex:   -1,
 		EventIndex: 0,
+		Buf:        buffers.New(),
 	}
 }
 
@@ -89,6 +94,7 @@ func TestHandler_OreMine_WritesLedgerRow(t *testing.T) {
 		if err := (oreMineHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var addr, action, direction, denom string
 		var amountP int64
 		var blockHeight int64
@@ -131,6 +137,7 @@ func TestHandler_OreMigrate_WritesPairedLedgerRows(t *testing.T) {
 		if err := (oreMigrateHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Credit on new
 		var counter string
@@ -169,6 +176,7 @@ func TestHandler_OreTheft_WritesPairedLedgerRows(t *testing.T) {
 		if err := (oreTheftHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		var action, counter string
 		var amount int64
@@ -205,6 +213,7 @@ func TestHandler_AlphaRefine_OreDebitAndUalphaCredit(t *testing.T) {
 		if err := (alphaRefineHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Ore debit: amount_p = 5
 		var amount string
@@ -246,6 +255,7 @@ func TestHandler_Attack_StructOnPlanet_WritesPlanetActivity(t *testing.T) {
 		if err := (structHandler{}).Handle(ctx, tx, bc, structRaw); err != nil {
 			t.Fatalf("seed struct: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		raw := mustJSON(t, map[string]any{
 			"attackerStructId": "5-50001",
@@ -255,6 +265,7 @@ func TestHandler_Attack_StructOnPlanet_WritesPlanetActivity(t *testing.T) {
 		if err := (attackHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("attack: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		var seq int
 		var planet, category string
@@ -294,6 +305,7 @@ func TestHandler_Attack_StructOnFleet_ResolvesPlanet(t *testing.T) {
 		if err := (fleetHandler{}).Handle(ctx, tx, bc, fleetRaw); err != nil {
 			t.Fatalf("seed fleet: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		structRaw := mustJSON(t, map[string]any{
 			"id": "5-50002", "index": 50002, "type": 1, "creator": "c",
 			"owner":          "1-1",
@@ -304,11 +316,13 @@ func TestHandler_Attack_StructOnFleet_ResolvesPlanet(t *testing.T) {
 		if err := (structHandler{}).Handle(ctx, tx, bc, structRaw); err != nil {
 			t.Fatalf("seed struct: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		raw := mustJSON(t, map[string]any{"attackerStructId": "5-50002"})
 		if err := (attackHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("attack: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		var planet string
 		_ = tx.QueryRow(ctx,
@@ -332,6 +346,7 @@ func TestHandler_Attack_UnknownStruct_SkipsCleanly(t *testing.T) {
 		if err := (attackHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("attack should not error on unknown struct: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var rows int
 		_ = tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.planet_activity
@@ -360,6 +375,7 @@ func TestHandler_Raid_InsertThenSeizedOreUpdate(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, ins); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var status string
 		var ore *string
 		_ = tx.QueryRow(ctx,
@@ -380,6 +396,7 @@ func TestHandler_Raid_InsertThenSeizedOreUpdate(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, upd); err != nil {
 			t.Fatalf("update: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		_ = tx.QueryRow(ctx,
 			`SELECT status, seized_ore::text FROM structs.planet_raid WHERE planet_id=$1`,
 			"2-100").Scan(&status, &ore)
@@ -402,6 +419,7 @@ func TestHandler_Raid_SeizedOreOnlyUpdate_SkippedByGuard(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, ins); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 
 		// Now try to change ONLY seized_ore (same fleet, same status).
 		// The IS DISTINCT FROM guard on (fleet, status) means this is a
@@ -413,6 +431,7 @@ func TestHandler_Raid_SeizedOreOnlyUpdate_SkippedByGuard(t *testing.T) {
 		if err := (raidHandler{}).Handle(ctx, tx, bc, upd); err != nil {
 			t.Fatalf("ore-only update: %v", err)
 		}
+			flushBuf(t, ctx, tx, bc)
 		var ore string
 		_ = tx.QueryRow(ctx, `SELECT seized_ore::text FROM structs.planet_raid WHERE planet_id=$1`, "2-101").Scan(&ore)
 		if ore != "10" {

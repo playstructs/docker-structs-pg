@@ -455,9 +455,15 @@ type orderedTimeseriesSpec struct {
 }
 
 var orderedTimeseriesSpecs = []orderedTimeseriesSpec{
-	{table: "ledger", partitionSQL: "address, denom", orderSQL: "created_at, block_height"},
+	// structs.ledger uses `time` (defaulted to NOW() at insert) and `block_height`.
+	// There is no `created_at` column — using one regresses to a runtime
+	// 42703 from the check itself, which masks real inversions.
+	{table: "ledger", partitionSQL: "address, denom", orderSQL: "time, block_height"},
 	{table: "planet_activity", partitionSQL: "planet_id", orderSQL: "time, seq"},
-	{table: "defusion", partitionSQL: "address", orderSQL: "created_at, block_height"},
+	// structs.defusion has no block_height column (only completed_at +
+	// created_at), so block_height inversion analysis is structurally
+	// impossible here. checkOrderedTimeseriesMonotonic relies on a
+	// non-empty block_height column; defusion is intentionally excluded.
 	{table: "stat_ore", partitionSQL: "object_type, object_index", orderSQL: "time, block_height"},
 	{table: "stat_fuel", partitionSQL: "object_type, object_index", orderSQL: "time, block_height"},
 	{table: "stat_capacity", partitionSQL: "object_type, object_index", orderSQL: "time, block_height"},

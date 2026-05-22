@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -151,10 +152,6 @@ func emitFleetMoveActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p 
 	return nil
 }
 
-const fleetMoveInsertSQL = `
-INSERT INTO structs.planet_activity (time, seq, planet_id, category, detail, block_height)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6)`
-
 // fleetMoveListSQL walks the per-planet linked list of "away" fleets
 // starting from the queue head (location_list_forward = ''). Mirrors
 // the WITH RECURSIVE in PLANET_ACTIVITY_FLEET_MOVE. We do this only
@@ -199,16 +196,14 @@ func emitFleetMoveSide(ctx context.Context, tx pgx.Tx, bctx BlockContext, fleetI
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
-	if _, err := tx.Exec(ctx, fleetMoveInsertSQL,
-		bctx.BlockTime.UTC(),
-		seq,
-		planetID,
-		category,
-		detailJSON,
-		bctx.Height,
-	); err != nil {
-		return err
-	}
+	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
+		Time:        bctx.BlockTime.UTC(),
+		Seq:         int64(seq),
+		PlanetID:    planetID,
+		Category:    category,
+		Detail:      detailJSON,
+		BlockHeight: bctx.Height,
+	})
 	return nil
 }
 

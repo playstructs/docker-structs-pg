@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"sync-state/internal/buffers"
 )
 
 // Handler is implemented by one struct per chain event sync-state knows how
@@ -62,4 +64,11 @@ type BlockContext struct {
 	// handlers in isolation.
 	NextPlanetActivitySeq   func(ctx context.Context, tx pgx.Tx, planetID string) (int64, error)
 	ResolveActivityLocation func(ctx context.Context, tx pgx.Tx, structID string) (string, error)
+
+	// Buf is the per-block (streaming) or per-window (bulk) append-only
+	// row buffer. Handlers that write to ledger / defusion /
+	// planet_activity / stat_* push rows here; the orchestrator
+	// pgx.CopyFrom-flushes them before commit. nil-safe so tests that
+	// drive handlers in isolation don't need to construct one.
+	Buf *buffers.Buffer
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -32,11 +33,6 @@ func (oreMineHandler) CompositeKey() string {
 	return "structs.structs.EventOreMine.eventOreMineDetail"
 }
 
-const oreMineInsertSQL = `
-INSERT INTO structs.ledger (
-    address, counterparty, amount_p, block_height, time, action, direction, denom
-) VALUES ($1, NULL, $2, $3, $4, 'mined', 'credit', 'ore')`
-
 func (oreMineHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.OreMine](raw)
 	if err != nil {
@@ -45,13 +41,15 @@ func (oreMineHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, 
 	if p.PrimaryAddress == "" {
 		return fmt.Errorf("ore_mine: empty primaryAddress")
 	}
-	if _, err := tx.Exec(ctx, oreMineInsertSQL,
-		p.PrimaryAddress,
-		p.Amount.PgValue(),
-		bctx.Height,
-		bctx.BlockTime.UTC(),
-	); err != nil {
-		return fmt.Errorf("ore_mine insert addr=%s: %w", p.PrimaryAddress, err)
-	}
+	bctx.Buf.Ledger = append(bctx.Buf.Ledger, buffers.LedgerRow{
+		Address:     p.PrimaryAddress,
+		AmountP:     p.Amount.String(),
+		BlockHeight: bctx.Height,
+		Time:        bctx.BlockTime.UTC(),
+		Action:      "mined",
+		Direction:   "credit",
+		Denom:       "ore",
+	})
+	_ = tx // tx unused — leaf row deferred to buffers.Flush
 	return nil
 }

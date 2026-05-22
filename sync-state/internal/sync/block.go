@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/bank"
+	"sync-state/internal/buffers"
 	"sync-state/internal/db"
 	"sync-state/internal/events"
 	"sync-state/internal/rpc"
@@ -59,9 +60,13 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 		}
 	}()
 
-	res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, applyOpts{})
+	buf := buffers.New()
+	res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, applyOpts{})
 	if err != nil {
 		return err
+	}
+	if err := buf.Flush(ctx, tx); err != nil {
+		return fmt.Errorf("flush buffer h=%d: %w", bundle.Height, err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -80,7 +85,11 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 // applyBlockInTx writes everything for one block inside an existing tx.
 // See applyBlock for the full step list. Handler errors are returned for
 // the caller to persist after commit.
-func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBundle, tipHeight int64, opts applyOpts) (*blockApplyResult, error) {
+//
+// buf is the per-block (streaming) or per-window (bulk) append-only row
+// buffer. Event handlers and bank.ProcessBlock push rows into buf;
+// callers are responsible for invoking buf.Flush(ctx, tx) before commit.
+func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBundle, tipHeight int64, buf *buffers.Buffer, opts applyOpts) (*blockApplyResult, error) {
 	if !opts.SkipStatementTimeout && s.cfg.StatementTimeout > 0 {
 		ms := s.cfg.StatementTimeout.Milliseconds()
 		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", ms)); err != nil {
@@ -90,18 +99,24 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 
 	pendingErrs := make([]events.HandlerError, 0)
 	numEvents := 0
-	if err := s.dispatchEvents(ctx, tx, bundle, &pendingErrs, &numEvents); err != nil {
+	if err := s.dispatchEvents(ctx, tx, bundle, buf, &pendingErrs, &numEvents); err != nil {
 		return nil, fmt.Errorf("dispatch h=%d: %w", bundle.Height, err)
 	}
 
+	// Snapshot the buffer around the bank savepoint so a bank
+	// ProcessBlock failure truncates the rows it appended before
+	// returning. Mirrors the per-handler snapshot/restore in
+	// events.Router.Dispatch.
+	bankBufSnap := buf.Snapshot()
 	if bankSP, bankErr := tx.Begin(ctx); bankErr != nil {
 		pendingErrs = append(pendingErrs, events.HandlerError{
 			CompositeKey: "bank.process_block",
 			Error:        fmt.Sprintf("savepoint begin: %v", bankErr),
 			Severity:     events.SeverityError,
 		})
-	} else if err := bank.ProcessBlock(ctx, bankSP, bundle.Height, bundle.BlockTime, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
+	} else if err := bank.ProcessBlock(ctx, bankSP, buf, bundle.Height, bundle.BlockTime, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
 		_ = bankSP.Rollback(ctx)
+		buf.Restore(bankBufSnap)
 		pendingErrs = append(pendingErrs, events.HandlerError{
 			CompositeKey: "bank.process_block",
 			Error:        err.Error(),
@@ -181,13 +196,13 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 //
 // Within an event we walk attributes in attribute order, dedup'd by key
 // (keep first occurrence) to match cache.attributes's UNIQUE constraint.
-func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, errs *[]events.HandlerError, numEvents *int) error {
+func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, buf *buffers.Buffer, errs *[]events.HandlerError, numEvents *int) error {
 	bctx := events.BlockContext{
 		ChainID:   b.ChainID,
 		Height:    b.Height,
 		BlockTime: b.BlockTime,
 		TipHeight: b.Height, // applyBlock tracks tipHeight separately; handlers don't currently need it
-		// helpers wired in later phases
+		Buf:       buf,
 	}
 
 	// Finalize-block events (BeginBlock/EndBlock): tx_index = -1.

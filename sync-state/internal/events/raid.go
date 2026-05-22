@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -72,10 +73,6 @@ func (raidHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 // jsonb mirrors the trigger's jsonb_build_object exactly. Uses
 // bctx.BlockTime instead of NOW() so replays and backfills land at the
 // correct historical timestamp (TimescaleDB hypertable partitioning).
-const raidStatusActivityInsertSQL = `
-INSERT INTO structs.planet_activity (time, seq, planet_id, category, detail, block_height)
-VALUES ($1, $2, $3, 'raid_status', $4::jsonb, $5)`
-
 func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Raid) error {
 	seq, err := nextPlanetActivitySeq(ctx, tx, p.PlanetID)
 	if err != nil {
@@ -89,14 +86,14 @@ func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
-	if _, err := tx.Exec(ctx, raidStatusActivityInsertSQL,
-		bctx.BlockTime.UTC(),
-		seq,
-		p.PlanetID,
-		detail,
-		bctx.Height,
-	); err != nil {
-		return err
-	}
+	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
+		Time:        bctx.BlockTime.UTC(),
+		Seq:         int64(seq),
+		PlanetID:    p.PlanetID,
+		Category:    "raid_status",
+		Detail:      detail,
+		BlockHeight: bctx.Height,
+	})
+	_ = ctx
 	return nil
 }

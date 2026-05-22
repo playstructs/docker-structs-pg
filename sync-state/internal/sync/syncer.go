@@ -62,6 +62,18 @@ type fetchResult struct {
 	err    error
 }
 
+// fetchedWindow is one fully-fetched contiguous window of blocks, ready to
+// hand to the applier. Used by the Run loop's prefetch pipeline so the
+// fetch of window N+1 overlaps the apply of window N (matters in bulk mode
+// where apply is a single ~800ms transaction).
+type fetchedWindow struct {
+	start, end int64
+	tip        int64
+	useBulk    bool
+	bundles    []*BlockBundle
+	err        error
+}
+
 // Run starts ingesting from `start`. Blocks until ctx is cancelled or
 // stopHeight/one-shot conditions are met.
 //
@@ -70,9 +82,26 @@ type fetchResult struct {
 // case where the node is itself catching up to the chain tip. sync-state
 // processes whatever blocks the node has made available, sleeps when
 // there's nothing new, and resumes automatically. No restart needed.
+//
+// Bulk pipeline: while window N is committing (~800ms in bulk mode), the
+// fetcher for window N+1 runs in parallel via a 1-deep prefetch buffer
+// (`prefetched` channel). This recovers the wall-clock throughput lost
+// when bulk mode replaced "stream apply during fetch" with "fetch all,
+// then apply". Streaming mode skips prefetch (its inner select already
+// overlaps fetch + apply per block).
 func (s *Syncer) Run(ctx context.Context, start int64) error {
 	next := start
 	var lastTipLog time.Time
+	// At most one pre-fetched window in flight. nil = nothing prefetched.
+	// We never queue more than one because (a) it bounds memory and (b)
+	// tip/useBulk decisions are re-made each iteration on fresh /status.
+	var prefetched <-chan fetchedWindow
+
+	// drainPrefetch cancels and waits for the prefetch goroutine to exit
+	// when we need to discard it (tip recompute, ctx cancel, fatal err).
+	prefetchCancel := func() {}
+	defer func() { prefetchCancel() }()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -98,16 +127,19 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 		}
 
 		if next > end {
+			// Tip-idle. Any prefetched bundle is stale (its tip and useBulk
+			// decision are from before this idle period); discard so the
+			// next active window re-decides cleanly.
+			if prefetched != nil {
+				prefetchCancel()
+				<-prefetched
+				prefetched = nil
+				prefetchCancel = func() {}
+			}
 			if s.cfg.OneShot || (s.cfg.StopHeight > 0 && next > s.cfg.StopHeight) {
 				return nil
 			}
-			// Bookkeeping: update cursor status to current/syncing so
-			// the webapp's heartbeat stays fresh even without new blocks.
 			s.updateCursorTip(ctx, next-1, tip)
-			// Periodic visibility while idling at tip. Rate-limited so
-			// the operator sees we're alive without log spam. Includes
-			// the upstream node's catching_up state so it's obvious
-			// when we're waiting on the NODE (not the chain).
 			if time.Since(lastTipLog) >= 30*time.Second {
 				switch {
 				case status.SyncInfo.CatchingUp:
@@ -124,8 +156,6 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 			}
 			continue
 		}
-		// We have work to do; reset the at-tip rate-limiter so the next
-		// quiet stretch logs promptly.
 		lastTipLog = time.Time{}
 
 		lag := end - next + 1
@@ -135,15 +165,64 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 		if windowEnd > end {
 			windowEnd = end
 		}
-		if err := s.syncWindow(ctx, next, windowEnd, tip, useBulk); err != nil {
+
+		// Fetch this window: either consume the prefetch from the previous
+		// iteration, or fetch synchronously if we don't have one yet (first
+		// iteration, or just transitioned from streaming → bulk, or the
+		// prefetch's tip is stale).
+		var fw fetchedWindow
+		if prefetched != nil {
+			fw = <-prefetched
+			prefetched = nil
+			prefetchCancel = func() {}
+			// If the prefetched window doesn't match what we'd plan now
+			// (tip advanced, lag class changed, or end re-clamped), the
+			// fetch was wasted; discard and re-fetch synchronously. Cheap
+			// because we only ever pre-fetch one window.
+			if fw.start != next || fw.end != windowEnd || fw.useBulk != useBulk {
+				fw = fetchedWindow{}
+			}
+		}
+		if fw.bundles == nil && fw.err == nil {
+			fw = s.fetchWindow(ctx, next, windowEnd, tip, useBulk)
+		}
+		if fw.err != nil {
+			return fmt.Errorf("fetch [%d..%d]: %w", next, windowEnd, fw.err)
+		}
+
+		// Start prefetching the NEXT window now (before we apply the
+		// current one). Only in bulk mode — streaming already overlaps
+		// fetch + apply per block. Skip when we're on the last window.
+		if useBulk && windowEnd < end {
+			nextStart := windowEnd + 1
+			nextEnd := nextStart + int64(s.effectiveWindowSize(true)) - 1
+			if nextEnd > end {
+				nextEnd = end
+			}
+			pCtx, pCancel := context.WithCancel(ctx)
+			ch := make(chan fetchedWindow, 1)
+			go func() {
+				ch <- s.fetchWindow(pCtx, nextStart, nextEnd, tip, true)
+			}()
+			prefetched = ch
+			prefetchCancel = pCancel
+		}
+
+		if err := s.applyFetched(ctx, fw); err != nil {
+			// Discard any prefetch before returning so the goroutine doesn't
+			// leak when the caller decides to abort.
+			if prefetched != nil {
+				prefetchCancel()
+				<-prefetched
+			}
 			return err
 		}
 		next = windowEnd + 1
 	}
 }
 
-// effectiveWindowSize returns how many blocks syncWindow fetches/applies
-// per iteration. In bulk mode the window is capped at BulkWindow.
+// effectiveWindowSize returns how many blocks one fetch/apply cycle covers.
+// In bulk mode the window is capped at BulkWindow.
 func (s *Syncer) effectiveWindowSize(useBulk bool) int {
 	if !useBulk {
 		return s.cfg.BatchSize
@@ -157,8 +236,19 @@ func (s *Syncer) effectiveWindowSize(useBulk bool) int {
 	return s.cfg.BulkWindow
 }
 
-func (s *Syncer) syncWindow(ctx context.Context, start, end, tip int64, useBulk bool) error {
-	ctx, cancel := context.WithCancel(ctx)
+// fetchWindow fetches blocks [start..end] in parallel (Parallelism workers),
+// reorders the results into ascending order, and returns one fetchedWindow.
+// In streaming mode it also applies each block as it lands — keeping the
+// pre-bulk semantics where the fetch + apply pipeline naturally overlaps.
+//
+// In bulk mode the function only fetches; the caller invokes applyFetched
+// which runs the whole window through applyBulkWindow in one outer tx.
+// Splitting fetch/apply this way is what lets Run() prefetch window N+1
+// while window N's bulk commit is in flight.
+func (s *Syncer) fetchWindow(ctx context.Context, start, end, tip int64, useBulk bool) fetchedWindow {
+	fw := fetchedWindow{start: start, end: end, tip: tip, useBulk: useBulk}
+
+	wCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	sem := make(chan struct{}, s.cfg.Parallelism)
@@ -168,16 +258,16 @@ func (s *Syncer) syncWindow(ctx context.Context, start, end, tip int64, useBulk 
 		for h := start; h <= end; h++ {
 			select {
 			case sem <- struct{}{}:
-			case <-ctx.Done():
+			case <-wCtx.Done():
 				return
 			}
 			h := h
 			go func() {
 				defer func() { <-sem }()
-				bundle, err := s.fetchBundle(ctx, h)
+				bundle, err := s.fetchBundle(wCtx, h)
 				select {
 				case results <- fetchResult{height: h, bundle: bundle, err: err}:
-				case <-ctx.Done():
+				case <-wCtx.Done():
 				}
 			}()
 		}
@@ -187,18 +277,23 @@ func (s *Syncer) syncWindow(ctx context.Context, start, end, tip int64, useBulk 
 	expected := start
 	startedAt := time.Now()
 	processedInWindow := int64(0)
+	var streamBundles []*BlockBundle
 	var bulkBundles []*BlockBundle
 	if useBulk {
 		bulkBundles = make([]*BlockBundle, 0, end-start+1)
+	} else {
+		streamBundles = make([]*BlockBundle, 0, end-start+1)
 	}
 
 	for expected <= end {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-wCtx.Done():
+			fw.err = wCtx.Err()
+			return fw
 		case r := <-results:
 			if r.err != nil {
-				return fmt.Errorf("fetch h=%d: %w", r.height, r.err)
+				fw.err = fmt.Errorf("fetch h=%d: %w", r.height, r.err)
+				return fw
 			}
 			pending[r.height] = r.bundle
 			for {
@@ -209,8 +304,14 @@ func (s *Syncer) syncWindow(ctx context.Context, start, end, tip int64, useBulk 
 				delete(pending, expected)
 				if useBulk {
 					bulkBundles = append(bulkBundles, bundle)
-				} else if err := s.applyBlock(ctx, bundle, tip); err != nil {
-					return fmt.Errorf("apply h=%d: %w", expected, err)
+				} else {
+					// Streaming: apply immediately so the apply
+					// pipeline overlaps with in-flight fetches.
+					if err := s.applyBlock(ctx, bundle, tip); err != nil {
+						fw.err = fmt.Errorf("apply h=%d: %w", expected, err)
+						return fw
+					}
+					streamBundles = append(streamBundles, bundle)
 				}
 				processedInWindow++
 				if s.cfg.LogEvery > 0 && expected%int64(s.cfg.LogEvery) == 0 {
@@ -220,7 +321,7 @@ func (s *Syncer) syncWindow(ctx context.Context, start, end, tip int64, useBulk 
 					if useBulk {
 						mode = "bulk"
 					}
-					s.logger.Printf("synced h=%d (window %d-%d, %s, %.1f blocks/s, lag=%d)",
+					s.logger.Printf("fetched h=%d (window %d-%d, %s, %.1f blocks/s, lag=%d)",
 						expected, start, end, mode, rate, tip-expected)
 				}
 				expected++
@@ -229,19 +330,33 @@ func (s *Syncer) syncWindow(ctx context.Context, start, end, tip int64, useBulk 
 	}
 
 	if useBulk {
-		if err := s.applyBulkWindow(ctx, bulkBundles, tip); err != nil {
-			return fmt.Errorf("bulk apply [%d..%d]: %w", start, end, err)
+		fw.bundles = bulkBundles
+	} else {
+		fw.bundles = streamBundles
+	}
+	return fw
+}
+
+// applyFetched commits a previously-fetched window. In bulk mode this is
+// one applyBulkWindow call (the per-window tx). In streaming mode the
+// per-block applies already happened inside fetchWindow; this just logs
+// the window summary and flushes the unknown-key deltas.
+func (s *Syncer) applyFetched(ctx context.Context, fw fetchedWindow) error {
+	startedAt := time.Now()
+	if fw.useBulk {
+		if err := s.applyBulkWindow(ctx, fw.bundles, fw.tip); err != nil {
+			return fmt.Errorf("bulk apply [%d..%d]: %w", fw.start, fw.end, err)
 		}
 	}
-
 	dur := time.Since(startedAt)
 	modeLabel := "stream"
-	if useBulk {
+	if fw.useBulk {
 		modeLabel = "bulk"
 	}
+	n := fw.end - fw.start + 1
 	s.logger.Printf("window done (%s): %d blocks [%d..%d] in %s (%.1f blocks/s)",
-		modeLabel, end-start+1, start, end, dur.Round(time.Millisecond),
-		float64(end-start+1)/dur.Seconds())
+		modeLabel, n, fw.start, fw.end, dur.Round(time.Millisecond),
+		float64(n)/dur.Seconds())
 
 	// Persist any unknown composite_keys we accumulated this window so
 	// operators can query sync_state.unknown_event_log to see the full

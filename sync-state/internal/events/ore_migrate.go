@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -24,13 +25,6 @@ func (oreMigrateHandler) CompositeKey() string {
 	return "structs.structs.EventOreMigrate.eventOreMigrateDetail"
 }
 
-const oreMigrateInsertSQL = `
-INSERT INTO structs.ledger (
-    address, counterparty, amount_p, block_height, time, action, direction, denom
-) VALUES
-    ($1, $2, $3, $4, $5, 'migrated', 'credit', 'ore'),
-    ($2, $1, $3, $4, $5, 'migrated', 'debit',  'ore')`
-
 func (oreMigrateHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.OreMigrate](raw)
 	if err != nil {
@@ -39,14 +33,12 @@ func (oreMigrateHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 	if p.PrimaryAddress == "" || p.OldPrimaryAddress == "" {
 		return fmt.Errorf("ore_migrate: missing address (new=%q old=%q)", p.PrimaryAddress, p.OldPrimaryAddress)
 	}
-	if _, err := tx.Exec(ctx, oreMigrateInsertSQL,
-		p.PrimaryAddress,
-		p.OldPrimaryAddress,
-		p.Amount.PgValue(),
-		bctx.Height,
-		bctx.BlockTime.UTC(),
-	); err != nil {
-		return fmt.Errorf("ore_migrate insert new=%s old=%s: %w", p.PrimaryAddress, p.OldPrimaryAddress, err)
-	}
+	amt := p.Amount.String()
+	t := bctx.BlockTime.UTC()
+	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
+		buffers.LedgerRow{Address: p.PrimaryAddress, Counterparty: p.OldPrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "migrated", Direction: "credit", Denom: "ore"},
+		buffers.LedgerRow{Address: p.OldPrimaryAddress, Counterparty: p.PrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "migrated", Direction: "debit", Denom: "ore"},
+	)
+	_ = tx
 	return nil
 }

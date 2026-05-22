@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
+	"sync-state/internal/buffers"
 )
 
 func TestRouter_Dispatch_WarnSentinelKeepsTxOpen(t *testing.T) {
@@ -26,9 +28,10 @@ func TestRouter_Dispatch_WarnSentinelKeepsTxOpen(t *testing.T) {
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
 
+		buf := buffers.New()
 		// Malformed attributeId -> ErrSkipWithWarn -> Severity="warn".
 		raw, _ := json.Marshal(map[string]any{"attributeId": "2-", "value": "1"})
-		he, fatal := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 0}, ck, raw)
+		he, fatal := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 0, Buf: buf}, ck, raw)
 		if fatal != nil {
 			t.Fatalf("warn dispatch returned fatal: %v", fatal)
 		}
@@ -42,7 +45,7 @@ func TestRouter_Dispatch_WarnSentinelKeepsTxOpen(t *testing.T) {
 		// Outer tx is still usable: a follow-up well-formed grid event
 		// should land normally without "current transaction is aborted".
 		raw2, _ := json.Marshal(map[string]any{"attributeId": "0-5-99999", "value": "42"})
-		he2, fatal2 := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 1}, ck, raw2)
+		he2, fatal2 := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 1, Buf: buf}, ck, raw2)
 		if fatal2 != nil {
 			t.Fatalf("post-warn dispatch returned fatal: %v", fatal2)
 		}
@@ -60,11 +63,12 @@ func TestRouter_Dispatch_HardErrorRollsBackSavepoint(t *testing.T) {
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
 
+		buf := buffers.New()
 		// Non-numeric attributeId is a real chain bug — handler returns
 		// a plain error (NOT ErrSkipWithWarn) so severity must be
 		// "error" and the savepoint rolled back.
 		raw, _ := json.Marshal(map[string]any{"attributeId": "abc-1-2", "value": "1"})
-		he, fatal := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 0}, ck, raw)
+		he, fatal := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 0, Buf: buf}, ck, raw)
 		if fatal != nil {
 			t.Fatalf("error dispatch returned fatal: %v", fatal)
 		}
@@ -78,7 +82,7 @@ func TestRouter_Dispatch_HardErrorRollsBackSavepoint(t *testing.T) {
 		// Outer tx is still usable post-rollback (the whole point of
 		// the SAVEPOINT — proven by another dispatch landing cleanly).
 		raw2, _ := json.Marshal(map[string]any{"attributeId": "0-5-99998", "value": "100"})
-		he2, fatal2 := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 1}, ck, raw2)
+		he2, fatal2 := r.Dispatch(ctx, tx, BlockContext{ChainID: "test", Height: 1, TxIndex: -1, MsgIndex: -1, EventIndex: 1, Buf: buf}, ck, raw2)
 		if fatal2 != nil || he2 != nil {
 			t.Errorf("post-error dispatch should be clean: fatal=%v he=%+v", fatal2, he2)
 		}

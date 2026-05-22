@@ -167,12 +167,18 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		}, nil
 	}
 
+	// Snapshot the per-block append-only buffer so any rows the handler
+	// pushes before failing get truncated alongside the SAVEPOINT
+	// rollback. Nil-safe — only the sync orchestrator wires Buf.
+	bufSnap := bctx.Buf.Snapshot()
+
 	// recover() so a panic in one handler doesn't abort the whole block;
 	// the block still commits (other handlers + cursor + block_log), but
 	// the event ends up in handler_error_log for replay.
 	defer func() {
 		if rec := recover(); rec != nil {
 			_ = sp.Rollback(ctx)
+			bctx.Buf.Restore(bufSnap)
 			he = &HandlerError{
 				CompositeKey: compositeKey,
 				Payload:      raw,
@@ -223,6 +229,7 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		// survives. Ignore rollback errors (handler error is more
 		// interesting; outer tx may still be alive).
 		_ = sp.Rollback(ctx)
+		bctx.Buf.Restore(bufSnap)
 		return &HandlerError{
 			CompositeKey: compositeKey,
 			Payload:      raw,

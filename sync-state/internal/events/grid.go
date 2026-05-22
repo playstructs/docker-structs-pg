@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/objecttype"
 	"sync-state/internal/payload"
 )
@@ -74,24 +75,15 @@ ON CONFLICT (id) DO UPDATE
        updated_at = EXCLUDED.updated_at
  WHERE structs.grid.val IS DISTINCT FROM EXCLUDED.val`
 
-// Stat-table inserts, one per sub-index 0..7. Pre-built so the dispatch
-// is dead-simple and PG's plan cache gets stable text. Sub-indexes 4, 6,
-// 7 omit the object_type column to match table-stat.sql:99-130.
+// Stat rows for sub-indexes 0..7 are buffered (see internal/buffers) and
+// flushed via pgx.CopyFrom at end-of-block / end-of-window. The legacy
+// per-row INSERT SQL was removed when the bulk-COPY path landed.
 //
-// Every INSERT names its columns explicitly (rather than positional) so
-// the Phase A4 addition of block_height doesn't depend on the table's
-// physical column order. block_height comes from bctx.Height at the call
-// site so replays land the correct historical block.
-const (
-	statOreInsertSQL                = `INSERT INTO structs.stat_ore (time, object_type, object_index, value, block_height) VALUES (NOW(), $1::structs.object_type, $2, $3, $4)`
-	statFuelInsertSQL               = `INSERT INTO structs.stat_fuel (time, object_type, object_index, value, block_height) VALUES (NOW(), $1::structs.object_type, $2, $3, $4)`
-	statCapacityInsertSQL           = `INSERT INTO structs.stat_capacity (time, object_type, object_index, value, block_height) VALUES (NOW(), $1::structs.object_type, $2, $3, $4)`
-	statLoadInsertSQL               = `INSERT INTO structs.stat_load (time, object_type, object_index, value, block_height) VALUES (NOW(), $1::structs.object_type, $2, $3, $4)`
-	statStructsLoadInsertSQL        = `INSERT INTO structs.stat_structs_load (time, object_index, value, block_height) VALUES (NOW(), $1, $2, $3)`
-	statPowerInsertSQL              = `INSERT INTO structs.stat_power (time, object_type, object_index, value, block_height) VALUES (NOW(), $1::structs.object_type, $2, $3, $4)`
-	statConnectionCapacityInsertSQL = `INSERT INTO structs.stat_connection_capacity (time, object_index, value, block_height) VALUES (NOW(), $1, $2, $3)`
-	statConnectionCountInsertSQL    = `INSERT INTO structs.stat_connection_count (time, object_index, value, block_height) VALUES (NOW(), $1, $2, $3)`
-)
+// Phase 2 also fixed a long-standing replay smell: stat_* used `time =
+// NOW()` instead of the block time. The buffer path now stamps each row
+// with bctx.BlockTime so backfills and replays land in the correct
+// TimescaleDB chunk and `time` is comparable to other height/time
+// columns.
 
 func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Grid](raw)
@@ -115,7 +107,7 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 			return fmt.Errorf("grid delete id=%s: %w", p.AttributeID, err)
 		}
 		if tag.RowsAffected() > 0 {
-			if err := writeGridStat(ctx, tx, bctx.Height, subIdx, objTypeID, objIndex, 0); err != nil {
+			if err := writeGridStat(bctx, subIdx, objTypeID, objIndex, 0); err != nil {
 				return fmt.Errorf("grid stat (delete branch) id=%s: %w", p.AttributeID, err)
 			}
 		}
@@ -149,7 +141,7 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 		return fmt.Errorf("grid upsert id=%s: %w", p.AttributeID, err)
 	}
 	if tag.RowsAffected() > 0 {
-		if err := writeGridStat(ctx, tx, bctx.Height, subIdx, objTypeID, objIndex, val); err != nil {
+		if err := writeGridStat(bctx, subIdx, objTypeID, objIndex, val); err != nil {
 			return fmt.Errorf("grid stat (upsert branch) id=%s: %w", p.AttributeID, err)
 		}
 	}
@@ -201,62 +193,53 @@ func gridLabelFor(subIdx int) string {
 	return gridAttrLabels[subIdx]
 }
 
-// writeGridStat inserts the stat_* row for sub-indexes 0..7. 8..14 (and
+// writeGridStat buffers the stat_* row for sub-indexes 0..7. 8..14 (and
 // anything else) are no-ops — the SQL CASE has no ELSE clause for those.
 // Sub-indexes that bind object_type (NOT NULL on the stat hypertables)
 // require objTypeID to be a valid 0..11 enum id; otherwise we surface the
-// error rather than insert NULL into a NOT NULL column.
+// error rather than buffer a NULL into a NOT NULL column.
 //
-// blockHeight is plumbed through every branch so the new
-// stat_*.block_height column lands a non-NULL value on every write
-// (Phase A4 — feeds the verify check that asserts NULL counts trend
-// toward zero).
-func writeGridStat(ctx context.Context, tx pgx.Tx, blockHeight int64, subIdx, objTypeID, objIndex int, val int64) error {
+// blockHeight and time both come from bctx so replays + bulk windows
+// land the correct historical block in the right TimescaleDB chunk.
+func writeGridStat(bctx BlockContext, subIdx, objTypeID, objIndex int, val int64) error {
+	t := bctx.BlockTime.UTC()
 	switch subIdx {
 	case 0:
-		t, err := requireObjectTypeLabel(objTypeID)
+		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, statOreInsertSQL, t, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatOre = append(bctx.Buf.StatOre, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 1:
-		t, err := requireObjectTypeLabel(objTypeID)
+		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, statFuelInsertSQL, t, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatFuel = append(bctx.Buf.StatFuel, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 2:
-		t, err := requireObjectTypeLabel(objTypeID)
+		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, statCapacityInsertSQL, t, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatCapacity = append(bctx.Buf.StatCapacity, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 3:
-		t, err := requireObjectTypeLabel(objTypeID)
+		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, statLoadInsertSQL, t, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatLoad = append(bctx.Buf.StatLoad, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 4:
-		_, err := tx.Exec(ctx, statStructsLoadInsertSQL, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatStructsLoad = append(bctx.Buf.StatStructsLoad, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 5:
-		t, err := requireObjectTypeLabel(objTypeID)
+		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, statPowerInsertSQL, t, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatPower = append(bctx.Buf.StatPower, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 6:
-		_, err := tx.Exec(ctx, statConnectionCapacityInsertSQL, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatConnectionCapacity = append(bctx.Buf.StatConnectionCapacity, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	case 7:
-		_, err := tx.Exec(ctx, statConnectionCountInsertSQL, objIndex, val, blockHeight)
-		return err
+		bctx.Buf.StatConnectionCount = append(bctx.Buf.StatConnectionCount, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
 	}
 	return nil
 }

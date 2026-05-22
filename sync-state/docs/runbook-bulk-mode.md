@@ -1,9 +1,19 @@
-# Bulk-load mode (deferred commit)
+# Bulk-load mode (deferred commit + buffered COPY)
 
-Phase 1 bulk mode reduces catch-up time by committing every **N blocks** in one
-PostgreSQL transaction instead of one transaction per block. **Event order,
-handler logic, and per-row INSERT/UPSERT semantics are unchanged** — only commit
-frequency and cursor/heartbeat cadence differ.
+Bulk mode reduces catch-up time in two layers:
+
+1. **Phase 1 — deferred commit.** Every **N blocks** commit in one PostgreSQL
+   transaction instead of one transaction per block.
+2. **Phase 2 — buffered COPY.** Every append-only structs.* row written during
+   the window (ledger, defusion, planet_activity, stat_*) is buffered in memory
+   and flushed via `pgx.CopyFrom` immediately before the outer commit. Streaming
+   mode uses the same buffer with a per-block flush — UPSERT/UPDATE writes
+   continue to run inline so `IS DISTINCT FROM` guards and prev-row reads keep
+   their normal semantics.
+
+**Event order, handler logic, and per-row INSERT/UPSERT semantics are
+unchanged** — only commit frequency, cursor/heartbeat cadence, and the wire
+protocol used for the append-only inserts differ.
 
 ## When it activates
 
@@ -41,15 +51,36 @@ At tip:
 window done (stream): 1 blocks [809638..809638] in 38ms (26.6 blocks/s)
 ```
 
+There is no separate log line for "buffer flushed N rows" — the flush is part
+of the per-window commit. If you need to spot-check, run a verify that
+includes `ordered_timeseries_monotonic` and `ledger_balance_sanity`
+immediately after a window; both checks read the same tables the buffer
+flushed.
+
 ## Data integrity
 
 Bulk mode preserves chain order:
 
 1. Blocks processed strictly ascending
 2. Events within each block in RPC order (finalize → per-tx)
-3. Per-handler SAVEPOINTs unchanged
+3. Per-handler SAVEPOINTs unchanged — a handler-level failure rolls back its
+   savepoint AND truncates any rows it appended to the buffer
 4. `sync_state.block_log` still one row per block inside the outer tx
 5. On failure, the whole window rolls back; cursor unchanged; retry is safe
+
+Phase 2 buffer flush ordering:
+
+| Table | Order within flush | Order across rows |
+|-------|--------------------|-------------------|
+| `structs.ledger` | append order | block order, then chain event order |
+| `structs.defusion` | append order | block order, then chain event order |
+| `structs.planet_activity` | append order; `seq` assigned by `nextPlanetActivitySeq` UPSERT at handler time, so `(planet_id, seq)` stays unique and monotonic | block order, then chain event order |
+| `structs.stat_*` | append order | block order, then chain event order |
+
+`time` on `structs.stat_*` rows now comes from `bctx.BlockTime` instead of
+`NOW()`. The legacy `NOW()` value drifted further from `block_time` the longer
+a backfill took; the new value matches the block being processed and lands in
+the correct TimescaleDB chunk.
 
 Verify after catch-up:
 
@@ -95,9 +126,14 @@ ordering issue.
 - Re-run reprocesses the same blocks deterministically
 - `-bulk-enabled=false` restores legacy one-tx-per-block behaviour instantly
 
-## What bulk mode does *not* change (Phase 1)
+## What bulk mode does *not* change
 
-- No COPY/batch INSERT yet (Phase 2 roadmap)
 - No parallel block apply
-- No handler SQL changes
-- Webapp at tip: unchanged (streaming mode)
+- No handler SQL changes for UPSERT/UPDATE paths (struct, fleet, planet,
+  infusion, grid, planet_raid, etc. still flow through `tx.Exec` with the
+  `IS DISTINCT FROM` guards intact)
+- Webapp at tip: unchanged (streaming mode emits `pg_notify('grass', …)` per
+  block as before)
+- `sync_state.raw_*` mirror (when `-mirror-raw` is set) still uses
+  `pgx.CopyFrom` per block — not window-batched. That extra batching is
+  bookkeeping-only and stays a Phase 3 nice-to-have.

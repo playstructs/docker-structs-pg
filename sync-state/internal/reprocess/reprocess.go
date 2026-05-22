@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/db"
 	"sync-state/internal/events"
 	"sync-state/internal/rpc"
@@ -147,11 +148,16 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 		}
 	}()
 
+	// Replay-time buffer: handlers push leaf rows here, we Flush once
+	// before commit. Keeps reprocess byte-identical to the live ingest
+	// path which uses the same Buffer model (sync/block.go).
+	buf := buffers.New()
 	bctx := events.BlockContext{
 		ChainID:   in.ChainID,
 		Height:    height,
 		BlockTime: block.Block.Header.Time,
 		TipHeight: height,
+		Buf:       buf,
 	}
 
 	outcomes := make([]Outcome, 0, len(targets))
@@ -219,6 +225,9 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 		return outcomes, nil
 	}
 
+	if err := buf.Flush(ctx, tx); err != nil {
+		return nil, fmt.Errorf("flush buffer: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}

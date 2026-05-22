@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -36,10 +37,6 @@ func (attackHandler) CompositeKey() string {
 	return "structs.structs.EventAttack.eventAttackDetail"
 }
 
-const attackInsertSQL = `
-INSERT INTO structs.planet_activity (time, seq, planet_id, category, detail, block_height)
-VALUES ($1, $2, $3, 'struct_attack', $4::jsonb, $5)`
-
 func (attackHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Attack](raw)
 	if err != nil {
@@ -64,15 +61,13 @@ func (attackHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	if err != nil {
 		return fmt.Errorf("attack: seq: %w", err)
 	}
-
-	if _, err := tx.Exec(ctx, attackInsertSQL,
-		bctx.BlockTime.UTC(),
-		seq,
-		planetID,
-		[]byte(raw),
-		bctx.Height,
-	); err != nil {
-		return fmt.Errorf("attack insert struct=%s planet=%s: %w", p.AttackerStructID, planetID, err)
-	}
+	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
+		Time:        bctx.BlockTime.UTC(),
+		Seq:         int64(seq),
+		PlanetID:    planetID,
+		Category:    "struct_attack",
+		Detail:      json.RawMessage(raw),
+		BlockHeight: bctx.Height,
+	})
 	return nil
 }

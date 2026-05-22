@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/payload"
 )
 
@@ -24,13 +25,6 @@ func (oreTheftHandler) CompositeKey() string {
 	return "structs.structs.EventOreTheft.eventOreTheftDetail"
 }
 
-const oreTheftInsertSQL = `
-INSERT INTO structs.ledger (
-    address, counterparty, amount_p, block_height, time, action, direction, denom
-) VALUES
-    ($1, $2, $3, $4, $5, 'seized',    'credit', 'ore'),
-    ($2, $1, $3, $4, $5, 'forfeited', 'debit',  'ore')`
-
 func (oreTheftHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.OreTheft](raw)
 	if err != nil {
@@ -39,14 +33,12 @@ func (oreTheftHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 	if p.ThiefPrimaryAddress == "" || p.VictimPrimaryAddress == "" {
 		return fmt.Errorf("ore_theft: missing address (thief=%q victim=%q)", p.ThiefPrimaryAddress, p.VictimPrimaryAddress)
 	}
-	if _, err := tx.Exec(ctx, oreTheftInsertSQL,
-		p.ThiefPrimaryAddress,
-		p.VictimPrimaryAddress,
-		p.Amount.PgValue(),
-		bctx.Height,
-		bctx.BlockTime.UTC(),
-	); err != nil {
-		return fmt.Errorf("ore_theft insert thief=%s victim=%s: %w", p.ThiefPrimaryAddress, p.VictimPrimaryAddress, err)
-	}
+	amt := p.Amount.String()
+	t := bctx.BlockTime.UTC()
+	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
+		buffers.LedgerRow{Address: p.ThiefPrimaryAddress, Counterparty: p.VictimPrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "seized", Direction: "credit", Denom: "ore"},
+		buffers.LedgerRow{Address: p.VictimPrimaryAddress, Counterparty: p.ThiefPrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "forfeited", Direction: "debit", Denom: "ore"},
+	)
+	_ = tx
 	return nil
 }

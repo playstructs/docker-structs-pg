@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/db"
 	"sync-state/internal/events"
 )
@@ -67,9 +68,16 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		SkipStatementTimeout:      true,
 	}
 
+	// One buffer for the entire window — handler rows pile up across
+	// blocks and flush once via pgx.CopyFrom right before commit.
+	// Window order is preserved because applyBlockInTx is called in
+	// ascending height order and each block's handlers append in the
+	// chain's deterministic intra-block order.
+	buf := buffers.New()
+
 	var allPending []pendingHandlerError
 	for _, bundle := range blocks {
-		res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, opts)
+		res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, opts)
 		if err != nil {
 			return fmt.Errorf("bulk apply h=%d: %w", bundle.Height, err)
 		}
@@ -79,6 +87,10 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 				he:     he,
 			})
 		}
+	}
+
+	if err := buf.Flush(ctx, tx); err != nil {
+		return fmt.Errorf("bulk flush buffer h=%d..%d: %w", blocks[0].Height, blocks[len(blocks)-1].Height, err)
 	}
 
 	last := blocks[len(blocks)-1]
