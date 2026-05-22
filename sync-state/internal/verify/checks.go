@@ -324,15 +324,28 @@ func checkRawMirrorCoverage(ctx context.Context, in Inputs) CheckResult {
 }
 
 // checkGenesisLoaded confirms that sync-state's init-genesis step has
-// been applied for this chain. PASS when a sync_state.genesis_log row
-// exists; FAIL when the cursor has advanced past height 0 but no row is
-// present (this is what produces the false-alarm "negative balance"
-// rows — staking debits with no matching genesis credits); SKIP when
-// the cursor hasn't started yet (fresh DB).
+// been applied for this chain AND that the resulting structs.ledger
+// rows are still present.
 //
-// We surface the recorded source + total_rows + sha256 in Counts so
-// operators can sanity-check which genesis file landed without
-// re-fetching it.
+// History: the previous version of this check only read
+// sync_state.genesis_log, so a `DELETE FROM structs.ledger WHERE
+// action='genesis'` between an init-genesis run and a verify run would
+// PASS while every genesis-funded account silently showed negative
+// balances. We now cross-check that
+// COUNT(structs.ledger WHERE action='genesis') equals
+// genesis_log.total_rows, so the discrepancy can no longer hide.
+//
+// States:
+//   - PASS  : genesis_log row present AND ledger count matches total_rows
+//   - FAIL  : genesis_log row missing while cursor > 0, OR ledger count
+//             does not match genesis_log.total_rows (drift detected)
+//   - INFO  : cursor at 0 and genesis not yet applied (first-start),
+//             OR genesis_log present but structs.ledger isn't deployed
+//   - SKIP  : never (drift is always actionable)
+//
+// We surface the recorded source + total_rows + sha256 + actual ledger
+// count in Counts so operators can pinpoint the gap without re-fetching
+// genesis or hand-querying the ledger.
 func checkGenesisLoaded(ctx context.Context, in Inputs) CheckResult {
 	r := CheckResult{}
 	row, err := db.ReadGenesisLog(ctx, in.Pool, in.ChainID)
@@ -344,12 +357,11 @@ func checkGenesisLoaded(ctx context.Context, in Inputs) CheckResult {
 	cursor, cerr := db.ReadCursor(ctx, in.Pool, in.ChainID)
 	if cerr != nil {
 		// Cursor missing = ingest hasn't started; we can still confirm
-		// genesis state but can't decide "should it have been loaded?"
+		// genesis state (and check the ledger crosscheck if it has been
+		// applied) but can't decide "should it have been loaded?"
 		switch {
 		case row != nil:
-			r.Status = StatusPass
-			r.Detail = fmt.Sprintf("genesis applied at %s (total_rows=%d)",
-				row.AppliedAt.UTC().Format("2006-01-02T15:04:05Z"), row.TotalRows)
+			return finalizeGenesisCheck(ctx, in, row, true)
 		default:
 			r.Status = StatusInfo
 			r.Detail = fmt.Sprintf("no cursor row yet (ingest hasn't started); read_cursor: %v", cerr)
@@ -358,16 +370,7 @@ func checkGenesisLoaded(ctx context.Context, in Inputs) CheckResult {
 	}
 	switch {
 	case row != nil:
-		r.Counts = map[string]any{
-			"source":           row.Source,
-			"applied_at":       row.AppliedAt.UTC().Format("2006-01-02T15:04:05Z"),
-			"genesis_time":     row.GenesisTime.UTC().Format("2006-01-02T15:04:05Z"),
-			"sha256":           row.SHA256,
-			"total_rows":       row.TotalRows,
-			"rows_per_section": row.RowsPerSection,
-		}
-		r.Status = StatusPass
-		r.Detail = fmt.Sprintf("genesis applied (%d rows from %s)", row.TotalRows, row.Source)
+		return finalizeGenesisCheck(ctx, in, row, false)
 	case cursor.LastHeight <= 0:
 		r.Status = StatusInfo
 		r.Detail = "cursor at height 0 and genesis not yet applied; init-genesis will run on first ingest"
@@ -377,6 +380,76 @@ func checkGenesisLoaded(ctx context.Context, in Inputs) CheckResult {
 			"run `sync-state init-genesis` to backfill genesis ledger rows "+
 			"(otherwise structs.ledger balances will appear negative for genesis-funded accounts)",
 			in.ChainID, cursor.LastHeight)
+	}
+	return r
+}
+
+// finalizeGenesisCheck runs the second leg of checkGenesisLoaded: given
+// a present genesis_log row, count action='genesis' rows in
+// structs.ledger and FAIL on drift. Pulled into its own function so
+// both the cursor-missing and cursor-present branches share identical
+// drift semantics — silent divergence between the two would defeat the
+// whole point of the cross-check.
+//
+// cursorMissing is true when we got here because ReadCursor failed; we
+// thread it through only to color the Detail string ("genesis applied"
+// vs "genesis applied (cursor not yet written)").
+func finalizeGenesisCheck(ctx context.Context, in Inputs, row *db.GenesisLogRow, cursorMissing bool) CheckResult {
+	r := CheckResult{}
+	counts := map[string]any{
+		"source":           row.Source,
+		"applied_at":       row.AppliedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		"genesis_time":     row.GenesisTime.UTC().Format("2006-01-02T15:04:05Z"),
+		"sha256":           row.SHA256,
+		"total_rows":       row.TotalRows,
+		"rows_per_section": row.RowsPerSection,
+	}
+
+	// structs.ledger may not be deployed in test harnesses; downgrade
+	// to INFO rather than FAIL in that one case so the unit tests that
+	// only stand up sync_state.* still pass.
+	if !tableExists(ctx, in.Pool, "structs", "ledger") {
+		counts["ledger_genesis_rows"] = "n/a (structs.ledger not deployed)"
+		r.Counts = counts
+		r.Status = StatusInfo
+		r.Detail = fmt.Sprintf("genesis_log row present (%d rows) but structs.ledger isn't deployed; can't verify rows landed",
+			row.TotalRows)
+		return r
+	}
+
+	var ledgerCount int64
+	if err := in.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM structs.ledger WHERE action = 'genesis'`).
+		Scan(&ledgerCount); err != nil {
+		counts["ledger_genesis_rows"] = fmt.Sprintf("error: %v", err)
+		r.Counts = counts
+		r.Status = StatusFail
+		r.Detail = fmt.Sprintf("count structs.ledger WHERE action='genesis': %v", err)
+		return r
+	}
+	counts["ledger_genesis_rows"] = ledgerCount
+	r.Counts = counts
+
+	switch {
+	case ledgerCount == row.TotalRows:
+		r.Status = StatusPass
+		suffix := ""
+		if cursorMissing {
+			suffix = " (cursor not yet written)"
+		}
+		r.Detail = fmt.Sprintf("genesis applied (%d rows present in structs.ledger; source=%s)%s",
+			ledgerCount, row.Source, suffix)
+	case ledgerCount == 0:
+		r.Status = StatusFail
+		r.Detail = fmt.Sprintf("genesis_log says total_rows=%d (applied %s) but structs.ledger has ZERO action='genesis' rows; "+
+			"someone deleted them after init-genesis ran — "+
+			"run `sync-state init-genesis -force` to restore",
+			row.TotalRows, row.AppliedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	default:
+		r.Status = StatusFail
+		r.Detail = fmt.Sprintf("genesis_log says total_rows=%d but structs.ledger has %d action='genesis' rows (drift=%d); "+
+			"partial deletion or partial replay — run `sync-state init-genesis -force` to restore",
+			row.TotalRows, ledgerCount, row.TotalRows-ledgerCount)
 	}
 	return r
 }
