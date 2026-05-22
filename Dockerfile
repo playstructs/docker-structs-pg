@@ -1,9 +1,16 @@
 # Build update-cache Go binary
-FROM golang:1.25 AS go-builder
+FROM golang:1.25 AS update-cache-builder
 WORKDIR /build
 COPY update-cache/ .
 RUN go mod download && \
     CGO_ENABLED=0 go build -o /update-cache ./cmd/
+
+# Build sync-state Go binary
+FROM golang:1.25 AS sync-state-builder
+WORKDIR /build
+COPY sync-state/ .
+RUN go mod download && \
+    CGO_ENABLED=0 go build -o /sync-state ./cmd/sync-state
 
 # Base image
 FROM ubuntu:24.04
@@ -74,8 +81,9 @@ RUN git clone https://github.com/playstructs/structs-pg.git structs-pg
 COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
 
-# Copy pre-built Go binary from builder stage
-COPY --from=go-builder /update-cache /usr/local/bin/update-cache
+# Copy pre-built Go binaries from builder stages
+COPY --from=update-cache-builder /update-cache /usr/local/bin/update-cache
+COPY --from=sync-state-builder   /sync-state   /usr/local/bin/sync-state
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
