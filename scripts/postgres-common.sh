@@ -15,21 +15,18 @@ pg_data_dir() {
   echo "/var/lib/postgresql/$(pg_version_dir)/main"
 }
 
-# Absolute path to versioned bin dir. pg_ctl lives here on Debian/Ubuntu and
-# is NOT exposed via the /usr/bin pg_wrapper, so we must call it by full path
-# (the postgres user's login shell PATH does not include this directory).
-pg_bin_dir() {
-  echo "/usr/lib/postgresql/$(pg_version_dir)/bin"
+pg_cluster() {
+  echo "main"
 }
 
 postgres_is_running() {
-  local datadir bindir
-  datadir="$(pg_data_dir)"
-  bindir="$(pg_bin_dir)"
-  if [[ ! -f "${datadir}/postmaster.pid" ]]; then
-    return 1
-  fi
-  su - postgres -c "'${bindir}/pg_ctl' status -D '${datadir}'" >/dev/null 2>&1
+  local ver cluster status
+  ver="$(pg_version_dir)"
+  cluster="$(pg_cluster)"
+  # pg_lsclusters output (with -h to suppress header):
+  #   Ver Cluster Port Status Owner    Data directory                     Log file
+  status="$(pg_lsclusters -h "${ver}" "${cluster}" 2>/dev/null | awk '{print $4}')"
+  [[ "${status}" == "online" ]]
 }
 
 postgres_wait_ready() {
@@ -46,31 +43,37 @@ postgres_wait_ready() {
 }
 
 postgres_start() {
-  local datadir bindir
-  datadir="$(pg_data_dir)"
-  bindir="$(pg_bin_dir)"
+  local ver cluster
+  ver="$(pg_version_dir)"
+  cluster="$(pg_cluster)"
   if postgres_is_running; then
-    echo "postgres already running (datadir=${datadir})"
+    echo "postgres already running (${ver}/${cluster})"
     postgres_wait_ready
     return 0
   fi
-  echo "starting postgres (datadir=${datadir})..."
-  su - postgres -c "'${bindir}/pg_ctl' start -D '${datadir}' -w -t 120"
+  echo "starting postgres (${ver}/${cluster})..."
+  # pg_ctlcluster is Debian's wrapper around pg_ctl. It knows about the
+  # split between /var/lib/postgresql (data) and /etc/postgresql (config)
+  # and runs the server as the postgres user. Plain pg_ctl -D <datadir>
+  # cannot find postgresql.conf on Debian without extra -o flags.
+  # --skip-systemctl-redirect prevents an attempted handoff to systemctl
+  # in containers where systemd is absent.
+  pg_ctlcluster --skip-systemctl-redirect "${ver}" "${cluster}" start -- -w -t 120
   postgres_wait_ready
 }
 
 postgres_stop() {
   local mode="${1:-fast}"
   local timeout="${2:-115}"
-  local datadir bindir
-  datadir="$(pg_data_dir)"
-  bindir="$(pg_bin_dir)"
+  local ver cluster
+  ver="$(pg_version_dir)"
+  cluster="$(pg_cluster)"
   if ! postgres_is_running; then
     echo "postgres not running"
     return 0
   fi
-  echo "stopping postgres (mode=${mode}, timeout=${timeout}s)..."
-  su - postgres -c "'${bindir}/pg_ctl' stop -D '${datadir}' -m '${mode}' -w -t '${timeout}'"
+  echo "stopping postgres (${ver}/${cluster}, mode=${mode}, timeout=${timeout}s)..."
+  pg_ctlcluster --skip-systemctl-redirect "${ver}" "${cluster}" stop -- -m "${mode}" -w -t "${timeout}"
 }
 
 postgres_postmaster_pid() {
