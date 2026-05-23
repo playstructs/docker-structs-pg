@@ -1,9 +1,16 @@
 # Build update-cache Go binary
-FROM golang:1.25 AS go-builder
+FROM golang:1.25 AS update-cache-builder
 WORKDIR /build
 COPY update-cache/ .
 RUN go mod download && \
     CGO_ENABLED=0 go build -o /update-cache ./cmd/
+
+# Build sync-state Go binary
+FROM golang:1.25 AS sync-state-builder
+WORKDIR /build
+COPY sync-state/ .
+RUN go mod download && \
+    CGO_ENABLED=0 go build -o /sync-state ./cmd/sync-state
 
 # Base image
 FROM ubuntu:24.04
@@ -20,7 +27,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
   SSL_DOMAIN=structs.lol \
   NETWORK_VERSION=main \
   AUTO_MIGRATE_SLEEP=120 \
-  SQITCH_PG_CONNECTION=postgres://structs@structs-pg:5432/structs
+  SQITCH_PG_CONNECTION=postgres://structs@structs-pg:5432/structs \
+  POSTGRES_MEMORY_MB=8192 \
+  POSTGRES_SHUTDOWN_MODE=fast \
+  POSTGRES_SHUTDOWN_TIMEOUT=115
 
 
 
@@ -73,17 +83,19 @@ RUN mkdir /src/scripts
 RUN git clone https://github.com/playstructs/structs-pg.git structs-pg
 COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
+RUN chmod +x /src/scripts/*.sh
 
-# Copy pre-built Go binary from builder stage
-COPY --from=go-builder /update-cache /usr/local/bin/update-cache
+# Copy pre-built Go binaries from builder stages
+COPY --from=update-cache-builder /update-cache /usr/local/bin/update-cache
+COPY --from=sync-state-builder   /sync-state   /usr/local/bin/sync-state
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'timescaledb,pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.database_name = 'structs'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.use_background_workers = on" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
-    echo "shared_buffers = 3072MB" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "max_worker_processes = 20" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    mkdir -p /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/conf.d && \
     sed -i "/^host.*all.*all.*127\.0\.0\.1\/32.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     sed -i "/^host.*all.*all.*::1\/128.*md5$/s/md5/trust/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
     #echo "host structs +players ::/0 md5" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/pg_hba.conf && \
@@ -93,7 +105,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     su - postgres -c 'createuser -s structs_indexer' && \
     su - postgres -c 'createuser -s structs_crawler' && \
     su - postgres -c 'createuser -s structs_webapp' && \
-    timescaledb-tune --quiet --yes \
+    timescaledb-tune --quiet --yes && \
     /etc/init.d/postgresql stop
 
 # Expose ports

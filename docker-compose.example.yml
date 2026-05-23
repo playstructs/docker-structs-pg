@@ -1,0 +1,83 @@
+# Example compose fragment for structs-pg services.
+# Merge into your stack compose file; adjust memory limits for your host.
+#
+# structs-pg CMD uses /src/scripts/database-start.sh (supervised pg_ctl).
+# Do not wrap with bash/tail -f; that prevents clean shutdown and restart.
+
+version: '3.9'
+
+x-postgres-env: &postgres-env
+  POSTGRES_MEMORY_MB: "8192"
+  POSTGRES_SHUTDOWN_MODE: fast
+  POSTGRES_SHUTDOWN_TIMEOUT: "115"
+  # Branch of github.com/playstructs/structs-pg to deploy sqitch from.
+  # Sentinel "origin" (default) means "use the branch baked into the image at
+  # clone time" - i.e. the upstream default. Override with a branch name to
+  # pin both init and auto-migrate to that branch.
+  STRUCTS_PG_BRANCH: "${STRUCTS_PG_BRANCH:-origin}"
+
+services:
+  structs-pg-init:
+    image: 'structs/structs-pg:latest'
+    hostname: 'structs-pg'
+    command: [ "bash", "/src/scripts/database-init.sh" ]
+    stop_grace_period: 120s
+    volumes:
+      - pgdata:/var/lib/postgresql/
+      - pgetc:/etc/postgresql/
+    environment:
+      <<: *postgres-env
+      RUN_MIGRATIONS: "0"
+      SQITCH_PG_CONNECTION: "${SQITCH_PG_CONNECTION}"
+    # Set RUN_MIGRATIONS=1 to force sqitch on an existing volume.
+
+  structs-pg:
+    image: 'structs/structs-pg:latest'
+    hostname: 'structs-pg'
+    # Default CMD: /src/scripts/database-start.sh (supervised)
+    volumes:
+      - pgdata:/var/lib/postgresql/
+      - pgetc:/etc/postgresql/
+    ports:
+      - ${DIRECT_POSTGRES_PORT:-5432}:5432
+    restart: on-failure
+    stop_grace_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    depends_on:
+      structs-pg-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -h localhost -p 5432" ]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *postgres-env
+
+  structs-pg-auto-migrate:
+    image: 'structs/structs-pg:latest'
+    command: [ "bash", "/src/scripts/database-auto-migrate.sh" ]
+    depends_on:
+      structs-pg:
+        condition: service_healthy
+        restart: true
+    environment:
+      <<: *postgres-env
+      AUTO_MIGRATE_SLEEP: "${AUTO_MIGRATE_SLEEP:-120}"
+      SQITCH_PG_CONNECTION: "${SQITCH_PG_CONNECTION}"
+
+  # Example: depend on healthy postgres, not merely started
+  structs-grass:
+    depends_on:
+      structs-pg:
+        condition: service_healthy
+
+volumes:
+  pgetc:
+    name: structs-pg-etc
+  pgdata:
+    name: structs-pg-data

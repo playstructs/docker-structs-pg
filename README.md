@@ -41,6 +41,33 @@ This image provides a persistent volume for `/var/lib/postgresql` if desired. If
 docker run -d -p 5432:5432 -v /some/persistent/path:/var/lib/postgresql --name=structs_pg structs/structs-pg:latest
 ```
 
+Stacks that also mount `/etc/postgresql` (config volume) must treat **data and config volumes as a pair**—see [docs/postgres-volumes.md](docs/postgres-volumes.md).
+
+## Docker Compose
+
+Use [docker-compose.example.yml](docker-compose.example.yml) for recommended `structs-pg` / `structs-pg-init` settings:
+
+- Supervised entrypoint (`database-start.sh`) instead of a `bash` + `tail -f` wrapper
+- `stop_grace_period: 120s` and memory limits aligned with `POSTGRES_MEMORY_MB`
+- One-shot init (`SQITCH_INIT_COMPLETE` marker); set `RUN_MIGRATIONS=1` to force sqitch from init
+
+## Operations
+
+| Topic | Doc |
+|--------|-----|
+| Volume pairing and memory env | [docs/postgres-volumes.md](docs/postgres-volumes.md) |
+| Checkpoint / WAL failures, `pg_resetwal` | [docs/postgres-recovery.md](docs/postgres-recovery.md) |
+
+Environment variables (optional):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `POSTGRES_MEMORY_MB` | `8192` | Sets `shared_buffers` ≈ 25% via `conf.d/structs-memory.conf` |
+| `POSTGRES_SHARED_BUFFERS` | — | Overrides computed `shared_buffers` (e.g. `2048MB`) |
+| `POSTGRES_SHUTDOWN_MODE` | `fast` | `pg_ctl stop -m` mode on shutdown |
+| `POSTGRES_SHUTDOWN_TIMEOUT` | `115` | Seconds to wait for stop before Docker SIGKILL |
+| `RUN_MIGRATIONS` | `0` | Set to `1` on init container to force `sqitch deploy` |
+
 # Administration
 
 Administering the database must be done from within the container. After starting the container you can perform the following to attach to its terminal and access the database:

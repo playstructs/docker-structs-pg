@@ -1,2 +1,11 @@
 # Go build artifacts
 update-cache/update-cache
+sync-state/sync-state
+
+# Local-only vendored copies of structs-pg source (grep convenience; not
+# meant to ship with this repo).
+references/
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
