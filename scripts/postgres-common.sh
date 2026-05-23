@@ -15,13 +15,21 @@ pg_data_dir() {
   echo "/var/lib/postgresql/$(pg_version_dir)/main"
 }
 
+# Absolute path to versioned bin dir. pg_ctl lives here on Debian/Ubuntu and
+# is NOT exposed via the /usr/bin pg_wrapper, so we must call it by full path
+# (the postgres user's login shell PATH does not include this directory).
+pg_bin_dir() {
+  echo "/usr/lib/postgresql/$(pg_version_dir)/bin"
+}
+
 postgres_is_running() {
-  local datadir
+  local datadir bindir
   datadir="$(pg_data_dir)"
+  bindir="$(pg_bin_dir)"
   if [[ ! -f "${datadir}/postmaster.pid" ]]; then
     return 1
   fi
-  su - postgres -c "pg_ctl status -D '${datadir}'" >/dev/null 2>&1
+  su - postgres -c "'${bindir}/pg_ctl' status -D '${datadir}'" >/dev/null 2>&1
 }
 
 postgres_wait_ready() {
@@ -38,29 +46,31 @@ postgres_wait_ready() {
 }
 
 postgres_start() {
-  local datadir
+  local datadir bindir
   datadir="$(pg_data_dir)"
+  bindir="$(pg_bin_dir)"
   if postgres_is_running; then
     echo "postgres already running (datadir=${datadir})"
     postgres_wait_ready
     return 0
   fi
   echo "starting postgres (datadir=${datadir})..."
-  su - postgres -c "pg_ctl start -D '${datadir}' -w -t 120"
+  su - postgres -c "'${bindir}/pg_ctl' start -D '${datadir}' -w -t 120"
   postgres_wait_ready
 }
 
 postgres_stop() {
   local mode="${1:-fast}"
   local timeout="${2:-115}"
-  local datadir
+  local datadir bindir
   datadir="$(pg_data_dir)"
+  bindir="$(pg_bin_dir)"
   if ! postgres_is_running; then
     echo "postgres not running"
     return 0
   fi
   echo "stopping postgres (mode=${mode}, timeout=${timeout}s)..."
-  su - postgres -c "pg_ctl stop -D '${datadir}' -m '${mode}' -w -t '${timeout}'"
+  su - postgres -c "'${bindir}/pg_ctl' stop -D '${datadir}' -m '${mode}' -w -t '${timeout}'"
 }
 
 postgres_postmaster_pid() {
