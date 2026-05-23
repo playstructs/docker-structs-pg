@@ -10,6 +10,11 @@ x-postgres-env: &postgres-env
   POSTGRES_MEMORY_MB: "8192"
   POSTGRES_SHUTDOWN_MODE: fast
   POSTGRES_SHUTDOWN_TIMEOUT: "115"
+  # Branch of github.com/playstructs/structs-pg to deploy sqitch from.
+  # Sentinel "origin" (default) means "use the branch baked into the image at
+  # clone time" - i.e. the upstream default. Override with a branch name to
+  # pin both init and auto-migrate to that branch.
+  STRUCTS_PG_BRANCH: "${STRUCTS_PG_BRANCH:-origin}"
 
 services:
   structs-pg-init:
@@ -61,6 +66,7 @@ services:
         condition: service_healthy
         restart: true
     environment:
+      <<: *postgres-env
       AUTO_MIGRATE_SLEEP: "${AUTO_MIGRATE_SLEEP:-120}"
       SQITCH_PG_CONNECTION: "${SQITCH_PG_CONNECTION}"
 
