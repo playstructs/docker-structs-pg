@@ -102,6 +102,43 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 	prefetchCancel := func() {}
 	defer func() { prefetchCancel() }()
 
+	// Exponential backoff state for recovering from transient infra
+	// failures (PG / RPC bounce, ephemeral network). Reset after every
+	// successful fetch+apply cycle. See retry.go for the classifier and
+	// the design notes — net is: on a transient err we mark the cursor
+	// stalled, sleep with backoff, re-read the cursor (so we resume from
+	// whatever last committed, which may include partial progress from a
+	// streaming-mode window), and re-enter the top of this loop. We
+	// never give up — operators expect ingest to self-heal across
+	// Postgres restarts without process restart.
+	var transient transientBackoff
+	// recoverFromTransient is the common tail used by both the fetch and
+	// apply error paths. Returns false if ctx was cancelled mid-sleep
+	// (caller should return ctx.Err()), true to continue the loop.
+	recoverFromTransient := func(label string, err error) bool {
+		s.logger.Printf("WARN: %s transient infra error: %v (mark stalled, retry after backoff)", label, err)
+		s.markStalled(ctx)
+		if prefetched != nil {
+			prefetchCancel()
+			<-prefetched
+			prefetched = nil
+			prefetchCancel = func() {}
+		}
+		d := transient.Next()
+		if !sleepCtx(ctx, d) {
+			return false
+		}
+		// Re-read the cursor: some blocks in the failed window may have
+		// committed before the failure (streaming mode commits per
+		// block). Resume from cursor + 1; if the cursor is stale or
+		// unreadable, keep `next` as-is and let the top of the loop
+		// detect the situation via /status.
+		if c, cerr := db.ReadCursor(ctx, s.pool.Pool, s.chainID); cerr == nil && c.LastHeight > 0 && c.LastHeight+1 > next {
+			next = c.LastHeight + 1
+		}
+		return true
+	}
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -187,7 +224,14 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 			fw = s.fetchWindow(ctx, next, windowEnd, tip, useBulk)
 		}
 		if fw.err != nil {
-			return fmt.Errorf("fetch [%d..%d]: %w", next, windowEnd, fw.err)
+			label := fmt.Sprintf("fetch [%d..%d]", next, windowEnd)
+			if isTransientInfraErr(fw.err) {
+				if !recoverFromTransient(label, fw.err) {
+					return ctx.Err()
+				}
+				continue
+			}
+			return fmt.Errorf("%s: %w", label, fw.err)
 		}
 
 		// Start prefetching the NEXT window now (before we apply the
@@ -209,6 +253,13 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 		}
 
 		if err := s.applyFetched(ctx, fw); err != nil {
+			label := fmt.Sprintf("apply [%d..%d]", fw.start, fw.end)
+			if isTransientInfraErr(err) {
+				if !recoverFromTransient(label, err) {
+					return ctx.Err()
+				}
+				continue
+			}
 			// Discard any prefetch before returning so the goroutine doesn't
 			// leak when the caller decides to abort.
 			if prefetched != nil {
@@ -217,6 +268,9 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 			}
 			return err
 		}
+		// Successful fetch+apply: clear any accumulated backoff so the
+		// next blip starts fresh at 1s.
+		transient.Reset()
 		next = windowEnd + 1
 	}
 }

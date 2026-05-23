@@ -571,6 +571,16 @@ func probeTxIndexer(ctx context.Context, c *rpc.Client) *Check {
 // droppedTriggers is the canonical list of cache-era triggers that
 // sync-state now owns. The Phase B SQL drops them; if any is still
 // enabled, the doctor FATALs because every block would double-write.
+//
+// KEEP IN SYNC with structs-pg verify/retire-cache-20260522.sql —
+// that sqitch verify script asserts the same triggers are absent
+// post-deploy. We decided against a runtime sync_state.retired_triggers
+// table because it would be a permanent schema object encoding a
+// transitional concern. List is 9 rows, changes once every few years
+// (only when a new cache-era trigger gets ported to Go); coordinate
+// updates via a paired PR across both repos. When cache is squashed
+// out of sqitch.plan in a future milestone, both this list and the
+// sqitch verify script retire in lockstep.
 var droppedTriggers = []struct{ Schema, Table, Trigger string }{
 	{Schema: "structs", Table: "struct", Trigger: "planet_activity_struct_movement"},
 	{Schema: "structs", Table: "fleet", Trigger: "planet_activity_fleet_move"},

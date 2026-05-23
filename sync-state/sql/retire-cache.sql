@@ -25,9 +25,20 @@
 --
 --  Prerequisites (verified by the preflight block)
 --    A. sync-state Phase A is deployed and has run with -mirror-raw=true
---       (the default in the cutover build) so sync_state.raw_blocks /
---       raw_tx_results / raw_events / raw_attributes carry every block
---       sync-state has seen.
+--       long enough that sync_state.raw_blocks / raw_tx_results /
+--       raw_events / raw_attributes cover at least one block. The
+--       preflight FATALs if both raw_blocks is empty AND cache.blocks is
+--       absent or empty, because post-cutover the cache.* webapp views
+--       become views over raw_*, and an empty raw_blocks means cache.blocks
+--       returns zero rows — a regression for any consumer querying cache.*.
+--
+--       Note: mirror-raw defaults to FALSE in current sync-state builds
+--       (the per-block cost roughly doubles WAL). Operators must
+--       explicitly start sync-state with `-mirror-raw=true` (or env
+--       SYNC_STATE_MIRROR_RAW=true) for at least one block before
+--       running this file, even if they don't intend to keep mirror-raw
+--       on after the cutover. Step 2 then backfills the remainder from
+--       cache.* into raw_*.
 --    B. sync-state's cursor (sync_state.sync_cursor.last_height) is at or
 --       past the newest cache.blocks.height. This means update-cache is
 --       no longer writing concurrently and the post-cutover compatibility
@@ -35,6 +46,14 @@
 --    C. update-cache is not running concurrently. The preflight reads
 --       cache.attributes_tmp.created_at; anything within ~30 s aborts the
 --       cutover.
+--    D. sync-state ingest is STOPPED. retire-cache.sql takes an advisory
+--       lock to serialize concurrent runs of itself, but it does not
+--       block sync-state. Running both concurrently risks (i) sync-state
+--       writing to sync_state.* tables this file is restructuring and
+--       (ii) sync-state's startup doctor probe seeing the trigger DROPs
+--       in flight (the probe re-queries pg_trigger, not a snapshot). The
+--       cutover operator should `kill` the sync-state ingest before
+--       starting this script and restart it afterwards.
 --
 --  Side effects (reversible only by restore-from-backup)
 --    - DROP SCHEMA cache CASCADE permanently deletes:
@@ -140,6 +159,38 @@ END $$;
 -- operator step of stopping update-cache before applying this file. The
 -- post-COMMIT verification block prints cache.blocks vs sync_state.raw_blocks
 -- counts so any silent drift surfaces immediately.
+
+-- Post-cutover the webapp's cache.blocks / cache.tx_results / cache.events /
+-- cache.attributes queries become views over sync_state.raw_*. If raw_blocks
+-- is empty AND cache.blocks doesn't exist to backfill from, every cache.*
+-- SELECT in the webapp will return zero rows — a silent regression. FATAL
+-- here so the operator is forced to enable mirror-raw and re-run after
+-- raw_blocks has at least the most-recent block.
+DO $$
+DECLARE
+    raw_blocks_n  BIGINT;
+    cache_present BOOLEAN;
+    cache_blocks_n BIGINT := 0;
+BEGIN
+    SELECT COUNT(*) INTO raw_blocks_n FROM sync_state.raw_blocks;
+
+    SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname='cache' AND tablename='blocks')
+      INTO cache_present;
+    IF cache_present THEN
+        EXECUTE 'SELECT COUNT(*) FROM cache.blocks' INTO cache_blocks_n;
+    END IF;
+
+    IF raw_blocks_n = 0 AND cache_blocks_n = 0 THEN
+        RAISE EXCEPTION 'preflight: sync_state.raw_blocks is empty AND cache.blocks is empty/absent — '
+                        'post-cutover the cache.* compatibility views would return zero rows. '
+                        'Start sync-state with -mirror-raw=true (env SYNC_STATE_MIRROR_RAW=true) '
+                        'for at least one block before re-running this file.';
+    END IF;
+
+    IF raw_blocks_n = 0 THEN
+        RAISE NOTICE 'preflight: sync_state.raw_blocks is empty — relying on step 2 to backfill % rows from cache.blocks', cache_blocks_n;
+    END IF;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- 1. CANONICAL SCHEMA ADDITIONS
@@ -359,6 +410,42 @@ ON CONFLICT (planet_id) DO UPDATE
 -- After this block, sync-state's Go handlers are the only writer of the
 -- derived rows. sync-state's startup `doctor` probe will FATAL if any of
 -- these triggers comes back enabled, preventing accidental double-writes.
+--
+-- IMPORTANT: this list MUST stay in lockstep with `droppedTriggers` in
+-- sync-state/internal/doctor/doctor.go. Adding a trigger here without
+-- updating that list means a re-applied legacy SQL deploy could
+-- re-create the trigger and sync-state would not FATAL on startup.
+-- (The two cache.blocks triggers — transfer_ledger_entry, add_queue —
+-- are dropped automatically by the DROP SCHEMA cache CASCADE in step
+-- 5, so they don't need explicit DROP TRIGGER here.)
+--
+-- Coordination (resolved 2026-05): the trigger-absence assertions
+-- live in THREE places — this DROP block (the action), sync-state's
+-- internal/doctor/doctor.go `droppedTriggers` slice (the runtime
+-- assertion), and structs-pg verify/retire-cache-20260522.sql (the
+-- sqitch verify-side assertion, run by CI post-deploy). We decided
+-- against a shared sync_state.retired_triggers table because it
+-- would be a permanent schema object encoding a transitional
+-- concern. The 9-entry list changes once every few years; paired
+-- PRs across the two repos are the coordination mechanism. When
+-- cache is squashed out of sqitch.plan in a future milestone, all
+-- three locations retire in lockstep — no permanent cleanup work.
+--
+-- Intentionally NOT dropped (defense-in-depth, see notes in
+-- internal/events/address.go):
+--   structs.player_address_cascade  ON structs.player  (AFTER INSERT OR UPDATE)
+--   structs.player_address_notify   ON structs.player_address
+--   structs.player_address_pending_merge ON structs.player_address
+-- The cascade trigger overlaps sync-state's playerHandler on the
+-- UPDATE path (both propagate guild_id to structs.player_address),
+-- and seeds structs.player_address on player INSERT. The overlap is
+-- harmless — playerAddressGuildPropagateSQL is a `... IS DISTINCT
+-- FROM ...` UPDATE that no-ops when the trigger has already done the
+-- work. Leaving the trigger in place means any direct UPDATE to
+-- structs.player from outside sync-state (DBA actions, future tools,
+-- legacy migrations) still gets correct cascade behavior. The
+-- retired cache.UDPATE_ADDRESS_GUILD trigger is dropped immediately
+-- below.
 
 DROP TRIGGER IF EXISTS update_address_guild_id          ON structs.player;
 DROP TRIGGER IF EXISTS name_planet                       ON structs.planet;
@@ -370,6 +457,10 @@ DROP TRIGGER IF EXISTS planet_activity_struct_attribute  ON structs.struct_attri
 
 -- The trigger functions in the structs schema are now dead code. Drop them
 -- so a `\df structs.*` listing reflects current ownership.
+--
+-- Cache-side trigger functions (cache.add_queue, cache.transfer_ledger_entry,
+-- cache.process_block_ledger, cache.udpate_address_guild,
+-- cache.planet_activity_*) ride the DROP SCHEMA cache CASCADE in step 5.
 DROP FUNCTION IF EXISTS structs.name_planet();
 DROP FUNCTION IF EXISTS structs.infusion_ledger_entry();
 
@@ -433,6 +524,28 @@ BEGIN
     END IF;
     IF bad_event_index IS NOT NULL AND bad_event_index >= 10000 THEN
         RAISE EXCEPTION 'surrogate-id overflow: max(event_index)=% exceeds 10^4 budget — bump the formula', bad_event_index;
+    END IF;
+END $$;
+
+-- Defensively REVOKE the cache.queue grant before CASCADE drops the table.
+-- references/structs-pg/deploy/role-structs-webapp.sql line 13 grants
+-- SELECT, DELETE on cache.queue to structs_webapp. DROP SCHEMA CASCADE
+-- removes the ACL entry implicitly along with the table, but that means
+-- a fresh re-deploy of role-structs-webapp.sql against a post-cutover DB
+-- (rebuild, standby, sqitch reapply) fails with
+--   ERROR: relation "cache.queue" does not exist
+-- because cache.queue is gone and the role file is non-idempotent. The
+-- REVOKE below is a no-op against the soon-dropped table (it just makes
+-- the intent explicit in the audit trail). The structs-pg team owns the
+-- permanent fix on their side: remove line 13 of role-structs-webapp.sql
+-- in the same sqitch change that ships retire-cache.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'structs_webapp')
+       AND EXISTS (SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'cache' AND table_name = 'queue') THEN
+        EXECUTE 'REVOKE SELECT, DELETE ON cache.queue FROM structs_webapp';
+        RAISE NOTICE 'retire-cache: revoked cache.queue grant from structs_webapp before DROP SCHEMA';
     END IF;
 END $$;
 
@@ -536,6 +649,10 @@ DECLARE
     n_cache_objects        BIGINT;
     n_view_blocks          BIGINT;
     n_raw_blocks           BIGINT;
+    n_block_log            BIGINT;
+    n_genesis_log_rows     BIGINT;
+    n_ledger_genesis       BIGINT;
+    v_genesis_chain        VARCHAR;
 BEGIN
     -- 7a. NULL block_height across the derived hypertables.
     SELECT COUNT(*) INTO n_null_blockheight
@@ -596,6 +713,61 @@ BEGIN
     IF n_view_blocks <> n_raw_blocks THEN
         RAISE EXCEPTION 'verify FATAL: cache.blocks (%) != sync_state.raw_blocks (%); view definition mismatch?', n_view_blocks, n_raw_blocks;
     END IF;
+
+    -- 7f. raw-mirror coverage vs sync-state's own block_log. Mirrors
+    -- sync_state verify's raw_mirror_coverage check. A negative diff
+    -- (raw_blocks < block_log) means the operator skipped mirror-raw on
+    -- some range — the compat views will silently return short for that
+    -- range. NOTICE because the cutover itself isn't broken, but the
+    -- gap is real and the operator should re-enable mirror-raw and let
+    -- sync-state backfill before retiring the cache.* SELECTs.
+    SELECT COUNT(*) INTO n_block_log FROM sync_state.block_log;
+    RAISE NOTICE 'verify: sync_state.block_log rowcount = % (raw_blocks = %, diff = %)',
+        n_block_log, n_raw_blocks, n_block_log - n_raw_blocks;
+    IF n_raw_blocks < n_block_log THEN
+        RAISE NOTICE 'verify WARN: sync_state.raw_blocks (%) < block_log (%); % blocks have no raw mirror — '
+                     'cache.* views will return short for that range. Run sync-state with -mirror-raw=true '
+                     'or backfill raw_* before retiring legacy cache.* consumers.',
+            n_raw_blocks, n_block_log, n_block_log - n_raw_blocks;
+    END IF;
+
+    -- 7g. Genesis loaded AND the rows are still in structs.ledger.
+    --
+    -- History: we hit a bug where sync_state.genesis_log said
+    -- total_rows=207 (the init-genesis run had succeeded) but
+    -- structs.ledger had ZERO action='genesis' rows because someone had
+    -- manually DELETEd them later. That state silently made every
+    -- genesis-funded account look like it had a negative balance. The
+    -- sync_state `verify` check now cross-checks this; we mirror the
+    -- assertion here so retire-cache FATALs on the same corruption
+    -- (otherwise the webapp would cut over to a ledger that's missing
+    -- ~all initial balances).
+    SELECT chain_id, total_rows
+      INTO v_genesis_chain, n_genesis_log_rows
+      FROM sync_state.genesis_log
+     LIMIT 1;
+    IF v_genesis_chain IS NULL THEN
+        RAISE NOTICE 'verify: no sync_state.genesis_log row — run `sync-state init-genesis` '
+                     'after the cutover-restart, otherwise genesis-funded balances will look negative';
+    ELSE
+        IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname='structs' AND tablename='ledger') THEN
+            SELECT COUNT(*) INTO n_ledger_genesis
+              FROM structs.ledger
+             WHERE action = 'genesis';
+            RAISE NOTICE 'verify: genesis_log.total_rows = % (structs.ledger genesis rows = %)',
+                n_genesis_log_rows, n_ledger_genesis;
+            IF n_ledger_genesis <> n_genesis_log_rows THEN
+                RAISE EXCEPTION 'verify FATAL: sync_state.genesis_log says total_rows=% for chain=% but '
+                                'structs.ledger has % action=''genesis'' rows (drift=%). Run '
+                                '`sync-state init-genesis -force` BEFORE this file so the cutover '
+                                'ships with consistent genesis balances.',
+                    n_genesis_log_rows, v_genesis_chain, n_ledger_genesis,
+                    n_genesis_log_rows - n_ledger_genesis;
+            END IF;
+        ELSE
+            RAISE NOTICE 'verify: structs.ledger not deployed — skipping genesis-row cross-check';
+        END IF;
+    END IF;
 END $$;
 
 COMMIT;
@@ -612,3 +784,13 @@ COMMIT;
 --    service supervisor.
 -- 4. Apply Phase C (sync-state code) to drop the runtime bootstrap
 --    ALTERs now that the canonical schema carries the columns natively.
+-- 5. If step 7f logged "raw_blocks < block_log", restart sync-state
+--    with `-mirror-raw=true` (or env SYNC_STATE_MIRROR_RAW=true) and
+--    let it ingest forward — past sync-state runs without mirror-raw
+--    are now exposed via the cache.* views, so consumers will silently
+--    see fewer rows than expected for that historical range.
+-- 6. Run `sync-state verify` from any host with DB access. The
+--    `genesis_loaded`, `raw_mirror_coverage`, `current_block_status`
+--    and `ledger_balance_sanity` checks should all PASS. The verify
+--    subcommand is the canonical post-cutover health gate — script it
+--    into your deployment system and alert on non-PASS exit codes.
