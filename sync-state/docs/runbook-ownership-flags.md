@@ -64,23 +64,33 @@ the node has made available. As the node advances toward chain tip,
 `sync-state` follows it block-for-block, sleeping when there's nothing
 new and resuming automatically.
 
-What you'll see at startup against a catching-up node:
+What you'll see at startup when primary is catching up but seed is caught up:
+
+```
+Connected: chain_id=structstestnet-111 tip=798200 earliest=1 catching_up=false
+[WARN] node liveness  catching_up=true at tip=12345 (sync-state will skip this endpoint for blocks above its tip until it catches up)
+```
+
+Sync-state indexes against the seed tip (~798k) while local `structsd` catches
+up. Block fetches and `tip_height` both track the network until primary reports
+`catching_up=false`, then primary becomes the tip source again.
+
+If every endpoint in the pool is catching up (no caught-up seed), you'll see:
 
 ```
 Connected: chain_id=structstestnet-111 tip=12345 earliest=1 catching_up=true
-[WARN] node liveness  node is itself catching_up at tip=12345; sync-state will track the node's tip and process blocks as they become available (not fatal)
 ```
 
 At the tip (rate-limited to once every 30 s) you'll see:
 
 ```
-at node-tip h=12500 (node still catching_up; will track as it advances)
-```
-
-and once the node is fully caught up:
-
-```
 at chain-tip h=796800 (sleeping 3s between polls)
+```
+
+If only a catching-up node is reachable (no seed fallback), you'll instead see:
+
+```
+at node-tip h=12500 (node still catching_up; will track as it advances)
 ```
 
 Tunables relevant to this mode:

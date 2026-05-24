@@ -66,8 +66,10 @@ RPC pool (2 endpoint(s), primary first):
 Connected: chain_id=structstestnet-111 tip=798200 earliest=1 catching_up=false
 ```
 
-(The `Connected:` line reports whichever endpoint answered `/status`
-first — the preferred one if reachable, else the next in line.)
+(The `Connected:` line reports the authoritative tip source: the first
+caught-up endpoint in preference order. While primary is still
+`catching_up=true`, this is the seed even though block fetches also
+prefer seed for heights above primary's tip.)
 
 ## Verifying failover via the doctor
 

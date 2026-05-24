@@ -239,6 +239,30 @@ func TestClient_PrimaryHeightNotAvailable_FallsToSeed(t *testing.T) {
 	}
 }
 
+func TestClient_Status_SkipsCatchingUpPrimary(t *testing.T) {
+	primary := newFakeNode(t, "structstestnet-111", 100)
+	primary.setCatchUp(true)
+	seed := newFakeNode(t, "structstestnet-111", 1000)
+
+	c := NewClient([]string{primary.URL(), seed.URL()}, 2*time.Second, 0)
+	stat, err := c.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got := stat.Latest(); got != 1000 {
+		t.Fatalf("Status tip = %d, want 1000 from caught-up seed", got)
+	}
+	if stat.SyncInfo.CatchingUp {
+		t.Fatalf("Status should come from caught-up seed, not catching-up primary")
+	}
+	if atomic.LoadInt64(&primary.statusHits) != 1 {
+		t.Fatalf("primary /status should have been probed once, got %d", primary.statusHits)
+	}
+	if atomic.LoadInt64(&seed.statusHits) != 1 {
+		t.Fatalf("seed /status should have been probed once, got %d", seed.statusHits)
+	}
+}
+
 func TestClient_PrimaryCatchingUp_StatusCacheSkipsDoomedRoundTrip(t *testing.T) {
 	primary := newFakeNode(t, "structstestnet-111", 100)
 	primary.setCatchUp(true)

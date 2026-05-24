@@ -357,16 +357,19 @@ func (c *Client) StatusOf(ctx context.Context, endpointURL string) (*StatusResul
 	return nil, fmt.Errorf("endpoint %q not in client", endpointURL)
 }
 
-// statusFromAny tries each endpoint in preference order until one
-// returns a /status reply, refreshing that endpoint's cache as a side
-// effect. We don't `get(... /status ...)` here because /status responses
-// are per-endpoint by design (each node has its own tip) and we want to
-// record which endpoint we heard from.
+// statusFromAny refreshes /status on each endpoint in preference order
+// and returns the first caught-up reply (catching_up=false). While a
+// local primary is still syncing, this keeps the syncer's tip bound to
+// the network via seed rather than the primary's in-progress height.
+// Per-endpoint caches are always refreshed. If every reachable endpoint
+// is still catching_up, the first reachable status is returned so the
+// syncer can at least track the primary's progress.
 func (c *Client) statusFromAny(ctx context.Context) (*StatusResult, error) {
 	if len(c.endpoints) == 0 {
 		return nil, errors.New("rpc client has no endpoints configured")
 	}
 	var errs []string
+	var catchingUp *StatusResult
 	for i, ep := range c.endpoints {
 		if c.skipForRecentFailure(ep, i) {
 			errs = append(errs, fmt.Sprintf("%s: skipped (recent failure: %v)", ep.url, ep.cachedErr()))
@@ -376,12 +379,21 @@ func (c *Client) statusFromAny(ctx context.Context) (*StatusResult, error) {
 		stat, err := c.refreshStatus(epCtx, ep)
 		cancel()
 		if err == nil {
-			return stat, nil
+			if !stat.SyncInfo.CatchingUp {
+				return stat, nil
+			}
+			if catchingUp == nil {
+				catchingUp = stat
+			}
+			continue
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		errs = append(errs, fmt.Sprintf("%s: %v", ep.url, err))
+	}
+	if catchingUp != nil {
+		return catchingUp, nil
 	}
 	return nil, fmt.Errorf("%w: %s", ErrAllEndpointsFailed, strings.Join(errs, "; "))
 }
