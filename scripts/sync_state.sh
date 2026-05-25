@@ -46,11 +46,6 @@
 #   SYNC_STATE_SKIP_DOCTOR        default false (skip RPC + trigger probes;
 #                                    writer lock is always acquired)
 #
-#   SYNC_STATE_OWN_DERIVATIONS    default false (Go owns planet_activity /
-#                                    address-guild / struct-status derivations)
-#   SYNC_STATE_OWN_INFUSION_LEDGER  default false (Go owns infusion ledger entries)
-#   SYNC_STATE_OWN_PLANET_META    default false (Go owns planet_meta seeding)
-#
 # Upstream node requirements (verified by doctor):
 #   app.toml      pruning = "nothing", min-retain-blocks = 0
 #   config.toml   [storage] discard_abci_responses = false

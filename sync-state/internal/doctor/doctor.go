@@ -662,6 +662,11 @@ var canonicalColumns = []struct{ Schema, Table, Column string }{
 	{"structs", "stat_connection_count", "block_height"},
 	{"structs", "stat_struct_health", "block_height"},
 	{"structs", "stat_struct_status", "block_height"},
+	{"structs", "player", "username"},
+	{"structs", "player", "pfp"},
+	{"structs", "guild", "name"},
+	{"structs", "guild", "pfp"},
+	{"structs", "planet", "name"},
 }
 
 // probeCanonicalSchema asserts that every column in canonicalColumns

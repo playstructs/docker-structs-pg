@@ -10,8 +10,8 @@ package events
 // Run `sync-state list-handlers` for the runtime view; this slice and the
 // runtime view should always agree.
 //
-// Every handler unconditionally owns its derived side-effects (planet_meta
-// seed, infusion ledger, planet_activity emits, address-guild propagation).
+// Every handler unconditionally owns its derived side-effects (planet.name
+// UGC, infusion ledger, planet_activity emits, address-guild propagation).
 // The historical SYNC_STATE_OWN_* flags were retired with the cache.*
 // subsystem.
 func AllHandlers() []Handler {

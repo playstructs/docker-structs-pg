@@ -18,7 +18,7 @@ Those flags were removed when the `cache.*` subsystem was retired and
 | `structs.planet_activity` for raid status | `planet_activity_raid_status` on `structs.planet_raid` | [`internal/events/raid.go`](../internal/events/raid.go) |
 | `structs.planet_activity` for struct attribute | `planet_activity_struct_attribute` on `structs.struct_attribute` | [`internal/events/struct_attribute.go`](../internal/events/struct_attribute.go) |
 | `structs.player_address.guild_id` cascade | `update_address_guild_id` on `structs.player` | [`internal/events/player.go`](../internal/events/player.go) |
-| `structs.planet_meta` seeding | `name_planet` on `structs.planet` | [`internal/events/planet.go`](../internal/events/planet.go) |
+| Chain UGC on `structs.player` / `structs.guild` / `structs.planet` | cache UGC handlers on `cache.queue` | [`internal/events/player.go`](../internal/events/player.go), [`guild.go`](../internal/events/guild.go), [`planet.go`](../internal/events/planet.go) |
 | `structs.ledger` for infusion fuel delta | `add_infusion_ledger_entry` on `structs.infusion` | [`internal/events/infusion.go`](../internal/events/infusion.go) |
 | `structs.ledger` + `structs.defusion` for bank/staking | `cache.PROCESS_BLOCK_LEDGER` (via `cache.TRANSFER_LEDGER_ENTRY` on `cache.blocks`) | [`internal/bank/process.go`](../internal/bank/process.go) |
 | `structs.ledger` for genesis bank/staking/ore | docker-structsd's `scripts/indexer-insert-genesis.sh` (Bash + `jq`) | [`internal/genesis/apply.go`](../internal/genesis/apply.go) — see [`runbook-init-genesis.md`](runbook-init-genesis.md) |
@@ -45,11 +45,9 @@ nothing downstream is expected to regress:
   branch referenced `NEW.attribute_type`, which is NULL on DELETE in
   PG, making the entire branch dead code. Fixed to use the parsed
   `attrType`.
-- **planet_meta seed** — the SQL trigger inserted `(planet.id, NULL)`
-  when the owner's player row had no guild yet, hitting a NOT NULL
-  constraint and rolling back the planet insert (observed at h=793782).
-  Fixed: skip the seed when `guild_id IS NULL`, then backfill on the
-  next `EventPlayer` for that player.
+- **planet.name UGC** — the legacy SQL path seeded `planet_meta` rows and
+  relied on `generate_planet_name()` defaults. Fixed: chain name is written
+  directly to `structs.planet.name` when non-empty; no meta table seeding.
 - **infusion ledger block_height** — the SQL trigger read
   `(SELECT height FROM structs.current_block LIMIT 1)`, racing with
   the per-block tx. Fixed: source from `bctx.Height` so replays land

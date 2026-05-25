@@ -46,7 +46,7 @@ type Handler interface {
 // OWN_PLANET_META flags lived here while sync-state was being introduced
 // alongside the legacy cache.* triggers. They were removed once the
 // cache subsystem was retired — every handler now unconditionally owns
-// its derivation side-effects (planet_activity emits, planet_meta seed,
+// its derivation side-effects (planet_activity emits, planet.name UGC,
 // infusion ledger, address-guild propagation).
 type BlockContext struct {
 	ChainID   string

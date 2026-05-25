@@ -5,8 +5,7 @@ package payload
 // (cache-trigger-add-queue-20260427-ugc-fields.sql:312-419)
 //
 // space/air/land/water mirror Fleet — raw jsonb, handler reassembles map.
-// Name is chain UGC; handler only writes planet_meta.name when non-empty
-// (preserves NAME_PLANET trigger's generate_planet_name() default).
+// Name is chain UGC; handler only writes structs.planet.name when non-empty.
 type Planet struct {
 	ID                string  `json:"id"`
 	MaxOre            JSONInt `json:"maxOre"`

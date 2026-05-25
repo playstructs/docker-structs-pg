@@ -207,15 +207,18 @@ func TestHandler_Guild(t *testing.T) {
 		if err := (guildHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		var endpoint, name string
+		var endpoint, name, pfp string
 		var jim int64
 		_ = tx.QueryRow(ctx, `SELECT endpoint, join_infusion_minimum_p FROM structs.guild WHERE id=$1`, "test-guild-1").Scan(&endpoint, &jim)
 		if endpoint != "http://example.com" || jim != 500 {
 			t.Errorf("guild row: endpoint=%q jim=%d", endpoint, jim)
 		}
-		_ = tx.QueryRow(ctx, `SELECT name FROM structs.guild_meta WHERE id=$1`, "test-guild-1").Scan(&name)
+		_ = tx.QueryRow(ctx, `SELECT name, pfp FROM structs.guild WHERE id=$1`, "test-guild-1").Scan(&name, &pfp)
 		if name != "Test Guild" {
-			t.Errorf("guild_meta.name = %q want Test Guild", name)
+			t.Errorf("guild.name = %q want Test Guild", name)
+		}
+		if pfp != "ipfs://abc" {
+			t.Errorf("guild.pfp = %q want ipfs://abc", pfp)
 		}
 	})
 }
@@ -294,12 +297,6 @@ func TestHandler_Planet(t *testing.T) {
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
 
-		// Production invariant: the NAME_PLANET trigger on structs.planet
-		// inserts a planet_meta row keyed on (planet.id, player.guild_id);
-		// planet_meta.guild_id is NOT NULL, so the owner player must exist
-		// before the planet event lands. The chain always emits player
-		// events before planet events for the same owner, so this is a
-		// faithful test ordering rather than a sync-state bug.
 		playerRaw := mustJSON(t, map[string]any{
 			"id":      "1-1",
 			"index":   1,
@@ -336,13 +333,13 @@ func TestHandler_Planet(t *testing.T) {
 		if owner != "1-1" {
 			t.Errorf("planet.owner = %q want 1-1", owner)
 		}
-		// planet_meta seed comes from NAME_PLANET trigger (which runs since
-		// we didn't disable it for tests); name override should land on
-		// any row that the trigger seeded. Verify the chain name took.
 		var name string
-		err := tx.QueryRow(ctx, `SELECT name FROM structs.planet_meta WHERE id=$1 LIMIT 1`, "3-7").Scan(&name)
-		if err == nil && name != "Test Planet" {
-			t.Errorf("planet_meta.name = %q want Test Planet", name)
+		err := tx.QueryRow(ctx, `SELECT name FROM structs.planet WHERE id=$1`, "3-7").Scan(&name)
+		if err != nil {
+			t.Fatalf("planet.name: %v", err)
+		}
+		if name != "Test Planet" {
+			t.Errorf("planet.name = %q want Test Planet", name)
 		}
 	})
 }
@@ -371,10 +368,13 @@ func TestHandler_Player(t *testing.T) {
 		if primary != "structs1addr" {
 			t.Errorf("primary_address = %q", primary)
 		}
-		var username string
-		_ = tx.QueryRow(ctx, `SELECT username FROM structs.player_meta WHERE id=$1`, "1-99").Scan(&username)
+		var username, pfp string
+		_ = tx.QueryRow(ctx, `SELECT username, pfp FROM structs.player WHERE id=$1`, "1-99").Scan(&username, &pfp)
 		if username != "TestPlayer" {
-			t.Errorf("player_meta.username = %q want TestPlayer", username)
+			t.Errorf("player.username = %q want TestPlayer", username)
+		}
+		if pfp != "ipfs://pfp" {
+			t.Errorf("player.pfp = %q want ipfs://pfp", pfp)
 		}
 		// self-mapping sidecar
 		var selfMap string
