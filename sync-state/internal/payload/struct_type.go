@@ -4,7 +4,8 @@ package payload
 // SQL handler: cache.handle_event_struct_type
 // (cache-trigger-add-queue-20260121-bigly-refactor.sql:885-1389)
 //
-// 65 chain fields. buildDraw/passiveDraw map to *_p columns (precision).
+// 65 chain fields. buildDraw/passiveDraw/generatingRate map to *_p columns (precision).
+// generating_rate is GENERATED (generating_rate_p * 1000).
 // is_command is derived in Go from class == "Command Ship".
 //
 // Several of the array-shaped columns (possible_ambit_array,

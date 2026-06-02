@@ -13,8 +13,8 @@ import (
 // structTypeHandler ports cache.handle_event_struct_type
 // (cache-trigger-add-queue-20260121-bigly-refactor.sql:885-1389).
 //
-// 65 writable columns. build_draw/passive_draw map to *_p columns; their
-// non-_p companions are GENERATED. is_command is derived in Go from
+// 65 writable columns. build_draw/passive_draw/generating_rate map to *_p
+// columns; their non-_p companions are GENERATED. is_command is derived in Go from
 // class == 'Command Ship'. The *_array bitmask-derivative columns are
 // also GENERATED and never written here.
 //
@@ -45,7 +45,7 @@ INSERT INTO structs.struct_type (
     activate_charge, build_charge, defend_change_charge, move_charge, stealth_activate_charge,
     attack_reduction, attack_counterable, stealth_systems,
     counter_attack, counter_attack_same_ambit, post_destruction_damage,
-    generating_rate, planetary_shield_contribution,
+    generating_rate_p, planetary_shield_contribution,
     ore_mining_difficulty, ore_refining_difficulty,
     unguided_defensive_success_rate_numerator, unguided_defensive_success_rate_denominator,
     guided_defensive_success_rate_numerator, guided_defensive_success_rate_denominator,
@@ -132,7 +132,7 @@ ON CONFLICT (id) DO UPDATE
        counter_attack = EXCLUDED.counter_attack,
        counter_attack_same_ambit = EXCLUDED.counter_attack_same_ambit,
        post_destruction_damage = EXCLUDED.post_destruction_damage,
-       generating_rate = EXCLUDED.generating_rate,
+       generating_rate_p = EXCLUDED.generating_rate_p,
        planetary_shield_contribution = EXCLUDED.planetary_shield_contribution,
        ore_mining_difficulty = EXCLUDED.ore_mining_difficulty,
        ore_refining_difficulty = EXCLUDED.ore_refining_difficulty,
@@ -200,7 +200,7 @@ ON CONFLICT (id) DO UPDATE
     structs.struct_type.counter_attack,
     structs.struct_type.counter_attack_same_ambit,
     structs.struct_type.post_destruction_damage,
-    structs.struct_type.generating_rate,
+    structs.struct_type.generating_rate_p,
     structs.struct_type.planetary_shield_contribution,
     structs.struct_type.ore_mining_difficulty,
     structs.struct_type.ore_refining_difficulty,
@@ -267,7 +267,7 @@ ON CONFLICT (id) DO UPDATE
     EXCLUDED.counter_attack,
     EXCLUDED.counter_attack_same_ambit,
     EXCLUDED.post_destruction_damage,
-    EXCLUDED.generating_rate,
+    EXCLUDED.generating_rate_p,
     EXCLUDED.planetary_shield_contribution,
     EXCLUDED.ore_mining_difficulty,
     EXCLUDED.ore_refining_difficulty,

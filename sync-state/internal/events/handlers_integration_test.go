@@ -498,6 +498,7 @@ func TestHandler_StructType(t *testing.T) {
 			"primaryWeaponRecoilDamage":              0,
 			"primaryWeaponShotSuccessRateNumerator":   1,
 			"primaryWeaponShotSuccessRateDenominator": 1,
+			"generatingRate":                         2,
 			"class":                                  "Command Ship",
 		})
 		if err := (structTypeHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
@@ -514,6 +515,13 @@ func TestHandler_StructType(t *testing.T) {
 		_ = tx.QueryRow(ctx, `SELECT build_draw_p FROM structs.struct_type WHERE id=$1`, 9999).Scan(&bdraw)
 		if bdraw != 500 {
 			t.Errorf("build_draw_p = %d want 500", bdraw)
+		}
+		var genP, gen int64
+		_ = tx.QueryRow(ctx,
+			`SELECT generating_rate_p, generating_rate FROM structs.struct_type WHERE id=$1`, 9999,
+		).Scan(&genP, &gen)
+		if genP != 2 || gen != 2000 {
+			t.Errorf("generating_rate_p=%d generating_rate=%d want 2/2000", genP, gen)
 		}
 	})
 }
