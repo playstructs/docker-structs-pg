@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -76,7 +77,7 @@ func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height in
 		var err error
 		switch ev.Type {
 		case "transfer":
-			err = handleTransfer(buf, height, t, ev)
+			err = handleTransfer(buf, height, t, ev, events)
 		case "coinbase":
 			err = handleCoinbase(buf, height, t, ev)
 		case "burn":
@@ -218,15 +219,46 @@ func findInGroup(group []rpc.Event, eventType, attrKey string) string {
 
 // --- per-event handlers ------------------------------------------------
 
+// isStructInfusionTx reports whether the event group is a struct-generator
+// infusion tx. The infusion handler already debits the player via 'infused';
+// the companion Cosmos transfer (player → module escrow → burn) must not
+// also write a duplicate 'sent' on the player. Reactor infusions use
+// destinationType=reactor and delegate/unbond bank events instead.
+func isStructInfusionTx(group []rpc.Event) bool {
+	for _, e := range group {
+		if e.Type != "structs.structs.EventInfusion" {
+			continue
+		}
+		infusion := findAttr(e, "infusion")
+		if infusion != "" && strings.Contains(infusion, `"destinationType":"struct"`) {
+			return true
+		}
+	}
+	for _, e := range group {
+		if e.Type == "message" && findAttr(e, "action") == "/structs.structs.MsgStructGeneratorInfuse" {
+			return true
+		}
+	}
+	return false
+}
+
 // handleTransfer ports the WHEN 'transfer' branch (cache-system.sql:1433-1452).
 // 2 ledger rows: sender 'sent' debit + recipient 'received' credit.
-func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+//
+// Struct infusion txs are an exception: emitInfusionLedger already records
+// the player debit, so skip the sender 'sent' row but keep 'received' on the
+// escrow pool so received+burned still net to zero there.
+func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, group []rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
 	recipient := findAttr(ev, "recipient")
 	sender := findAttr(ev, "sender")
+	if isStructInfusionTx(group) {
+		pushLedger(buf, recipient, sender, amt, h, t, "received", "credit", denom)
+		return nil
+	}
 	pushLedger(buf, sender, recipient, amt, h, t, "sent", "debit", denom)
 	pushLedger(buf, recipient, sender, amt, h, t, "received", "credit", denom)
 	return nil

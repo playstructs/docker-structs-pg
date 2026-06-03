@@ -433,6 +433,41 @@ func TestProcessBlock_CreateValidator_CrossEventSpender(t *testing.T) {
 	})
 }
 
+func TestProcessBlock_Transfer_StructInfusionSkipsSentDebit(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		player := "structs1infuserstruct"
+		pool := "structs1infusionpool"
+		height := int64(999977521)
+		txEvents := []rpc.Event{
+			{Type: "message", Attributes: []rpc.Attribute{
+				{Key: "action", Value: "/structs.structs.MsgStructGeneratorInfuse"},
+			}},
+			{Type: "structs.structs.EventInfusion", Attributes: []rpc.Attribute{
+				{Key: "infusion", Value: `{"destinationType":"struct","destinationId":"5-9999","fuel":"1000000"}`},
+			}},
+			transferEvent(player, pool, "1000000ualpha"),
+			{Type: "burn", Attributes: []rpc.Attribute{
+				{Key: "burner", Value: pool},
+				{Key: "amount", Value: "1000000ualpha"},
+			}},
+		}
+		if err := processAndFlush(ctx, tx, height, fixedTime(), nil, []rpc.TxResult{{Events: txEvents}}); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		if n := queryLedgerCount(t, tx, "block_height=$1 AND address=$2 AND action='sent'", height, player); n != 0 {
+			t.Errorf("player sent rows = %d want 0", n)
+		}
+		if n := queryLedgerCount(t, tx, "block_height=$1 AND address=$2 AND action='received'", height, pool); n != 1 {
+			t.Errorf("pool received rows = %d want 1", n)
+		}
+		if n := queryLedgerCount(t, tx, "block_height=$1 AND address=$2 AND action='burned'", height, pool); n != 1 {
+			t.Errorf("pool burned rows = %d want 1", n)
+		}
+	})
+}
+
 // -------- isolation: bank failure in one event doesn't poison the rest --------
 
 func TestProcessBlock_NonBankEventsAreSkipped(t *testing.T) {

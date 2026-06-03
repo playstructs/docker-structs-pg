@@ -2,7 +2,9 @@ package bank
 
 import (
 	"testing"
+	"time"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/rpc"
 )
 
@@ -136,5 +138,85 @@ func TestCaptureFiltering(t *testing.T) {
 	}
 	if len(buf.Txs[0]) != 1 {
 		t.Errorf("tx[0]: got %d want 1 (transfer; skip message)", len(buf.Txs[0]))
+	}
+}
+
+func TestIsStructInfusionTx(t *testing.T) {
+	structInfusion := []rpc.Event{
+		{Type: "message", Attributes: []rpc.Attribute{
+			{Key: "action", Value: "/structs.structs.MsgStructGeneratorInfuse"},
+		}},
+		{Type: "structs.structs.EventInfusion", Attributes: []rpc.Attribute{
+			{Key: "infusion", Value: `{"destinationType":"struct","destinationId":"5-1916","fuel":"1000000"}`},
+		}},
+	}
+	if !isStructInfusionTx(structInfusion) {
+		t.Error("struct infusion group: want true")
+	}
+
+	reactorInfusion := []rpc.Event{
+		{Type: "message", Attributes: []rpc.Attribute{
+			{Key: "action", Value: "/structs.structs.MsgReactorInfuse"},
+		}},
+		{Type: "structs.structs.EventInfusion", Attributes: []rpc.Attribute{
+			{Key: "infusion", Value: `{"destinationType":"reactor","destinationId":"3-1","fuel":"3000000"}`},
+		}},
+	}
+	if isStructInfusionTx(reactorInfusion) {
+		t.Error("reactor infusion group: want false")
+	}
+
+	if isStructInfusionTx([]rpc.Event{{
+		Type: "transfer",
+		Attributes: []rpc.Attribute{
+			{Key: "sender", Value: "a"},
+			{Key: "recipient", Value: "b"},
+			{Key: "amount", Value: "1ualpha"},
+		},
+	}}) {
+		t.Error("plain transfer group: want false")
+	}
+}
+
+func transferEventTest(sender, recipient, amount string) rpc.Event {
+	return rpc.Event{Type: "transfer", Attributes: []rpc.Attribute{
+		{Key: "recipient", Value: recipient},
+		{Key: "sender", Value: sender},
+		{Key: "amount", Value: amount},
+	}}
+}
+
+func TestHandleTransfer_StructInfusionSkipsSent(t *testing.T) {
+	player := "structs1player"
+	pool := "structs1pool"
+	group := []rpc.Event{
+		{Type: "structs.structs.EventInfusion", Attributes: []rpc.Attribute{
+			{Key: "infusion", Value: `{"destinationType":"struct","destinationId":"5-1","fuel":"1000000"}`},
+		}},
+		transferEventTest(player, pool, "1000000ualpha"),
+	}
+	buf := buffers.New()
+	tm := time.Date(2026, 6, 2, 22, 0, 0, 0, time.UTC)
+	if err := handleTransfer(buf, 977521, tm, group[1], group); err != nil {
+		t.Fatalf("handleTransfer: %v", err)
+	}
+	if len(buf.Ledger) != 1 {
+		t.Fatalf("ledger rows = %d want 1 (received only)", len(buf.Ledger))
+	}
+	row := buf.Ledger[0]
+	if row.Action != "received" || row.Direction != "credit" || row.Address != pool || row.Counterparty != player {
+		t.Errorf("got %+v; want received credit on pool from player", row)
+	}
+}
+
+func TestHandleTransfer_NormalTransferWritesBoth(t *testing.T) {
+	buf := buffers.New()
+	tm := time.Date(2026, 6, 2, 22, 0, 0, 0, time.UTC)
+	ev := transferEventTest("structs1sender", "structs1recipient", "50ualpha")
+	if err := handleTransfer(buf, 1000, tm, ev, []rpc.Event{ev}); err != nil {
+		t.Fatalf("handleTransfer: %v", err)
+	}
+	if len(buf.Ledger) != 2 {
+		t.Fatalf("ledger rows = %d want 2", len(buf.Ledger))
 	}
 }
