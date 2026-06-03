@@ -468,6 +468,41 @@ func TestProcessBlock_Transfer_StructInfusionSkipsSentDebit(t *testing.T) {
 	})
 }
 
+func TestProcessBlock_Transfer_AlphaRefineSkipsReceivedCredit(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		player := "structs1refinerint"
+		pool := "structs1refinepool"
+		height := int64(999107304)
+		txEvents := []rpc.Event{
+			{Type: "message", Attributes: []rpc.Attribute{
+				{Key: "action", Value: "/structs.structs.MsgStructOreRefineryComplete"},
+			}},
+			{Type: "structs.structs.EventAlphaRefine", Attributes: []rpc.Attribute{
+				{Key: "eventAlphaRefineDetail", Value: `{"primaryAddress":"structs1refinerint","amount":"1"}`},
+			}},
+			{Type: "coinbase", Attributes: []rpc.Attribute{
+				{Key: "minter", Value: pool},
+				{Key: "amount", Value: "1000000ualpha"},
+			}},
+			transferEvent(pool, player, "1000000ualpha"),
+		}
+		if err := processAndFlush(ctx, tx, height, fixedTime(), nil, []rpc.TxResult{{Events: txEvents}}); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		if n := queryLedgerCount(t, tx, "block_height=$1 AND address=$2 AND action='received'", height, player); n != 0 {
+			t.Errorf("player received rows = %d want 0", n)
+		}
+		if n := queryLedgerCount(t, tx, "block_height=$1 AND address=$2 AND action='sent'", height, pool); n != 1 {
+			t.Errorf("pool sent rows = %d want 1", n)
+		}
+		if n := queryLedgerCount(t, tx, "block_height=$1 AND address=$2 AND action='minted'", height, pool); n != 1 {
+			t.Errorf("pool minted rows = %d want 1", n)
+		}
+	})
+}
+
 // -------- isolation: bank failure in one event doesn't poison the rest --------
 
 func TestProcessBlock_NonBankEventsAreSkipped(t *testing.T) {

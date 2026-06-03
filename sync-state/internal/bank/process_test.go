@@ -220,3 +220,43 @@ func TestHandleTransfer_NormalTransferWritesBoth(t *testing.T) {
 		t.Fatalf("ledger rows = %d want 2", len(buf.Ledger))
 	}
 }
+
+func TestIsAlphaRefineTx(t *testing.T) {
+	refine := []rpc.Event{
+		{Type: "message", Attributes: []rpc.Attribute{
+			{Key: "action", Value: "/structs.structs.MsgStructOreRefineryComplete"},
+		}},
+		{Type: "structs.structs.EventAlphaRefine", Attributes: []rpc.Attribute{
+			{Key: "eventAlphaRefineDetail", Value: `{"primaryAddress":"structs1p","amount":"1"}`},
+		}},
+	}
+	if !isAlphaRefineTx(refine) {
+		t.Error("refine group: want true")
+	}
+	if isAlphaRefineTx([]rpc.Event{transferEventTest("a", "b", "1ualpha")}) {
+		t.Error("plain transfer group: want false")
+	}
+}
+
+func TestHandleTransfer_AlphaRefineSkipsReceived(t *testing.T) {
+	player := "structs1refiner"
+	pool := "structs1pool"
+	group := []rpc.Event{
+		{Type: "structs.structs.EventAlphaRefine", Attributes: []rpc.Attribute{
+			{Key: "eventAlphaRefineDetail", Value: `{"primaryAddress":"structs1refiner","amount":"1"}`},
+		}},
+		transferEventTest(pool, player, "1000000ualpha"),
+	}
+	buf := buffers.New()
+	tm := time.Date(2026, 4, 3, 3, 0, 0, 0, time.UTC)
+	if err := handleTransfer(buf, 107304, tm, group[1], group); err != nil {
+		t.Fatalf("handleTransfer: %v", err)
+	}
+	if len(buf.Ledger) != 1 {
+		t.Fatalf("ledger rows = %d want 1 (sent only)", len(buf.Ledger))
+	}
+	row := buf.Ledger[0]
+	if row.Action != "sent" || row.Direction != "debit" || row.Address != pool || row.Counterparty != player {
+		t.Errorf("got %+v; want sent debit on pool to player", row)
+	}
+}

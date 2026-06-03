@@ -242,12 +242,34 @@ func isStructInfusionTx(group []rpc.Event) bool {
 	return false
 }
 
+// isAlphaRefineTx reports whether the event group is an ore-refinery complete
+// tx. The alphaRefine handler already credits the player via 'refined';
+// the companion Cosmos transfer (pool → player) must not also write a
+// duplicate 'received' on the player.
+func isAlphaRefineTx(group []rpc.Event) bool {
+	for _, e := range group {
+		if e.Type == "structs.structs.EventAlphaRefine" {
+			return true
+		}
+	}
+	for _, e := range group {
+		if e.Type == "message" && findAttr(e, "action") == "/structs.structs.MsgStructOreRefineryComplete" {
+			return true
+		}
+	}
+	return false
+}
+
 // handleTransfer ports the WHEN 'transfer' branch (cache-system.sql:1433-1452).
 // 2 ledger rows: sender 'sent' debit + recipient 'received' credit.
 //
 // Struct infusion txs are an exception: emitInfusionLedger already records
 // the player debit, so skip the sender 'sent' row but keep 'received' on the
 // escrow pool so received+burned still net to zero there.
+//
+// Alpha refine txs are the mirror case: alphaRefineHandler already credits
+// the player via 'refined', so skip the recipient 'received' row but keep
+// 'sent' on the pool so minted+sent still net correctly there.
 func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, group []rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
@@ -257,6 +279,10 @@ func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, gro
 	sender := findAttr(ev, "sender")
 	if isStructInfusionTx(group) {
 		pushLedger(buf, recipient, sender, amt, h, t, "received", "credit", denom)
+		return nil
+	}
+	if isAlphaRefineTx(group) {
+		pushLedger(buf, sender, recipient, amt, h, t, "sent", "debit", denom)
 		return nil
 	}
 	pushLedger(buf, sender, recipient, amt, h, t, "sent", "debit", denom)
