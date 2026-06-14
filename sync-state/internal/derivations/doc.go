@@ -6,6 +6,8 @@
 //   - planet_activity_fleet_move      (fleet INSERT/UPDATE)
 //   - planet_activity_raid_status     (raid INSERT/UPDATE)
 //   - planet_activity_struct_attribute (struct_attribute INSERT/UPDATE/DELETE)
+//   - planet_activity_shield_change    (planetaryShield attribute change, v0.18.0)
+//   - planet_activity_block_raid_start (blockStartRaid attribute change, v0.18.0)
 //   - update_address_guild            (player.guild_id cascade)
 //   - infusion_ledger                 (infusion fuel delta → ledger pairs)
 //

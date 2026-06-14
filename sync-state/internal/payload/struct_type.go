@@ -4,7 +4,7 @@ package payload
 // SQL handler: cache.handle_event_struct_type
 // (cache-trigger-add-queue-20260121-bigly-refactor.sql:885-1389)
 //
-// 65 chain fields. buildDraw/passiveDraw/generatingRate map to *_p columns (precision).
+// 67 written chain fields. buildDraw/passiveDraw/generatingRate map to *_p columns (precision).
 // generating_rate is GENERATED (generating_rate_p * 1000).
 // is_command is derived in Go from class == "Command Ship".
 //
@@ -33,6 +33,7 @@ type StructType struct {
 	PrimaryWeaponDamage                      JSONInt  `json:"primaryWeaponDamage"`
 	PrimaryWeaponBlockable                   JSONBool `json:"primaryWeaponBlockable"`
 	PrimaryWeaponCounterable                 JSONBool `json:"primaryWeaponCounterable"`
+	PrimaryWeaponArmourPiercing              JSONBool `json:"primaryWeaponArmourPiercing"`
 	PrimaryWeaponRecoilDamage                JSONInt  `json:"primaryWeaponRecoilDamage"`
 	PrimaryWeaponShotSuccessRateNumerator    JSONInt  `json:"primaryWeaponShotSuccessRateNumerator"`
 	PrimaryWeaponShotSuccessRateDenominator  JSONInt  `json:"primaryWeaponShotSuccessRateDenominator"`
@@ -46,6 +47,7 @@ type StructType struct {
 	SecondaryWeaponDamage                      JSONInt  `json:"secondaryWeaponDamage"`
 	SecondaryWeaponBlockable                   JSONBool `json:"secondaryWeaponBlockable"`
 	SecondaryWeaponCounterable                 JSONBool `json:"secondaryWeaponCounterable"`
+	SecondaryWeaponArmourPiercing              JSONBool `json:"secondaryWeaponArmourPiercing"`
 	SecondaryWeaponRecoilDamage                JSONInt  `json:"secondaryWeaponRecoilDamage"`
 	SecondaryWeaponShotSuccessRateNumerator    JSONInt  `json:"secondaryWeaponShotSuccessRateNumerator"`
 	SecondaryWeaponShotSuccessRateDenominator  JSONInt  `json:"secondaryWeaponShotSuccessRateDenominator"`

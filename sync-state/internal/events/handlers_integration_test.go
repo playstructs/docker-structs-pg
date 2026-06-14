@@ -357,8 +357,9 @@ func TestHandler_Player(t *testing.T) {
 			"substationId":   "",
 			"planetId":       "",
 			"fleetId":        "",
-			"name":           "TestPlayer",
-			"pfp":            "ipfs://pfp",
+			"name":                      "TestPlayer",
+			"pfp":                       "ipfs://pfp",
+			"pfpClientRenderAttributes": `{"bg":"red"}`,
 		})
 		if err := (playerHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
 			t.Fatalf("insert: %v", err)
@@ -368,13 +369,16 @@ func TestHandler_Player(t *testing.T) {
 		if primary != "structs1addr" {
 			t.Errorf("primary_address = %q", primary)
 		}
-		var username, pfp string
-		_ = tx.QueryRow(ctx, `SELECT username, pfp FROM structs.player WHERE id=$1`, "1-99").Scan(&username, &pfp)
+		var username, pfp, pfpCR string
+		_ = tx.QueryRow(ctx, `SELECT username, pfp, pfp_client_render_attributes FROM structs.player WHERE id=$1`, "1-99").Scan(&username, &pfp, &pfpCR)
 		if username != "TestPlayer" {
 			t.Errorf("player.username = %q want TestPlayer", username)
 		}
 		if pfp != "ipfs://pfp" {
 			t.Errorf("player.pfp = %q want ipfs://pfp", pfp)
+		}
+		if pfpCR != `{"bg":"red"}` {
+			t.Errorf("player.pfp_client_render_attributes = %q want {\"bg\":\"red\"}", pfpCR)
 		}
 		// self-mapping sidecar
 		var selfMap string
@@ -495,9 +499,11 @@ func TestHandler_StructType(t *testing.T) {
 			"primaryWeaponDamage":                    10,
 			"primaryWeaponBlockable":                 true,
 			"primaryWeaponCounterable":               true,
+			"primaryWeaponArmourPiercing":            true,
 			"primaryWeaponRecoilDamage":              0,
 			"primaryWeaponShotSuccessRateNumerator":   1,
 			"primaryWeaponShotSuccessRateDenominator": 1,
+			"secondaryWeaponArmourPiercing":          false,
 			"generatingRate":                         2,
 			"class":                                  "Command Ship",
 		})
@@ -522,6 +528,14 @@ func TestHandler_StructType(t *testing.T) {
 		).Scan(&genP, &gen)
 		if genP != 2 || gen != 2000 {
 			t.Errorf("generating_rate_p=%d generating_rate=%d want 2/2000", genP, gen)
+		}
+		var primAP, secAP bool
+		_ = tx.QueryRow(ctx,
+			`SELECT primary_weapon_armour_piercing, secondary_weapon_armour_piercing
+			   FROM structs.struct_type WHERE id=$1`, 9999,
+		).Scan(&primAP, &secAP)
+		if !primAP || secAP {
+			t.Errorf("armour_piercing: primary=%v secondary=%v want true/false", primAP, secAP)
 		}
 	})
 }

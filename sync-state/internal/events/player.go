@@ -37,25 +37,27 @@ const playerUpsertSQL = `
 INSERT INTO structs.player (
     id, index, creator, primary_address, guild_id,
     substation_id, planet_id, fleet_id,
-    username, pfp,
+    username, pfp, pfp_client_render_attributes,
     created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
 ON CONFLICT (id) DO UPDATE
-   SET primary_address = EXCLUDED.primary_address,
-       guild_id        = EXCLUDED.guild_id,
-       substation_id   = EXCLUDED.substation_id,
-       planet_id       = EXCLUDED.planet_id,
-       fleet_id        = EXCLUDED.fleet_id,
-       username        = EXCLUDED.username,
-       pfp             = EXCLUDED.pfp,
-       updated_at      = NOW()
- WHERE structs.player.primary_address IS DISTINCT FROM EXCLUDED.primary_address
-    OR structs.player.guild_id        IS DISTINCT FROM EXCLUDED.guild_id
-    OR structs.player.substation_id   IS DISTINCT FROM EXCLUDED.substation_id
-    OR structs.player.planet_id       IS DISTINCT FROM EXCLUDED.planet_id
-    OR structs.player.fleet_id        IS DISTINCT FROM EXCLUDED.fleet_id
-    OR structs.player.username        IS DISTINCT FROM EXCLUDED.username
-    OR structs.player.pfp             IS DISTINCT FROM EXCLUDED.pfp`
+   SET primary_address              = EXCLUDED.primary_address,
+       guild_id                     = EXCLUDED.guild_id,
+       substation_id                = EXCLUDED.substation_id,
+       planet_id                    = EXCLUDED.planet_id,
+       fleet_id                     = EXCLUDED.fleet_id,
+       username                     = EXCLUDED.username,
+       pfp                          = EXCLUDED.pfp,
+       pfp_client_render_attributes = EXCLUDED.pfp_client_render_attributes,
+       updated_at                   = NOW()
+ WHERE structs.player.primary_address              IS DISTINCT FROM EXCLUDED.primary_address
+    OR structs.player.guild_id                     IS DISTINCT FROM EXCLUDED.guild_id
+    OR structs.player.substation_id                IS DISTINCT FROM EXCLUDED.substation_id
+    OR structs.player.planet_id                    IS DISTINCT FROM EXCLUDED.planet_id
+    OR structs.player.fleet_id                     IS DISTINCT FROM EXCLUDED.fleet_id
+    OR structs.player.username                     IS DISTINCT FROM EXCLUDED.username
+    OR structs.player.pfp                          IS DISTINCT FROM EXCLUDED.pfp
+    OR structs.player.pfp_client_render_attributes IS DISTINCT FROM EXCLUDED.pfp_client_render_attributes`
 
 // playerPrevGuildSelectSQL fetches the player's existing guild_id so we
 // can detect a change and propagate it to player_address.
@@ -111,6 +113,7 @@ func (playerHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 		payload.NullableText(p.FleetID),
 		payload.NullableText(p.Name),
 		payload.NullableText(p.PFP),
+		payload.NullableText(p.PFPClientRenderAttributes),
 	); err != nil {
 		return fmt.Errorf("player upsert id=%s: %w", p.ID, err)
 	}

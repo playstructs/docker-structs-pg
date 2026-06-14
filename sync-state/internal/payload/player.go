@@ -19,4 +19,10 @@ type Player struct {
 	FleetID        string  `json:"fleetId"`
 	Name           string  `json:"name"`
 	PFP            string  `json:"pfp"`
+	// PFPClientRenderAttributes is chain Player field 12
+	// (pfpClientRenderAttributes), added in structsd v0.18.0: a compacted
+	// JSON object string describing how the client renders the player's
+	// locally generated profile picture. Written verbatim to
+	// structs.player.pfp_client_render_attributes.
+	PFPClientRenderAttributes string `json:"pfpClientRenderAttributes"`
 }

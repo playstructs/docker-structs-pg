@@ -376,6 +376,117 @@ func TestHandler_PlanetAttribute_AllLabels(t *testing.T) {
 	})
 }
 
+// TestHandler_PlanetAttribute_ShieldChangeActivity verifies that v0.18.0
+// planetaryShield (attrType 0) changes emit a shield_change planet_activity
+// row carrying old + new values, including the change down to zero.
+func TestHandler_PlanetAttribute_ShieldChangeActivity(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		// 0 -> 5, 5 -> 9, 9 -> 0 on planet index 7.
+		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+			mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "5"}))
+		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+			mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "9"}))
+		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+			mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "0"}))
+
+		type pair struct{ newV, oldV int64 }
+		want := []pair{{5, 0}, {9, 5}, {0, 9}}
+
+		rows, err := tx.Query(ctx,
+			`SELECT (detail->>'planetary_shield')::bigint,
+			        (detail->>'planetary_shield_old')::bigint
+			   FROM structs.planet_activity
+			  WHERE planet_id='2-7' AND category='shield_change'
+			  ORDER BY seq`)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var got []pair
+		for rows.Next() {
+			var p pair
+			if err := rows.Scan(&p.newV, &p.oldV); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, p)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("shield_change rows=%d want %d (%+v)", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("row %d: got %+v want %+v", i, got[i], want[i])
+			}
+		}
+	})
+}
+
+// TestHandler_PlanetAttribute_BlockRaidStartActivity verifies that v0.18.0
+// blockStartRaid (attrType 10) changes emit a block_raid_start planet_activity
+// row carrying old + new values on both set and clear.
+func TestHandler_PlanetAttribute_BlockRaidStartActivity(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		// 0 -> 1234 (raid window opens), 1234 -> 0 (cleared) on planet index 50.
+		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+			mustJSON(t, map[string]any{"attributeId": "10-2-50", "value": "1234"}))
+		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+			mustJSON(t, map[string]any{"attributeId": "10-2-50", "value": ""}))
+
+		type pair struct{ newV, oldV int64 }
+		want := []pair{{1234, 0}, {0, 1234}}
+
+		rows, err := tx.Query(ctx,
+			`SELECT (detail->>'block_start_raid')::bigint,
+			        (detail->>'block_start_raid_old')::bigint
+			   FROM structs.planet_activity
+			  WHERE planet_id='2-50' AND category='block_raid_start'
+			  ORDER BY seq`)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var got []pair
+		for rows.Next() {
+			var p pair
+			if err := rows.Scan(&p.newV, &p.oldV); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, p)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("block_raid_start rows=%d want %d (%+v)", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("row %d: got %+v want %+v", i, got[i], want[i])
+			}
+		}
+	})
+}
+
+// TestHandler_PlanetAttribute_NoActivityForOtherAttrs verifies that
+// attribute types other than planetaryShield/blockStartRaid never emit a
+// planet_activity row.
+func TestHandler_PlanetAttribute_NoActivityForOtherAttrs(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		// attrType 1 = repairNetworkQuantity on planet index 77.
+		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+			mustJSON(t, map[string]any{"attributeId": "1-2-77", "value": "3"}))
+		var n int
+		_ = tx.QueryRow(ctx,
+			`SELECT count(*) FROM structs.planet_activity WHERE planet_id='2-77'`).Scan(&n)
+		if n != 0 {
+			t.Errorf("expected no planet_activity rows for attrType 1, got %d", n)
+		}
+	})
+}
+
 // ggToID is a tiny helper to build attribute ids in tests without sprintf-ing.
 func ggToID(attr, otype, idx int) string {
 	return itoa(attr) + "-" + itoa(otype) + "-" + itoa(idx)
