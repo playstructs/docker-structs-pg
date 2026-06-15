@@ -19,6 +19,11 @@ on_signal() {
 
 trap on_signal SIGTERM SIGINT SIGQUIT
 
+if ! postgres_acquire_datadir_lock; then
+  echo "FATAL: another postmaster owns ${POSTGRES_DATADIR_LOCK_FILE}; refusing to start to avoid corruption" >&2
+  exit 1
+fi
+
 postgres_apply_memory_settings
 postgres_start
 

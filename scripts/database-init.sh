@@ -55,6 +55,12 @@ else
   echo "Skipping sqitch deploy (init already complete; set RUN_MIGRATIONS=1 to force)"
 fi
 
+if ! postgres_acquire_datadir_lock; then
+  echo "structs-pg is already running (data dir is locked by another container)."
+  echo "Skipping init postmaster + sqitch; structs-pg-auto-migrate applies migrations against the live server."
+  exit 0
+fi
+
 postgres_apply_memory_settings
 
 echo "Starting postgres for init..."

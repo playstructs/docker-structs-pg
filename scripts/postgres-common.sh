@@ -3,6 +3,12 @@
 
 set -euo pipefail
 
+# Lock file on the shared pgdata volume. Advisory flock locks on this inode
+# are enforced by the host kernel across container PID namespaces, which is
+# the one cross-container signal pg_lsclusters (PID-namespace bound) cannot
+# see. Used to guarantee a single postmaster ever touches the data dir.
+POSTGRES_DATADIR_LOCK_FILE="/var/lib/postgresql/structs-postmaster.flock"
+
 pg_version_dir() {
   ls /etc/postgresql/ | sort -rn | head -1
 }
@@ -40,6 +46,16 @@ postgres_wait_ready() {
   done
   echo "postgres did not become ready within ${tries}s" >&2
   return 1
+}
+
+# Acquire an exclusive, non-blocking advisory lock on the shared pgdata
+# volume. fd 9 stays open for the lifetime of the calling shell, so the
+# lock is held until this process exits (and auto-released by the kernel
+# on crash/kill -- no stale locks). Returns 1 if another container's
+# postmaster already owns the data dir.
+postgres_acquire_datadir_lock() {
+  exec 9>"${POSTGRES_DATADIR_LOCK_FILE}" || return 1
+  flock -n 9
 }
 
 postgres_start() {
