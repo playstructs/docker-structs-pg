@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 
@@ -73,15 +74,26 @@ func (raidHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 // jsonb mirrors the trigger's jsonb_build_object exactly. Uses
 // bctx.BlockTime instead of NOW() so replays and backfills land at the
 // correct historical timestamp (TimescaleDB hypertable partitioning).
+//
+// The detail also folds in the planet's current block_start_raid value (the
+// sibling blockStartRaid attribute, id "10-" || planet_id — the same
+// "10-" || planet.id surfaced by the planet view). It reads as 0 when no
+// raid block is set, mirroring the view's COALESCE(..., 0).
 func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Raid) error {
 	seq, err := nextPlanetActivitySeq(ctx, tx, p.PlanetID)
 	if err != nil {
 		return fmt.Errorf("seq: %w", err)
 	}
+	blockStartRaidID := strconv.Itoa(planetAttrTypeBlockStartRaid) + "-" + p.PlanetID
+	blockStartRaid, err := planetAttributePrevVal(ctx, tx, blockStartRaidID)
+	if err != nil {
+		return fmt.Errorf("block_start_raid planet=%s: %w", p.PlanetID, err)
+	}
 	detail, err := json.Marshal(map[string]any{
-		"planet_id": p.PlanetID,
-		"fleet_id":  p.FleetID,
-		"status":    p.Status,
+		"planet_id":        p.PlanetID,
+		"fleet_id":         p.FleetID,
+		"status":           p.Status,
+		"block_start_raid": blockStartRaid,
 	})
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
@@ -94,6 +106,5 @@ func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p
 		Detail:      detail,
 		BlockHeight: bctx.Height,
 	})
-	_ = ctx
 	return nil
 }
