@@ -423,53 +423,6 @@ func TestHandler_PlanetAttribute_ShieldChangeActivity(t *testing.T) {
 	})
 }
 
-// TestHandler_PlanetAttribute_ShieldChangeBlockStartRaid verifies that the
-// shield_change detail folds in the planet's current block_start_raid (the
-// sibling blockStartRaid attribute, id "10-<planet>"): the active raid block
-// when one exists, and 0 when no raid attribute is set.
-func TestHandler_PlanetAttribute_ShieldChangeBlockStartRaid(t *testing.T) {
-	conn := connect(t)
-	inTx(t, conn, func(tx pgx.Tx) {
-		ctx := context.Background()
-
-		// Planet 71: a raid is active (blockStartRaid = 999000) before the
-		// shield changes, so the shield_change detail should carry it.
-		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "10-2-71", "value": "999000"}))
-		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "0-2-71", "value": "80"}))
-
-		var withRaid int64
-		if err := tx.QueryRow(ctx,
-			`SELECT (detail->>'block_start_raid')::bigint
-			   FROM structs.planet_activity
-			  WHERE planet_id='2-71' AND category='shield_change'
-			  ORDER BY seq DESC LIMIT 1`).Scan(&withRaid); err != nil {
-			t.Fatalf("query with-raid: %v", err)
-		}
-		if withRaid != 999000 {
-			t.Errorf("block_start_raid with active raid = %d want 999000", withRaid)
-		}
-
-		// Planet 72: no blockStartRaid row exists, so block_start_raid must
-		// default to 0 (mirrors the planet view's COALESCE(..., 0)).
-		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "0-2-72", "value": "60"}))
-
-		var noRaid int64
-		if err := tx.QueryRow(ctx,
-			`SELECT (detail->>'block_start_raid')::bigint
-			   FROM structs.planet_activity
-			  WHERE planet_id='2-72' AND category='shield_change'
-			  ORDER BY seq DESC LIMIT 1`).Scan(&noRaid); err != nil {
-			t.Fatalf("query no-raid: %v", err)
-		}
-		if noRaid != 0 {
-			t.Errorf("block_start_raid with no raid = %d want 0", noRaid)
-		}
-	})
-}
-
 // TestHandler_PlanetAttribute_BlockRaidStartActivity verifies that v0.18.0
 // blockStartRaid (attrType 10) changes emit a block_raid_start planet_activity
 // row carrying old + new values on both set and clear.

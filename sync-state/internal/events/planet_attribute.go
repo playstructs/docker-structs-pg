@@ -25,9 +25,7 @@ import (
 // attributes. We read the prior structs.planet_attribute.val before writing
 // and emit a timeline row carrying both the old and new value whenever it
 // changes (including a change to zero, i.e. the delete branch). planet_id is
-// the attribute's own object id ("2-<index>"). The shield_change detail also
-// folds in the planet's current block_start_raid (the sibling blockStartRaid
-// attribute) so a shield change can be correlated with its raid window.
+// the attribute's own object id ("2-<index>").
 //
 // attributeId grammar: "{attrType}-{objectTypeId}-{objectIndex}"
 //
@@ -161,14 +159,6 @@ func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (int64, e
 // planetaryShield (attrType 0) or blockStartRaid (attrType 10) value changes.
 // Only the two tracked attrTypes on a planet object produce a row; any other
 // attribute, non-planet object, or no-op change is skipped.
-//
-// The shield_change detail additionally carries the planet's current
-// block_start_raid value (the sibling blockStartRaid attribute, id
-// "10-{objTypeId}-{objIndex}" — the same "10-" || planet.id surfaced by the
-// planet view). It reads as 0 when no raid is active, mirroring the view's
-// COALESCE(..., 0). Event order within a block is deterministic and attribute
-// upserts run via immediate tx.Exec, so this read reflects any same-block
-// blockStartRaid change processed earlier.
 func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType, objTypeID, objIndex int, oldVal, newVal int64) error {
 	if oldVal == newVal {
 		return nil
@@ -192,20 +182,10 @@ func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockConte
 	if err != nil {
 		return fmt.Errorf("seq planet=%s: %w", planetID, err)
 	}
-	detailMap := map[string]any{
+	detail, err := json.Marshal(map[string]any{
 		newKey: newVal,
 		oldKey: oldVal,
-	}
-	if attrType == planetAttrTypePlanetaryShield {
-		blockStartRaidID := strconv.Itoa(planetAttrTypeBlockStartRaid) + "-" +
-			strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
-		blockStartRaid, err := planetAttributePrevVal(ctx, tx, blockStartRaidID)
-		if err != nil {
-			return err
-		}
-		detailMap["block_start_raid"] = blockStartRaid
-	}
-	detail, err := json.Marshal(detailMap)
+	})
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
