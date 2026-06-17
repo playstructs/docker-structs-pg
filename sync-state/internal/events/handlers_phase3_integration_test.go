@@ -369,6 +369,98 @@ func TestHandler_StructDefenderClear_DeletesBothRows(t *testing.T) {
 	})
 }
 
+// TestHandler_StructDefenderClear_EmitsDefenseRemove verifies the clear
+// handler emits a struct_defense_remove planet_activity row (anchored on
+// the protected struct's planet) whose detail carries both defender and
+// protected struct ids. The chain does not emit a paired EventStructAttribute
+// delete, so this handler is the only place the row can be produced.
+func TestHandler_StructDefenderClear_EmitsDefenseRemove(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		bc := derivBctx(900001)
+
+		// Protected struct 5-9001 sits on planet 2-900; the defender is
+		// 5-9000 whose protectedStructIndex attribute (id 5-5-9000) holds
+		// the protected index 9001.
+		seedPlanetForActivity(t, tx, "2-900", "structs1owner")
+		seedStructAt(t, tx, "5-9001", 9001, "2-900")
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, updated_at)
+			 VALUES ($1, $2, NOW())`,
+			"5-9000", "5-9001"); err != nil {
+			t.Fatalf("seed defender: %v", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO structs.struct_attribute (id, object_id, object_type, sub_index, attribute_type, val, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+			"5-5-9000", "5-9000", "struct", 0, "protectedStructIndex", 9001); err != nil {
+			t.Fatalf("seed protectedStructIndex attr: %v", err)
+		}
+
+		if err := (structDefenderClearHandler{}).Handle(ctx, tx, bc,
+			mustJSON(t, map[string]any{"defendingStructId": "5-9000"})); err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		flushBuf(t, ctx, tx, bc)
+
+		var planetID, defID, protID string
+		if err := tx.QueryRow(ctx,
+			`SELECT planet_id, detail->>'defender_struct_id', detail->>'protected_struct_id'
+			   FROM structs.planet_activity
+			  WHERE category='struct_defense_remove'
+			  ORDER BY seq DESC LIMIT 1`).Scan(&planetID, &defID, &protID); err != nil {
+			t.Fatalf("query defense_remove: %v", err)
+		}
+		if planetID != "2-900" {
+			t.Errorf("planet_id = %q want 2-900", planetID)
+		}
+		if defID != "5-9000" {
+			t.Errorf("defender_struct_id = %q want 5-9000", defID)
+		}
+		if protID != "5-9001" {
+			t.Errorf("protected_struct_id = %q want 5-9001", protID)
+		}
+	})
+}
+
+// TestHandler_StructDefenderClear_NoAttrNoActivity verifies that clearing a
+// defender with no protectedStructIndex attribute row emits no activity
+// (the emit is gated on the attribute delete actually removing a row).
+func TestHandler_StructDefenderClear_NoAttrNoActivity(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		bc := derivBctx(900002)
+
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, updated_at)
+			 VALUES ($1, $2, NOW())`,
+			"5-9100", "5-9101"); err != nil {
+			t.Fatalf("seed defender: %v", err)
+		}
+
+		if err := (structDefenderClearHandler{}).Handle(ctx, tx, bc,
+			mustJSON(t, map[string]any{"defendingStructId": "5-9100"})); err != nil {
+			t.Fatalf("clear: %v", err)
+		}
+		flushBuf(t, ctx, tx, bc)
+
+		var n int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM structs.planet_activity
+			  WHERE category='struct_defense_remove'
+			    AND detail->>'defender_struct_id'='5-9100'`).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("expected no struct_defense_remove for attr-less clear, got %d", n)
+		}
+	})
+}
+
 // Ensure JSON-encoded values get carried through end-to-end. Some chain
 // payloads arrive wrapped as JSON-encoded strings; Decode unwraps that
 // and we want to make sure Phase 3 handlers see the same payload either
