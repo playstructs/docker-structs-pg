@@ -99,8 +99,12 @@ UPDATE structs.planet_activity pa
    AND pa.detail->>'fleet_id' = src.fleet_id
    AND NOT (pa.detail ? 'seized_ore');
 
--- 2. Everything else (failed/in-progress raids, plus any successful raid with
---    no ledger match): seized_ore = "0".
+-- 2. Non-successful raids (failed/in-progress: initiated, attackerRetreated,
+--    shieldsVulnerable, attackerDefeated, demilitarized, ...): seized_ore = "0".
+--    raidSuccessful rows are intentionally excluded here — they are handled by
+--    step 1 (a successful raid that stole 0 ore still has a matching ledger
+--    'seized' credit of 0, so step 1 backfills "0" for it). Any raidSuccessful
+--    row step 1 could not match is left untouched and reported by step 3.
 UPDATE structs.planet_activity
    SET detail = detail || jsonb_build_object('seized_ore', '0')
  WHERE category = 'raid_status'
@@ -108,11 +112,13 @@ UPDATE structs.planet_activity
    AND detail->>'status' IS DISTINCT FROM 'raidSuccessful';
 
 -- 3. Postflight: any raidSuccessful row still missing seized_ore is unmatched
---    (no ledger 'seized' credit could be correlated — e.g. a success that
---    stole 0 ore, or a data gap). These are INTENTIONALLY left untouched
---    (not zeroed) so the operator can investigate and decide. Re-running
---    this script will not change them; set seized_ore manually if "0" is
---    confirmed correct for a given row.
+--    (no ledger 'seized' credit could be correlated — a data gap; note that a
+--    success which stole 0 ore still emits a 0-amount ledger row and is matched
+--    by step 1, so it does NOT appear here). These are INTENTIONALLY left
+--    untouched (not zeroed) so the operator can investigate and decide.
+--    Re-running this script will not change them; set seized_ore manually if
+--    "0" is confirmed correct for a given row.
+--    (Observed on structstestnet-111: 102 matched, 0 unmatched.)
 \echo === POSTFLIGHT: unmatched raidSuccessful rows (investigate) ===
 SELECT block_height, planet_id, detail->>'fleet_id' AS fleet_id
   FROM structs.planet_activity
