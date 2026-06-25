@@ -70,18 +70,21 @@ func (raidHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 
 // emitRaidStatusActivity ports cache.PLANET_ACTIVITY_RAID_STATUS
 // (cache-system.sql:1182-1194). One planet_activity row whose detail
-// jsonb mirrors the trigger's jsonb_build_object exactly. Uses
-// bctx.BlockTime instead of NOW() so replays and backfills land at the
-// correct historical timestamp (TimescaleDB hypertable partitioning).
+// jsonb extends the trigger's jsonb_build_object with seized_ore (the
+// EventRaid payload already carries it in the same tx as the status
+// change, so no cross-event lookup is needed). Uses bctx.BlockTime
+// instead of NOW() so replays and backfills land at the correct
+// historical timestamp (TimescaleDB hypertable partitioning).
 func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Raid) error {
 	seq, err := nextPlanetActivitySeq(ctx, tx, p.PlanetID)
 	if err != nil {
 		return fmt.Errorf("seq: %w", err)
 	}
 	detail, err := json.Marshal(map[string]any{
-		"planet_id": p.PlanetID,
-		"fleet_id":  p.FleetID,
-		"status":    p.Status,
+		"planet_id":  p.PlanetID,
+		"fleet_id":   p.FleetID,
+		"status":     p.Status,
+		"seized_ore": p.SeizedOre.String(),
 	})
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)

@@ -150,6 +150,51 @@ func TestPhase6_Raid_EmitsRaidStatusOnInsert(t *testing.T) {
 		if got := countPlanetActivity(t, tx, "2-555", "raid_status"); got != 1 {
 			t.Errorf("planet_activity raid_status rows = %d; want 1", got)
 		}
+
+		var detail string
+		if err := tx.QueryRow(ctx,
+			`SELECT detail::text FROM structs.planet_activity
+			 WHERE planet_id='2-555' AND category='raid_status'`).Scan(&detail); err != nil {
+			t.Fatalf("detail query: %v", err)
+		}
+		if !(contains(detail, `"seized_ore":"0"`) || contains(detail, `"seized_ore": "0"`)) {
+			t.Errorf("detail jsonb missing seized_ore: %s", detail)
+		}
+	})
+}
+
+// A successful raid carries a non-zero seized_ore in the EventRaid
+// payload; it must land verbatim in the raid_status detail jsonb.
+func TestPhase6_Raid_SeizedOreInDetailOnSuccess(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		bc := derivBctx(700003)
+
+		raw := mustJSON(t, map[string]any{
+			"fleetId":    "9-266",
+			"planetId":   "2-558",
+			"status":     "raidSuccessful",
+			"seized_ore": "12345",
+		})
+		if err := (raidHandler{}).Handle(ctx, tx, bc, raw); err != nil {
+			t.Fatalf("raid: %v", err)
+		}
+		flushBuf(t, ctx, tx, bc)
+
+		var detail string
+		if err := tx.QueryRow(ctx,
+			`SELECT detail::text FROM structs.planet_activity
+			 WHERE planet_id='2-558' AND category='raid_status'`).Scan(&detail); err != nil {
+			t.Fatalf("detail query: %v", err)
+		}
+		if !(contains(detail, `"seized_ore":"12345"`) || contains(detail, `"seized_ore": "12345"`)) {
+			t.Errorf("detail jsonb missing seized_ore=12345: %s", detail)
+		}
+		if !(contains(detail, `"status":"raidSuccessful"`) || contains(detail, `"status": "raidSuccessful"`)) {
+			t.Errorf("detail jsonb missing status=raidSuccessful: %s", detail)
+		}
 	})
 }
 
