@@ -97,6 +97,31 @@ func TestDecodeUnwrapsStringWrappedJSON(t *testing.T) {
 	}
 }
 
+func TestDecodePlayerGuildRank(t *testing.T) {
+	// protojson emits uint64 as a quoted string; also accept bare number.
+	cases := []struct {
+		name string
+		raw  string
+		want int64
+	}{
+		{"quoted", `{"id":"1-1","guildRank":"101"}`, 101},
+		{"number", `{"id":"1-1","guildRank":42}`, 42},
+		{"zero", `{"id":"1-1","guildRank":"0"}`, 0},
+		{"missing", `{"id":"1-1"}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Decode[Player]([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.GuildRank.Int64() != tc.want {
+				t.Errorf("GuildRank = %d want %d", p.GuildRank.Int64(), tc.want)
+			}
+		})
+	}
+}
+
 func TestStructTypeIsCommand(t *testing.T) {
 	if !(StructType{Class: "Command Ship"}).IsCommand() {
 		t.Error("Command Ship should be command")

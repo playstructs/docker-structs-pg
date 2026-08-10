@@ -6,6 +6,7 @@ package events
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -234,6 +235,109 @@ func TestHandler_StructAttribute_StatusBit32_StampsDestroy(t *testing.T) {
 	})
 }
 
+// TestHandler_StructAttribute_StatusBit32_ClearsOrphanedDefenders verifies
+// the DB-side fix for the chain's laziness about cleaning defender
+// relationships when the *protected* struct is destroyed: both
+// struct_defender rows, both paired protectedStructIndex attributes, and
+// one struct_defense_remove planet_activity row per defender.
+func TestHandler_StructAttribute_StatusBit32_ClearsOrphanedDefenders(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		bc := derivBctx(900100)
+
+		const (
+			planetID    = testDestroyPlanet
+			protectedID = testDestroyProtected
+			defenderA   = testDestroyDefenderA
+			defenderB   = testDestroyDefenderB
+		)
+
+		seedPlanetForActivity(t, tx, planetID, "structs1owner")
+		seedStructAt(t, tx, protectedID, testDestroyProtectedIndex, planetID)
+
+		for _, def := range []string{defenderA, defenderB} {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, updated_at)
+				 VALUES ($1, $2, NOW())`, def, protectedID); err != nil {
+				t.Fatalf("seed defender %s: %v", def, err)
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO structs.struct_attribute (id, object_id, object_type, sub_index, attribute_type, val, updated_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+				"5-"+def, def, "struct", 0, "protectedStructIndex", testDestroyProtectedIndex); err != nil {
+				t.Fatalf("seed protectedStructIndex for %s: %v", def, err)
+			}
+		}
+
+		// attributeId is "{attrType}-{objTypeId}-{objIndex}": status (1)
+		// on the struct object type (5), value 32 = the destroyed bit.
+		statusRaw := mustJSON(t, map[string]any{
+			"attributeId": "1-5-" + strconv.Itoa(testDestroyProtectedIndex),
+			"value":       "32",
+		})
+		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, statusRaw); err != nil {
+			t.Fatalf("destroy status: %v", err)
+		}
+		flushBuf(t, ctx, tx, bc)
+
+		var defenderCount int
+		_ = tx.QueryRow(ctx,
+			`SELECT count(*) FROM structs.struct_defender WHERE protected_struct_id=$1`,
+			protectedID).Scan(&defenderCount)
+		if defenderCount != 0 {
+			t.Errorf("struct_defender rows remaining for protected=%s: %d want 0", protectedID, defenderCount)
+		}
+
+		var attrCount int
+		_ = tx.QueryRow(ctx,
+			`SELECT count(*) FROM structs.struct_attribute
+			  WHERE id IN ($1, $2)`,
+			"5-"+defenderA, "5-"+defenderB).Scan(&attrCount)
+		if attrCount != 0 {
+			t.Errorf("protectedStructIndex attrs remaining: %d want 0", attrCount)
+		}
+
+		rows, err := tx.Query(ctx,
+			`SELECT detail->>'defender_struct_id', detail->>'protected_struct_id', planet_id
+			   FROM structs.planet_activity
+			  WHERE category='struct_defense_remove'
+			    AND detail->>'protected_struct_id'=$1
+			  ORDER BY detail->>'defender_struct_id'`,
+			protectedID)
+		if err != nil {
+			t.Fatalf("query defense_remove: %v", err)
+		}
+		defer rows.Close()
+
+		got := make(map[string]string) // defender -> planet
+		for rows.Next() {
+			var defID, protID, pid string
+			if err := rows.Scan(&defID, &protID, &pid); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if protID != protectedID {
+				t.Errorf("protected_struct_id = %q want %q", protID, protectedID)
+			}
+			got[defID] = pid
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("struct_defense_remove rows = %d want 2; got=%v", len(got), got)
+		}
+		for _, def := range []string{defenderA, defenderB} {
+			if pid, ok := got[def]; !ok {
+				t.Errorf("missing defense_remove for defender %s", def)
+			} else if pid != planetID {
+				t.Errorf("defense_remove planet for %s = %q want %q", def, pid, planetID)
+			}
+		}
+	})
+}
+
 func TestHandler_StructAttribute_StatusNoBit32_LeavesStructAlone(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
@@ -252,6 +356,13 @@ func TestHandler_StructAttribute_StatusNoBit32_LeavesStructAlone(t *testing.T) {
 		})
 		handle(t, ctx, tx, structHandler{}, bctx(), structRaw)
 
+		// Seed a defender relationship that must survive a non-destroy status.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, updated_at)
+			 VALUES ($1, $2, NOW())`, testSurvivingDefender, "5-4040"); err != nil {
+			t.Fatalf("seed defender: %v", err)
+		}
+
 		// Status without bit 32 (value=1, e.g., online flag).
 		statusRaw := mustJSON(t, map[string]any{
 			"attributeId": "1-5-4040",
@@ -269,6 +380,14 @@ func TestHandler_StructAttribute_StatusNoBit32_LeavesStructAlone(t *testing.T) {
 		}
 		if dblock != nil {
 			t.Errorf("destroyed_block = %v; want NULL", *dblock)
+		}
+
+		var n int
+		_ = tx.QueryRow(ctx,
+			`SELECT count(*) FROM structs.struct_defender WHERE defending_struct_id=$1 AND protected_struct_id=$2`,
+			testSurvivingDefender, "5-4040").Scan(&n)
+		if n != 1 {
+			t.Errorf("defender row count = %d; want 1 (non-destroy status must leave it alone)", n)
 		}
 	})
 }
@@ -383,13 +502,16 @@ func TestHandler_PlanetAttribute_ShieldChangeActivity(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		// 0 -> 5, 5 -> 9, 9 -> 0 on planet index 7.
+		// 0 -> 5, 5 -> 9, 9 -> 0 on a reserved-range planet. The first
+		// transition's old value is only 0 for a planet with no existing
+		// planetaryShield attribute, so a live planet index would report
+		// its real shield as the old value.
 		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "5"}))
+			mustJSON(t, map[string]any{"attributeId": "0-2-999050", "value": "5"}))
 		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "9"}))
+			mustJSON(t, map[string]any{"attributeId": "0-2-999050", "value": "9"}))
 		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "0"}))
+			mustJSON(t, map[string]any{"attributeId": "0-2-999050", "value": "0"}))
 
 		type pair struct{ newV, oldV int64 }
 		want := []pair{{5, 0}, {9, 5}, {0, 9}}
@@ -398,7 +520,7 @@ func TestHandler_PlanetAttribute_ShieldChangeActivity(t *testing.T) {
 			`SELECT (detail->>'planetary_shield')::bigint,
 			        (detail->>'planetary_shield_old')::bigint
 			   FROM structs.planet_activity
-			  WHERE planet_id='2-7' AND category='shield_change'
+			  WHERE planet_id='2-999050' AND category='shield_change'
 			  ORDER BY seq`)
 		if err != nil {
 			t.Fatalf("query: %v", err)

@@ -12,6 +12,11 @@
 //	sync-state list-handlers   # print the registered event handlers
 //	sync-state verify          # run data-quality checks, write a report
 //	sync-state reprocess-errors# replay unresolved handler_error_log rows
+//	sync-state init-genesis    # load genesis ledger credits
+//
+// Ingest startup also reconciles structs.player.guild_rank against the
+// LCD player snapshot (see internal/backfill); disable with
+// -player-rank-sweep=false.
 //
 // See scripts/sync_state.sh for the env vars sync-state honours.
 package main

@@ -381,46 +381,59 @@ func TestHandler_StructDefenderClear_EmitsDefenseRemove(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(900001)
 
-		// Protected struct 5-9001 sits on planet 2-900; the defender is
-		// 5-9000 whose protectedStructIndex attribute (id 5-5-9000) holds
-		// the protected index 9001.
-		seedPlanetForActivity(t, tx, "2-900", "structs1owner")
-		seedStructAt(t, tx, "5-9001", 9001, "2-900")
+		// Protected struct sits on the seeded planet; the defender's
+		// protectedStructIndex attribute (id '5-'+defenderID) holds the
+		// protected index.
+		const (
+			planetWant   = testDefensePlanet
+			protectedID  = testDefenseProtected
+			defenderID   = testDefenseDefender
+			protectedIdx = testDefenseProtectedIndex
+		)
+
+		seedPlanetForActivity(t, tx, planetWant, "structs1owner")
+		seedStructAt(t, tx, protectedID, protectedIdx, planetWant)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, updated_at)
 			 VALUES ($1, $2, NOW())`,
-			"5-9000", "5-9001"); err != nil {
+			defenderID, protectedID); err != nil {
 			t.Fatalf("seed defender: %v", err)
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO structs.struct_attribute (id, object_id, object_type, sub_index, attribute_type, val, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-			"5-5-9000", "5-9000", "struct", 0, "protectedStructIndex", 9001); err != nil {
+			"5-"+defenderID, defenderID, "struct", 0, "protectedStructIndex", protectedIdx); err != nil {
 			t.Fatalf("seed protectedStructIndex attr: %v", err)
 		}
 
 		if err := (structDefenderClearHandler{}).Handle(ctx, tx, bc,
-			mustJSON(t, map[string]any{"defendingStructId": "5-9000"})); err != nil {
+			mustJSON(t, map[string]any{"defendingStructId": defenderID})); err != nil {
 			t.Fatalf("clear: %v", err)
 		}
 		flushBuf(t, ctx, tx, bc)
 
+		// Scope to this test's own ids. planet_activity.seq is a
+		// per-planet counter, so a global `ORDER BY seq DESC LIMIT 1`
+		// would return an unrelated row from whatever data the target
+		// DB already holds.
 		var planetID, defID, protID string
 		if err := tx.QueryRow(ctx,
 			`SELECT planet_id, detail->>'defender_struct_id', detail->>'protected_struct_id'
 			   FROM structs.planet_activity
 			  WHERE category='struct_defense_remove'
-			  ORDER BY seq DESC LIMIT 1`).Scan(&planetID, &defID, &protID); err != nil {
+			    AND detail->>'defender_struct_id'=$1
+			    AND detail->>'protected_struct_id'=$2`,
+			defenderID, protectedID).Scan(&planetID, &defID, &protID); err != nil {
 			t.Fatalf("query defense_remove: %v", err)
 		}
-		if planetID != "2-900" {
-			t.Errorf("planet_id = %q want 2-900", planetID)
+		if planetID != planetWant {
+			t.Errorf("planet_id = %q want %q", planetID, planetWant)
 		}
-		if defID != "5-9000" {
-			t.Errorf("defender_struct_id = %q want 5-9000", defID)
+		if defID != defenderID {
+			t.Errorf("defender_struct_id = %q want %q", defID, defenderID)
 		}
-		if protID != "5-9001" {
-			t.Errorf("protected_struct_id = %q want 5-9001", protID)
+		if protID != protectedID {
+			t.Errorf("protected_struct_id = %q want %q", protID, protectedID)
 		}
 	})
 }
@@ -435,15 +448,20 @@ func TestHandler_StructDefenderClear_NoAttrNoActivity(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(900002)
 
+		const (
+			defenderID  = testNoAttrDefender
+			protectedID = testNoAttrProtected
+		)
+
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, updated_at)
 			 VALUES ($1, $2, NOW())`,
-			"5-9100", "5-9101"); err != nil {
+			defenderID, protectedID); err != nil {
 			t.Fatalf("seed defender: %v", err)
 		}
 
 		if err := (structDefenderClearHandler{}).Handle(ctx, tx, bc,
-			mustJSON(t, map[string]any{"defendingStructId": "5-9100"})); err != nil {
+			mustJSON(t, map[string]any{"defendingStructId": defenderID})); err != nil {
 			t.Fatalf("clear: %v", err)
 		}
 		flushBuf(t, ctx, tx, bc)
@@ -452,7 +470,7 @@ func TestHandler_StructDefenderClear_NoAttrNoActivity(t *testing.T) {
 		if err := tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.planet_activity
 			  WHERE category='struct_defense_remove'
-			    AND detail->>'defender_struct_id'='5-9100'`).Scan(&n); err != nil {
+			    AND detail->>'defender_struct_id'=$1`, defenderID).Scan(&n); err != nil {
 			t.Fatalf("count: %v", err)
 		}
 		if n != 0 {

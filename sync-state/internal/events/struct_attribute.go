@@ -171,6 +171,14 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 			if _, err := tx.Exec(ctx, structDestroyedUpdateSQL, rawObjectID, bctx.Height); err != nil {
 				return fmt.Errorf("struct_attribute destroy stamp id=%s: %w", rawObjectID, err)
 			}
+			// The chain does not emit EventStructDefenderClear when the
+			// *protected* struct dies, so orphaned defender rows would
+			// otherwise linger. Clean them up here, in the same tx as
+			// the destroy stamp. Gated by the outer RowsAffected check
+			// so a re-emitted identical status is a no-op.
+			if err := clearDefendersOfDestroyedProtected(ctx, tx, bctx, rawObjectID, objIndex); err != nil {
+				return fmt.Errorf("struct_attribute destroy defender cleanup id=%s: %w", rawObjectID, err)
+			}
 		}
 	}
 

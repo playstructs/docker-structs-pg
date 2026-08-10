@@ -94,6 +94,19 @@ type Config struct {
 	ReprocessLimit        int
 	ReprocessDryRun       bool
 
+	// Player guild_rank startup sweep. runIngest reconciles
+	// structs.player.guild_rank against the LCD snapshot before the
+	// syncer loop starts (see internal/backfill).
+	//
+	// LCDURL is the Cosmos LCD base (e.g. http://structsd:1317). Reuses
+	// STRUCTS_API_URL so it matches update-cache's env. LCDPageLimit is
+	// the pagination.limit sent per request (PAGE_LIMIT, default 10000).
+	// PlayerRankSweep disables the sweep entirely (escape hatch for a
+	// slow or unreachable LCD).
+	LCDURL          string
+	LCDPageLimit    int
+	PlayerRankSweep bool
+
 	// `sync-state init-genesis` knobs.
 	//
 	// GenesisFile overrides the default RPC fetch; empty = use RPC.
@@ -111,10 +124,10 @@ type Config struct {
 	// applyWindow runs blocks [start..end] in one outer PG transaction.
 	// Event order and per-row writes are unchanged; only commit frequency
 	// and cursor/heartbeat cadence differ. Disabled at tip (lag < threshold).
-	BulkEnabled            bool
-	BulkWindow             int
-	BulkLagThreshold       int
-	BulkStatementTimeout   time.Duration
+	BulkEnabled          bool
+	BulkWindow           int
+	BulkLagThreshold     int
+	BulkStatementTimeout time.Duration
 }
 
 // LoadConfig parses CLI flags and env vars. Flag defaults are pulled from env
@@ -226,6 +239,14 @@ func LoadConfig(args []string) Config {
 		"reprocess-errors: cap rows processed per run (safety; 0 = no cap)")
 	fs.BoolVar(&cfg.ReprocessDryRun, "dry-run", false,
 		"reprocess-errors: fetch and dispatch in a rolled-back tx; do not resolve rows")
+
+	fs.StringVar(&cfg.LCDURL, "lcd", envOr("STRUCTS_API_URL", "http://structsd:1317"),
+		"ingest: Cosmos LCD base URL for the player guild_rank startup sweep (same env as update-cache)")
+	fs.IntVar(&cfg.LCDPageLimit, "lcd-page-limit", envOrInt("PAGE_LIMIT", 10000),
+		"ingest: pagination.limit sent to the LCD per page during the guild_rank sweep")
+	fs.BoolVar(&cfg.PlayerRankSweep, "player-rank-sweep", envOrBool("SYNC_STATE_PLAYER_RANK_SWEEP", true),
+		"ingest: reconcile structs.player.guild_rank against the LCD snapshot at startup "+
+			"(cheap no-op once in sync; set false to skip when the LCD is unavailable)")
 
 	_ = fs.Parse(args)
 

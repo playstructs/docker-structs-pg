@@ -54,6 +54,40 @@ func inTx(t *testing.T, conn *pgx.Conn, body func(tx pgx.Tx)) {
 	body(tx)
 }
 
+// Reserved object-id range for integration tests: index 990000 and above.
+//
+// These tests run inside a rolled-back transaction against a real
+// database, which may be a fully populated one, so anything asserted by
+// id has to use ids the chain cannot have produced. Real indexes are far
+// below this range (planets top out near 10k, structs near 80k). Reusing
+// a live id breaks tests in three ways that all look like handler bugs:
+// absolute planet_activity counts pick up pre-existing rows, per-planet
+// seq no longer starts at 0, and re-seeding a struct the chain placed
+// elsewhere registers as a move and emits an extra activity row.
+//
+// The consts below are the ids shared across files; single-use ids are
+// inline literals in the same range.
+const (
+	testDefensePlanet         = "2-990900"
+	testDefenseProtected      = "5-990901"
+	testDefenseProtectedIndex = 990901
+	testDefenseDefender       = "5-990900"
+
+	testNoAttrDefender  = "5-990910"
+	testNoAttrProtected = "5-990911"
+
+	testDestroyPlanet         = "2-990920"
+	testDestroyProtected      = "5-990921"
+	testDestroyProtectedIndex = 990921
+	testDestroyDefenderA      = "5-990922"
+	testDestroyDefenderB      = "5-990923"
+
+	// struct_defender's primary key is defending_struct_id alone, so a
+	// seeded defender id must be one the chain cannot already hold or the
+	// INSERT trips a duplicate key.
+	testSurvivingDefender = "5-990930"
+)
+
 // bctx returns a BlockContext suitable for handler tests. The Buf is
 // pre-populated so the Phase-2 handlers (which push rows into
 // bctx.Buf.*) don't nil-dereference. Tests that read from the
@@ -357,6 +391,8 @@ func TestHandler_Player(t *testing.T) {
 			"substationId":   "",
 			"planetId":       "",
 			"fleetId":        "",
+			// Quoted string — the shape protojson emits for uint64.
+			"guildRank":                 "101",
 			"name":                      "TestPlayer",
 			"pfp":                       "ipfs://pfp",
 			"pfpClientRenderAttributes": `{"bg":"red"}`,
@@ -379,6 +415,11 @@ func TestHandler_Player(t *testing.T) {
 		}
 		if pfpCR != `{"bg":"red"}` {
 			t.Errorf("player.pfp_client_render_attributes = %q want {\"bg\":\"red\"}", pfpCR)
+		}
+		var guildRank int64
+		_ = tx.QueryRow(ctx, `SELECT guild_rank FROM structs.player WHERE id=$1`, "1-99").Scan(&guildRank)
+		if guildRank != 101 {
+			t.Errorf("player.guild_rank = %d want 101", guildRank)
 		}
 		// self-mapping sidecar
 		var selfMap string

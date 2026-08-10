@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 
+	"sync-state/internal/backfill"
 	"sync-state/internal/db"
 	"sync-state/internal/doctor"
 	"sync-state/internal/events"
@@ -533,6 +534,42 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "  Bank ledger balances will be missing genesis credits until")
 		fmt.Fprintln(stderr, "  `sync-state init-genesis` runs. `sync-state verify` will FAIL")
 		fmt.Fprintln(stderr, "  the genesis_loaded check on this state.")
+	}
+
+	// Player guild_rank reconciliation. Runs here — after the writer lock
+	// is held and before any handler executes — so a full refresh from
+	// the LCD snapshot can't race a concurrent EventPlayer write. The
+	// UPDATE's IS DISTINCT FROM guard makes this a no-op once the table
+	// agrees with the chain, so it stays cheap on every restart. An
+	// unreachable LCD is a warning, never a reason to block ingest.
+	if cfg.PlayerRankSweep {
+		report, serr := backfill.SweepPlayerRanks(ctx, backfill.PlayerRankInputs{
+			Pool:      pool.Pool,
+			LCDBase:   cfg.LCDURL,
+			PageLimit: cfg.LCDPageLimit,
+		})
+		if serr != nil {
+			fmt.Fprintf(stderr, "WARN: player guild_rank sweep skipped: %v\n", serr)
+			fmt.Fprintf(stderr, "  guild_rank stays as-is; the EventPlayer handler still populates it going forward.\n")
+		} else {
+			backfill.PrintPlayerRankReport(stderr, report)
+		}
+	} else {
+		fmt.Fprintln(stderr, "Player guild_rank sweep disabled (-player-rank-sweep=false).")
+	}
+
+	// Stale defender reconciliation. Pure SQL — the chain never emits
+	// EventStructDefenderClear when the *protected* struct dies, so
+	// orphaned rows accumulate until the destroy-path cleanup landed.
+	// Going-forward cleanups happen in the status-attribute handler;
+	// this sweep clears the historical pile and is a no-op once clean.
+	{
+		report, serr := backfill.SweepStaleDefenders(ctx, pool.Pool)
+		if serr != nil {
+			fmt.Fprintf(stderr, "WARN: stale defender sweep skipped: %v\n", serr)
+		} else {
+			backfill.PrintStaleDefenderReport(stderr, report)
+		}
 	}
 
 	router := events.NewRouter(cfg.StrictUnknownEvents)

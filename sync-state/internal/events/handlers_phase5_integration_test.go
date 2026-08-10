@@ -48,7 +48,10 @@ func TestNextPlanetActivitySeq_Monotonic(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		planet := "2-9001"
+		// Reserved-range planet: the counter starts at 0 only for a planet
+		// the chain has never touched (see the id note in
+		// handlers_integration_test.go).
+		planet := "2-999001"
 
 		// First call: 0 (matches SQL: VALUES($1, 0) inserts 0 with no UPDATE).
 		got, err := nextPlanetActivitySeq(ctx, tx, planet)
@@ -70,7 +73,7 @@ func TestNextPlanetActivitySeq_Monotonic(t *testing.T) {
 		}
 
 		// Different planet starts at its own 0.
-		other, err := nextPlanetActivitySeq(ctx, tx, "2-9002")
+		other, err := nextPlanetActivitySeq(ctx, tx, "2-999002")
 		if err != nil {
 			t.Fatalf("other planet: %v", err)
 		}
@@ -244,12 +247,15 @@ func TestHandler_Attack_StructOnPlanet_WritesPlanetActivity(t *testing.T) {
 		ctx := context.Background()
 		bc := fixedBctx(200001)
 
-		// Seed an attacker struct sitting directly on a planet (not on a fleet).
+		// Seed an attacker struct sitting directly on a planet (not on a
+		// fleet). Reserved-range ids: seeding a struct the chain already
+		// placed elsewhere would register as a move and emit its own
+		// activity row, consuming seq 0 before the attack row.
 		structRaw := mustJSON(t, map[string]any{
-			"id": "5-50001", "index": 50001, "type": 1, "creator": "c",
+			"id": "5-999010", "index": 999010, "type": 1, "creator": "c",
 			"owner":          "1-1",
 			"locationType":   "planet",
-			"locationId":     "2-77",
+			"locationId":     "2-999010",
 			"operatingAmbit": "LAND", "slot": 1,
 		})
 		if err := (structHandler{}).Handle(ctx, tx, bc, structRaw); err != nil {
@@ -258,7 +264,7 @@ func TestHandler_Attack_StructOnPlanet_WritesPlanetActivity(t *testing.T) {
 			flushBuf(t, ctx, tx, bc)
 
 		raw := mustJSON(t, map[string]any{
-			"attackerStructId": "5-50001",
+			"attackerStructId": "5-999010",
 			"defenderStructId": "5-99999",
 			"damage":           42,
 		})
@@ -273,16 +279,16 @@ func TestHandler_Attack_StructOnPlanet_WritesPlanetActivity(t *testing.T) {
 		_ = tx.QueryRow(ctx,
 			`SELECT seq, planet_id, category::text, detail::text
 			 FROM structs.planet_activity
-			 WHERE planet_id='2-77' AND category='struct_attack'
+			 WHERE planet_id='2-999010' AND category='struct_attack'
 			 ORDER BY time DESC LIMIT 1`).Scan(&seq, &planet, &category, &detail)
-		if planet != "2-77" || category != "struct_attack" {
+		if planet != "2-999010" || category != "struct_attack" {
 			t.Errorf("row: planet=%q category=%q", planet, category)
 		}
 		if seq != 0 {
 			t.Errorf("seq = %d; want 0 (first activity for this planet)", seq)
 		}
 		// PG's jsonb stringifier may add a space after the colon; match either form.
-		if detail == "" || !(contains(detail, `"attackerStructId":"5-50001"`) || contains(detail, `"attackerStructId": "5-50001"`)) {
+		if detail == "" || !(contains(detail, `"attackerStructId":"5-999010"`) || contains(detail, `"attackerStructId": "5-999010"`)) {
 			t.Errorf("detail jsonb missing attackerStructId: %s", detail)
 		}
 	})

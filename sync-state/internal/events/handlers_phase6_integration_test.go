@@ -243,14 +243,17 @@ func TestPhase6_Struct_NoEmitOnFirstInsert(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(710001)
 
-		seedPlanetForActivity(t, tx, "2-700", "structs1owner")
+		// Reserved-range ids so this really is a first insert: a struct the
+		// chain already placed elsewhere would arrive as a location change
+		// and legitimately emit struct_move.
+		seedPlanetForActivity(t, tx, "2-999020", "structs1owner")
 
 		raw := mustJSON(t, map[string]any{
-			"id":             "5-7001",
-			"index":          7001,
+			"id":             "5-999020",
+			"index":          999020,
 			"type":           1,
 			"locationType":   "planet",
-			"locationId":     "2-700",
+			"locationId":     "2-999020",
 			"operatingAmbit": "land",
 			"slot":           1,
 		})
@@ -258,7 +261,7 @@ func TestPhase6_Struct_NoEmitOnFirstInsert(t *testing.T) {
 			t.Fatalf("struct insert: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
-		if got := countPlanetActivity(t, tx, "2-700", "struct_move"); got != 0 {
+		if got := countPlanetActivity(t, tx, "2-999020", "struct_move"); got != 0 {
 			t.Errorf("struct_move on first insert = %d; want 0", got)
 		}
 	})
@@ -349,15 +352,15 @@ func TestPhase6_Fleet_EmitsDepartAndArrive(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(720001)
 
-		seedPlanetForActivity(t, tx, "2-720", "structs1owner")
-		seedPlanetForActivity(t, tx, "2-721", "structs1owner")
-		seedFleetAt(t, tx, "3-7200", "2-720", "docked")
+		seedPlanetForActivity(t, tx, "2-999030", "structs1owner")
+		seedPlanetForActivity(t, tx, "2-999031", "structs1owner")
+		seedFleetAt(t, tx, "3-999030", "2-999030", "docked")
 
 		raw := mustJSON(t, map[string]any{
-			"id":                   "3-7200",
+			"id":                   "3-999030",
 			"owner":                "structs1owner",
 			"locationType":         "planet",
-			"locationId":           "2-721",
+			"locationId":           "2-999031",
 			"status":               "docked",
 			"locationListForward":  "",
 			"locationListBackward": "",
@@ -370,10 +373,10 @@ func TestPhase6_Fleet_EmitsDepartAndArrive(t *testing.T) {
 			t.Fatalf("fleet: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
-		if got := countPlanetActivity(t, tx, "2-720", "fleet_depart"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999030", "fleet_depart"); got != 1 {
 			t.Errorf("fleet_depart on OLD planet = %d; want 1", got)
 		}
-		if got := countPlanetActivity(t, tx, "2-721", "fleet_arrive"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999031", "fleet_arrive"); got != 1 {
 			t.Errorf("fleet_arrive on NEW planet = %d; want 1", got)
 		}
 	})
@@ -431,18 +434,18 @@ func TestPhase6_StructAttr_StatusEmitsActivity(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(730001)
 
-		seedPlanetForActivity(t, tx, "2-730", "structs1owner")
-		seedStructAt(t, tx, "5-7300", 7300, "2-730")
+		seedPlanetForActivity(t, tx, "2-999040", "structs1owner")
+		seedStructAt(t, tx, "5-999040", 999040, "2-999040")
 
 		raw := mustJSON(t, map[string]any{
-			"attributeId": "1-5-7300",
+			"attributeId": "1-5-999040",
 			"value":       "3",
 		})
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct_attribute: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
-		if got := countPlanetActivity(t, tx, "2-730", "struct_status"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999040", "struct_status"); got != 1 {
 			t.Errorf("struct_status emit = %d; want 1", got)
 		}
 	})
@@ -455,18 +458,18 @@ func TestPhase6_StructAttr_BlockStartOreMineEmits(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(730002)
 
-		seedPlanetForActivity(t, tx, "2-731", "structs1owner")
-		seedStructAt(t, tx, "5-7311", 7311, "2-731")
+		seedPlanetForActivity(t, tx, "2-999041", "structs1owner")
+		seedStructAt(t, tx, "5-999041", 999041, "2-999041")
 
 		raw := mustJSON(t, map[string]any{
-			"attributeId": "3-5-7311",
+			"attributeId": "3-5-999041",
 			"value":       "100",
 		})
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
 			t.Fatalf("struct_attribute: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
-		if got := countPlanetActivity(t, tx, "2-731", "struct_block_ore_mine_start"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999041", "struct_block_ore_mine_start"); got != 1 {
 			t.Errorf("struct_block_ore_mine_start emit = %d; want 1", got)
 		}
 	})
@@ -479,25 +482,25 @@ func TestPhase6_StructAttr_ProtectedIndexDeleteEmitsDefenseRemove(t *testing.T) 
 		suppressTriggers(t, tx)
 		bc := derivBctx(730003)
 
-		// Planet hosts the PROTECTED struct (5-7322).
-		seedPlanetForActivity(t, tx, "2-732", "structs1owner")
-		seedStructAt(t, tx, "5-7322", 7322, "2-732")
+		// Planet hosts the PROTECTED struct (5-999042).
+		seedPlanetForActivity(t, tx, "2-999042", "structs1owner")
+		seedStructAt(t, tx, "5-999042", 999042, "2-999042")
 		// Defender struct lives elsewhere — the activity anchors on the
 		// protected struct's planet, not the defender's.
-		seedPlanetForActivity(t, tx, "2-733", "structs1owner")
-		seedStructAt(t, tx, "5-7321", 7321, "2-733")
+		seedPlanetForActivity(t, tx, "2-999043", "structs1owner")
+		seedStructAt(t, tx, "5-999043", 999043, "2-999043")
 
-		// Set defender protecting 7322.
+		// Set defender protecting 999042.
 		setup := mustJSON(t, map[string]any{
-			"attributeId": "5-5-7321-0",
-			"value":       "7322",
+			"attributeId": "5-5-999043-0",
+			"value":       "999042",
 		})
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, setup); err != nil {
 			t.Fatalf("setup: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
 		// Sanity: defense_add fired on protected planet.
-		if got := countPlanetActivity(t, tx, "2-732", "struct_defense_add"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999042", "struct_defense_add"); got != 1 {
 			t.Fatalf("setup struct_defense_add = %d; want 1", got)
 		}
 
@@ -505,14 +508,14 @@ func TestPhase6_StructAttr_ProtectedIndexDeleteEmitsDefenseRemove(t *testing.T) 
 		// protected struct's planet. This exercises the SQL-trigger
 		// dead-code DELETE branch we fixed.
 		clear := mustJSON(t, map[string]any{
-			"attributeId": "5-5-7321-0",
+			"attributeId": "5-5-999043-0",
 			"value":       "",
 		})
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, clear); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
-		if got := countPlanetActivity(t, tx, "2-732", "struct_defense_remove"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999042", "struct_defense_remove"); got != 1 {
 			t.Errorf("struct_defense_remove on delete = %d; want 1 (SQL bug fixed)", got)
 		}
 	})
@@ -525,11 +528,11 @@ func TestPhase6_StructAttr_NoOpUpsertSkipsEmit(t *testing.T) {
 		suppressTriggers(t, tx)
 		bc := derivBctx(730004)
 
-		seedPlanetForActivity(t, tx, "2-734", "structs1owner")
-		seedStructAt(t, tx, "5-7340", 7340, "2-734")
+		seedPlanetForActivity(t, tx, "2-999044", "structs1owner")
+		seedStructAt(t, tx, "5-999044", 999044, "2-999044")
 
 		raw := mustJSON(t, map[string]any{
-			"attributeId": "1-5-7340",
+			"attributeId": "1-5-999044",
 			"value":       "3",
 		})
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, raw); err != nil {
@@ -541,7 +544,7 @@ func TestPhase6_StructAttr_NoOpUpsertSkipsEmit(t *testing.T) {
 			t.Fatalf("status 2: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
-		if got := countPlanetActivity(t, tx, "2-734", "struct_status"); got != 1 {
+		if got := countPlanetActivity(t, tx, "2-999044", "struct_status"); got != 1 {
 			t.Errorf("struct_status emit count = %d; want 1 (no-op repeat should not re-emit)", got)
 		}
 	})

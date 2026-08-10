@@ -12,11 +12,14 @@
 # then enters the ingest loop.
 #
 # Subcommands (default = ingest):
-#   sync-state                 -- tip-follow ingest
-#   sync-state ingest          -- explicit alias
-#   sync-state bootstrap       -- idempotent schema setup, then exit
-#   sync-state doctor          -- run all checks and exit
-#   sync-state list-handlers   -- print the registered event handlers
+#   sync-state                  -- tip-follow ingest
+#   sync-state ingest           -- explicit alias
+#   sync-state bootstrap        -- idempotent schema setup, then exit
+#   sync-state doctor           -- run all checks and exit
+#   sync-state list-handlers    -- print the registered event handlers
+#   sync-state verify           -- run data-quality checks, write a report
+#   sync-state reprocess-errors -- replay unresolved handler_error_log rows
+#   sync-state init-genesis     -- load genesis ledger credits
 #
 # Configuration (env vars; all optional):
 #
@@ -45,6 +48,16 @@
 #                                    are fatal; useful in CI)
 #   SYNC_STATE_SKIP_DOCTOR        default false (skip RPC + trigger probes;
 #                                    writer lock is always acquired)
+#
+#   --- player guild_rank startup sweep ---
+#   At ingest startup, structs.player.guild_rank is reconciled against the
+#   LCD player snapshot (the EventPlayer handler dropped guildRank for a
+#   long stretch). Runs before the first block, is a no-op once in sync,
+#   and degrades to a warning if the LCD is unreachable.
+#   SYNC_STATE_PLAYER_RANK_SWEEP  default true (false => skip the sweep)
+#   STRUCTS_API_URL               default http://structsd:1317 (LCD base;
+#                                    shared with update-cache)
+#   PAGE_LIMIT                    default 10000 (LCD pagination.limit per page)
 #
 # Upstream node requirements (verified by doctor):
 #   app.toml      pruning = "nothing", min-retain-blocks = 0

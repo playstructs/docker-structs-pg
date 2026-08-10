@@ -14,14 +14,17 @@ import (
 // playerHandler ports cache.handle_event_player
 // (cache-trigger-add-queue-20260427-ugc-fields.sql:23-125).
 //
-// Writes structs.player (including chain UGC username/pfp) +
+// Writes structs.player (including chain UGC username/pfp and guild_rank) +
 // structs.player_object(id, id).
 //
 // Note on guild_rank: the 20260325 handler wrote chain-provided guildRank
-// to player.guild_rank, but the 20260427 rewrite dropped that field from
-// the player payload entirely. We follow the final SQL — guild_rank stays
-// fed by the membership/permission flow (Phase 3) instead of by the player
-// event handler.
+// to player.guild_rank. The 20260427 UGC rewrite silently dropped that
+// field from jsonb_to_record; the Go port initially copied that omission
+// under the incorrect assumption that the membership/permission flow
+// would feed player.guild_rank. That flow only writes
+// structs.permission_guild_rank (a different table). We restore the
+// 20260325 write path here — guildRank is Player field 9 and is still
+// emitted on every EventPlayer.
 //
 // Player is a downstream hub: player.guild_id flows to player_address.guild_id
 // via PG triggers. The block-level event order ensures player events
@@ -36,16 +39,17 @@ func (playerHandler) CompositeKey() string {
 const playerUpsertSQL = `
 INSERT INTO structs.player (
     id, index, creator, primary_address, guild_id,
-    substation_id, planet_id, fleet_id,
+    substation_id, planet_id, fleet_id, guild_rank,
     username, pfp, pfp_client_render_attributes,
     created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
 ON CONFLICT (id) DO UPDATE
    SET primary_address              = EXCLUDED.primary_address,
        guild_id                     = EXCLUDED.guild_id,
        substation_id                = EXCLUDED.substation_id,
        planet_id                    = EXCLUDED.planet_id,
        fleet_id                     = EXCLUDED.fleet_id,
+       guild_rank                   = EXCLUDED.guild_rank,
        username                     = EXCLUDED.username,
        pfp                          = EXCLUDED.pfp,
        pfp_client_render_attributes = EXCLUDED.pfp_client_render_attributes,
@@ -55,6 +59,7 @@ ON CONFLICT (id) DO UPDATE
     OR structs.player.substation_id                IS DISTINCT FROM EXCLUDED.substation_id
     OR structs.player.planet_id                    IS DISTINCT FROM EXCLUDED.planet_id
     OR structs.player.fleet_id                     IS DISTINCT FROM EXCLUDED.fleet_id
+    OR structs.player.guild_rank                   IS DISTINCT FROM EXCLUDED.guild_rank
     OR structs.player.username                     IS DISTINCT FROM EXCLUDED.username
     OR structs.player.pfp                          IS DISTINCT FROM EXCLUDED.pfp
     OR structs.player.pfp_client_render_attributes IS DISTINCT FROM EXCLUDED.pfp_client_render_attributes`
@@ -111,6 +116,7 @@ func (playerHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 		payload.NullableText(p.SubstationID),
 		payload.NullableText(p.PlanetID),
 		payload.NullableText(p.FleetID),
+		p.GuildRank.Int64(),
 		payload.NullableText(p.Name),
 		payload.NullableText(p.PFP),
 		payload.NullableText(p.PFPClientRenderAttributes),
