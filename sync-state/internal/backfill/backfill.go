@@ -16,6 +16,9 @@
 //     when the *protected* struct dies. Deletes orphaned
 //     struct_defender + protectedStructIndex attribute rows. Pure SQL;
 //     no chain access required.
+//   - SweepDefenderPlanetary: reconciles struct_defender.is_planetary
+//     against the protected struct's location_type. Clears drift from
+//     rows written before the handler learned to set the column.
 package backfill
 
 import (
@@ -235,6 +238,89 @@ func PrintStaleDefenderReport(w io.Writer, r StaleDefenderReport) {
 	}
 	fmt.Fprintf(w, "Stale defender sweep: removed %d defender row(s) and %d attribute row(s) in %s\n",
 		r.DefendersRemoved, r.AttrsRemoved, r.Elapsed.Round(time.Millisecond))
+}
+
+// DefenderPlanetaryReport summarises one SweepDefenderPlanetary run.
+type DefenderPlanetaryReport struct {
+	Updated int64
+	Elapsed time.Duration
+}
+
+// sweepDefenderPlanetaryMatchedSQL sets is_planetary from the protected
+// struct's location_type. Does not touch updated_at — matching the
+// structs-pg backfill — so that column keeps meaning "when the chain
+// last changed this relationship".
+const sweepDefenderPlanetaryMatchedSQL = `
+UPDATE structs.struct_defender d
+   SET is_planetary = (s.location_type = 'planet')
+  FROM structs.struct s
+ WHERE s.id = d.protected_struct_id
+   AND d.is_planetary IS DISTINCT FROM (s.location_type = 'planet')`
+
+// sweepDefenderPlanetaryOrphanSQL clears is_planetary on rows whose
+// protected struct is missing (migration EXISTS semantics → false).
+const sweepDefenderPlanetaryOrphanSQL = `
+UPDATE structs.struct_defender d
+   SET is_planetary = FALSE
+ WHERE d.is_planetary
+   AND NOT EXISTS (SELECT 1 FROM structs.struct s WHERE s.id = d.protected_struct_id)`
+
+// SweepDefenderPlanetary reconciles structs.struct_defender.is_planetary
+// against the protected struct's location_type. Pure SQL, no chain
+// access. No-ops once every row agrees with the intended state. Does
+// not touch updated_at.
+func SweepDefenderPlanetary(ctx context.Context, pool *pgxpool.Pool) (DefenderPlanetaryReport, error) {
+	started := time.Now()
+	var r DefenderPlanetaryReport
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return r, fmt.Errorf("begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	updated, err := applyDefenderPlanetary(ctx, tx)
+	if err != nil {
+		return r, err
+	}
+	r.Updated = updated
+	if err := tx.Commit(ctx); err != nil {
+		return r, fmt.Errorf("commit: %w", err)
+	}
+	committed = true
+	r.Elapsed = time.Since(started)
+	return r, nil
+}
+
+// applyDefenderPlanetary runs both reconciliation UPDATEs on an open
+// transaction. Used by SweepDefenderPlanetary and by the package's
+// integration test (rolled-back dry run).
+func applyDefenderPlanetary(ctx context.Context, tx pgx.Tx) (int64, error) {
+	tag, err := tx.Exec(ctx, sweepDefenderPlanetaryMatchedSQL)
+	if err != nil {
+		return 0, fmt.Errorf("sweep defender is_planetary (matched): %w", err)
+	}
+	updated := tag.RowsAffected()
+	tag, err = tx.Exec(ctx, sweepDefenderPlanetaryOrphanSQL)
+	if err != nil {
+		return 0, fmt.Errorf("sweep defender is_planetary (orphan): %w", err)
+	}
+	return updated + tag.RowsAffected(), nil
+}
+
+// PrintDefenderPlanetaryReport writes the one-line startup summary.
+func PrintDefenderPlanetaryReport(w io.Writer, r DefenderPlanetaryReport) {
+	if r.Updated == 0 {
+		fmt.Fprintf(w, "Defender is_planetary sweep: in sync (%s)\n", r.Elapsed.Round(time.Millisecond))
+		return
+	}
+	fmt.Fprintf(w, "Defender is_planetary sweep: repaired %d row(s) in %s\n",
+		r.Updated, r.Elapsed.Round(time.Millisecond))
 }
 
 // fetchAllPlayers pages GET {lcd}/structs/player until pagination.next_key

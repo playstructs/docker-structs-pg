@@ -67,10 +67,10 @@ type EndpointReport struct {
 
 // Report is the full output of a doctor run.
 type Report struct {
-	RPCURL    string // preferred endpoint URL (for legacy single-line header)
-	ChainID   string // populated even on partial failure if we got /status
-	Tip       int64
-	Earliest  int64
+	RPCURL   string // preferred endpoint URL (for legacy single-line header)
+	ChainID  string // populated even on partial failure if we got /status
+	Tip      int64
+	Earliest int64
 
 	// Endpoints holds per-URL probe results. Always populated; for a
 	// single-URL config it has one entry whose role is "primary".
@@ -667,6 +667,7 @@ var canonicalColumns = []struct{ Schema, Table, Column string }{
 	{"structs", "guild", "name"},
 	{"structs", "guild", "pfp"},
 	{"structs", "planet", "name"},
+	{"structs", "struct_defender", "is_planetary"},
 }
 
 // probeCanonicalSchema asserts that every column in canonicalColumns

@@ -312,29 +312,77 @@ func TestHandler_StructDefender(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		raw := mustJSON(t, map[string]any{
-			"defendingStructId": "5-100",
-			"protectedStructId": "5-101",
-		})
-		if err := (structDefenderHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
-			t.Fatalf("insert: %v", err)
+		suppressTriggers(t, tx)
+
+		seedPlanetForActivity(t, tx, testPlanetaryPlanet, "structs1owner")
+		seedStructAt(t, tx, testPlanetaryProtectedPlanet, testPlanetaryProtectedPlanetIndex, testPlanetaryPlanet)
+		seedFleetAt(t, tx, testPlanetaryFleet, testPlanetaryPlanet, "docked")
+		// Fleet-located protected struct: seed via handler so location_type=fleet.
+		if err := (structHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"id":             testPlanetaryProtectedFleet,
+			"index":          testPlanetaryProtectedFleetIndex,
+			"type":           1,
+			"creator":        "structs1owner",
+			"owner":          "structs1owner",
+			"locationType":   "fleet",
+			"locationId":     testPlanetaryFleet,
+			"operatingAmbit": "space",
+			"slot":           1,
+		})); err != nil {
+			t.Fatalf("seed fleet-located struct: %v", err)
+		}
+
+		// Planet-located protected → is_planetary = true.
+		if err := (structDefenderHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"defendingStructId": testPlanetaryDefender,
+			"protectedStructId": testPlanetaryProtectedPlanet,
+		})); err != nil {
+			t.Fatalf("insert planet-protected: %v", err)
 		}
 		var prot string
-		_ = tx.QueryRow(ctx, `SELECT protected_struct_id FROM structs.struct_defender WHERE defending_struct_id=$1`, "5-100").Scan(&prot)
-		if prot != "5-101" {
-			t.Errorf("protected = %q want 5-101", prot)
+		var planetary bool
+		_ = tx.QueryRow(ctx,
+			`SELECT protected_struct_id, is_planetary FROM structs.struct_defender WHERE defending_struct_id=$1`,
+			testPlanetaryDefender).Scan(&prot, &planetary)
+		if prot != testPlanetaryProtectedPlanet {
+			t.Errorf("protected = %q want %q", prot, testPlanetaryProtectedPlanet)
 		}
-		// Update to different protector
-		raw2 := mustJSON(t, map[string]any{
-			"defendingStructId": "5-100",
-			"protectedStructId": "5-200",
-		})
-		if err := (structDefenderHandler{}).Handle(ctx, tx, bctx(), raw2); err != nil {
-			t.Fatalf("update: %v", err)
+		if !planetary {
+			t.Errorf("is_planetary = false want true (planet-located protected)")
 		}
-		_ = tx.QueryRow(ctx, `SELECT protected_struct_id FROM structs.struct_defender WHERE defending_struct_id=$1`, "5-100").Scan(&prot)
-		if prot != "5-200" {
-			t.Errorf("after update protected = %q want 5-200", prot)
+
+		// Re-protect onto a fleet-located struct → is_planetary flips to false.
+		if err := (structDefenderHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"defendingStructId": testPlanetaryDefender,
+			"protectedStructId": testPlanetaryProtectedFleet,
+		})); err != nil {
+			t.Fatalf("re-protect fleet: %v", err)
+		}
+		_ = tx.QueryRow(ctx,
+			`SELECT protected_struct_id, is_planetary FROM structs.struct_defender WHERE defending_struct_id=$1`,
+			testPlanetaryDefender).Scan(&prot, &planetary)
+		if prot != testPlanetaryProtectedFleet {
+			t.Errorf("after re-protect protected = %q want %q", prot, testPlanetaryProtectedFleet)
+		}
+		if planetary {
+			t.Errorf("is_planetary = true want false (fleet-located protected)")
+		}
+
+		// Unknown protected struct → is_planetary = false.
+		if err := (structDefenderHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"defendingStructId": testPlanetaryDefender,
+			"protectedStructId": testPlanetaryUnknownProtected,
+		})); err != nil {
+			t.Fatalf("protect unknown: %v", err)
+		}
+		_ = tx.QueryRow(ctx,
+			`SELECT protected_struct_id, is_planetary FROM structs.struct_defender WHERE defending_struct_id=$1`,
+			testPlanetaryDefender).Scan(&prot, &planetary)
+		if prot != testPlanetaryUnknownProtected {
+			t.Errorf("unknown protected = %q want %q", prot, testPlanetaryUnknownProtected)
+		}
+		if planetary {
+			t.Errorf("is_planetary = true want false (unknown protected)")
 		}
 	})
 }

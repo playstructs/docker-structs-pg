@@ -6,7 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestFetchAllPlayers_TwoPages(t *testing.T) {
@@ -137,5 +142,88 @@ func TestFetchAllPlayers_EscapesPaginationKey(t *testing.T) {
 	// Sanity: url.QueryEscape of the key should decode back.
 	if u, err := url.QueryUnescape(url.QueryEscape(rawKey)); err != nil || u != rawKey {
 		t.Errorf("escape round-trip failed: %v %q", err, u)
+	}
+}
+
+// TestApplyDefenderPlanetary_CorrectsAndIdempotent verifies the sweep SQL
+// flips a deliberately wrong is_planetary bit and is a no-op on a second
+// pass. Opt-in via INTEGRATION_DATABASE_URL; rolls back so the live DB
+// stays clean. Reserved-range ids (990950+) avoid colliding with chain data.
+func TestApplyDefenderPlanetary_CorrectsAndIdempotent(t *testing.T) {
+	url := os.Getenv("INTEGRATION_DATABASE_URL")
+	if url == "" {
+		t.Skip("INTEGRATION_DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("pgxpool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const (
+		planetID    = "2-990950"
+		structID    = "5-990951"
+		defenderID  = "5-990950"
+		structIndex = 990951
+	)
+
+	// Minimal planet + planet-located struct so the matched UPDATE can see
+	// location_type='planet'. Avoids the event handlers (backfill has no
+	// events import) — raw inserts are enough for this SQL check.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO structs.planet (id, owner, creator, max_ore, space_slots, air_slots, land_slots, water_slots, status, created_at, updated_at)
+		 VALUES ($1, 'structs1owner', 'structs1owner', 100, 0, 0, 0, 0, 'active', NOW(), NOW())
+		 ON CONFLICT (id) DO NOTHING`, planetID); err != nil {
+		t.Fatalf("seed planet: %v", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO structs.struct (id, index, type, creator, owner, location_type, location_id, operating_ambit, slot, created_at, updated_at, is_destroyed)
+		 VALUES ($1, $2, 1, 'structs1owner', 'structs1owner', 'planet', $3, 'land', 1, NOW(), NOW(), FALSE)
+		 ON CONFLICT (id) DO UPDATE
+		    SET location_type='planet', location_id=EXCLUDED.location_id, is_destroyed=FALSE`,
+		structID, structIndex, planetID); err != nil {
+		t.Fatalf("seed struct: %v", err)
+	}
+	// Wrong flag: planet-located but is_planetary=false.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO structs.struct_defender (defending_struct_id, protected_struct_id, is_planetary, updated_at)
+		 VALUES ($1, $2, FALSE, NOW())
+		 ON CONFLICT (defending_struct_id) DO UPDATE
+		    SET protected_struct_id=EXCLUDED.protected_struct_id, is_planetary=FALSE`,
+		defenderID, structID); err != nil {
+		t.Fatalf("seed defender: %v", err)
+	}
+
+	n, err := applyDefenderPlanetary(ctx, tx)
+	if err != nil {
+		t.Fatalf("pass1: %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("pass1 updated %d rows; want >= 1", n)
+	}
+	var planetary bool
+	if err := tx.QueryRow(ctx,
+		`SELECT is_planetary FROM structs.struct_defender WHERE defending_struct_id=$1`,
+		defenderID).Scan(&planetary); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !planetary {
+		t.Errorf("is_planetary still false after sweep")
+	}
+
+	n2, err := applyDefenderPlanetary(ctx, tx)
+	if err != nil {
+		t.Fatalf("pass2: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("pass2 updated %d rows; want 0 (idempotent)", n2)
 	}
 }

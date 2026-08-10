@@ -86,6 +86,17 @@ const (
 	// seeded defender id must be one the chain cannot already hold or the
 	// INSERT trips a duplicate key.
 	testSurvivingDefender = "5-990930"
+
+	// is_planetary derivation tests (planet-protected, fleet-protected,
+	// unknown protected, and re-protect flip).
+	testPlanetaryPlanet               = "2-990940"
+	testPlanetaryDefender             = "5-990940"
+	testPlanetaryProtectedPlanet      = "5-990941"
+	testPlanetaryProtectedPlanetIndex = 990941
+	testPlanetaryFleet                = "3-990942"
+	testPlanetaryProtectedFleet       = "5-990942"
+	testPlanetaryProtectedFleetIndex  = 990942
+	testPlanetaryUnknownProtected     = "5-990949"
 )
 
 // bctx returns a BlockContext suitable for handler tests. The Buf is
@@ -291,22 +302,22 @@ func TestHandler_Fleet(t *testing.T) {
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
 		raw := mustJSON(t, map[string]any{
-			"id":                    "2-3",
-			"owner":                 "1-1",
-			"space":                 map[string]any{"slot1": "5-1"},
-			"air":                   nil,
-			"land":                  nil,
-			"water":                 nil,
-			"spaceSlots":            2,
-			"airSlots":              0,
-			"landSlots":             0,
-			"waterSlots":            0,
-			"locationType":          "planet",
-			"locationId":            "3-7",
-			"status":                "ONLINE",
-			"locationListForward":   "",
-			"locationListBackward":  "",
-			"commandStruct":         "5-1",
+			"id":                   "2-3",
+			"owner":                "1-1",
+			"space":                map[string]any{"slot1": "5-1"},
+			"air":                  nil,
+			"land":                 nil,
+			"water":                nil,
+			"spaceSlots":           2,
+			"airSlots":             0,
+			"landSlots":            0,
+			"waterSlots":           0,
+			"locationType":         "planet",
+			"locationId":           "3-7",
+			"status":               "ONLINE",
+			"locationListForward":  "",
+			"locationListBackward": "",
+			"commandStruct":        "5-1",
 		})
 		if err := (fleetHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
 			t.Fatalf("insert: %v", err)
@@ -520,33 +531,33 @@ func TestHandler_StructType(t *testing.T) {
 		ctx := context.Background()
 		// Use a high id to avoid colliding with real struct_types.
 		raw := mustJSON(t, map[string]any{
-			"id":                                     9999,
-			"type":                                   "TestType",
-			"category":                               "TEST",
-			"buildLimit":                             10,
-			"buildDifficulty":                        100,
-			"buildDraw":                              500,
-			"maxHealth":                              1000,
-			"passiveDraw":                            50,
-			"possibleAmbit":                          15,
-			"movable":                                true,
-			"slotBound":                              false,
-			"primaryWeapon":                          "BLASTER",
-			"primaryWeaponControl":                   "MANUAL",
-			"primaryWeaponCharge":                    0,
-			"primaryWeaponAmbits":                    15,
-			"primaryWeaponTargets":                   1,
-			"primaryWeaponShots":                     1,
-			"primaryWeaponDamage":                    10,
-			"primaryWeaponBlockable":                 true,
-			"primaryWeaponCounterable":               true,
-			"primaryWeaponArmourPiercing":            true,
-			"primaryWeaponRecoilDamage":              0,
-			"primaryWeaponShotSuccessRateNumerator":   1,
+			"id":                                    9999,
+			"type":                                  "TestType",
+			"category":                              "TEST",
+			"buildLimit":                            10,
+			"buildDifficulty":                       100,
+			"buildDraw":                             500,
+			"maxHealth":                             1000,
+			"passiveDraw":                           50,
+			"possibleAmbit":                         15,
+			"movable":                               true,
+			"slotBound":                             false,
+			"primaryWeapon":                         "BLASTER",
+			"primaryWeaponControl":                  "MANUAL",
+			"primaryWeaponCharge":                   0,
+			"primaryWeaponAmbits":                   15,
+			"primaryWeaponTargets":                  1,
+			"primaryWeaponShots":                    1,
+			"primaryWeaponDamage":                   10,
+			"primaryWeaponBlockable":                true,
+			"primaryWeaponCounterable":              true,
+			"primaryWeaponArmourPiercing":           true,
+			"primaryWeaponRecoilDamage":             0,
+			"primaryWeaponShotSuccessRateNumerator": 1,
 			"primaryWeaponShotSuccessRateDenominator": 1,
-			"secondaryWeaponArmourPiercing":          false,
-			"generatingRate":                         2,
-			"class":                                  "Command Ship",
+			"secondaryWeaponArmourPiercing":           false,
+			"generatingRate":                          2,
+			"class":                                   "Command Ship",
 		})
 		if err := (structTypeHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
 			t.Fatalf("insert: %v", err)

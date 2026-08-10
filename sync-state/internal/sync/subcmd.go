@@ -572,6 +572,19 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		}
 	}
 
+	// Defender is_planetary reconciliation. Runs after SweepStaleDefenders
+	// so we don't correct rows that sweep is about to delete. Clears
+	// drift from rows written before the handler learned to set the
+	// column; no-ops once every row agrees with location_type.
+	{
+		report, serr := backfill.SweepDefenderPlanetary(ctx, pool.Pool)
+		if serr != nil {
+			fmt.Fprintf(stderr, "WARN: defender is_planetary sweep skipped: %v\n", serr)
+		} else {
+			backfill.PrintDefenderPlanetaryReport(stderr, report)
+		}
+	}
+
 	router := events.NewRouter(cfg.StrictUnknownEvents)
 	fmt.Fprintf(stderr, "Event registry: %d handlers (use `sync-state list-handlers` to inspect)\n",
 		router.Count())
