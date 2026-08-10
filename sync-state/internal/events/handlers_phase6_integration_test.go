@@ -425,6 +425,227 @@ func TestPhase6_Fleet_AwayStatusIncludesFleetList(t *testing.T) {
 	})
 }
 
+// -------- fleet-carried planetary defenses --------
+
+// Ids for the defense-presence tests. Reserved 990000+ range — see the
+// note in handlers_integration_test.go.
+const (
+	testFleetDefHome           = "2-990970"
+	testFleetDefEnemyA         = "2-990971"
+	testFleetDefEnemyB         = "2-990972"
+	testFleetDefFleet          = "3-990970"
+	testFleetDefDefender       = "5-990970"
+	testFleetDefDefenderIndex  = 990970
+	testFleetDefProtected      = "5-990971"
+	testFleetDefProtectedIndex = 990971
+)
+
+// seedStructOnFleet seeds a struct riding a fleet rather than sitting on
+// a planet, so its location_type is 'fleet'.
+func seedStructOnFleet(t *testing.T, tx pgx.Tx, structID string, structIndex int, fleetID string) {
+	t.Helper()
+	ctx := context.Background()
+	raw := mustJSON(t, map[string]any{
+		"id":             structID,
+		"index":          structIndex,
+		"type":           1,
+		"creator":        "structs1owner",
+		"owner":          "structs1owner",
+		"locationType":   "fleet",
+		"locationId":     fleetID,
+		"operatingAmbit": "space",
+		"slot":           1,
+	})
+	if err := (structHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
+		t.Fatalf("seed struct-on-fleet %s: %v", structID, err)
+	}
+}
+
+// moveFleet relocates a already-seeded fleet to planetID and flushes.
+func moveFleet(t *testing.T, tx pgx.Tx, bc BlockContext, fleetID, planetID string) {
+	t.Helper()
+	ctx := context.Background()
+	raw := mustJSON(t, map[string]any{
+		"id":                   fleetID,
+		"owner":                "structs1owner",
+		"locationType":         "planet",
+		"locationId":           planetID,
+		"status":               "docked",
+		"locationListForward":  "",
+		"locationListBackward": "",
+		"spaceSlots":           0,
+		"airSlots":             0,
+		"landSlots":            0,
+		"waterSlots":           0,
+	})
+	if err := (fleetHandler{}).Handle(ctx, tx, bc, raw); err != nil {
+		t.Fatalf("move fleet %s to %s: %v", fleetID, planetID, err)
+	}
+	flushBuf(t, ctx, tx, bc)
+}
+
+// TestPhase6_Fleet_CarriedPlanetaryDefensePresence walks a full raid round
+// trip for a defender that rides a fleet while protecting a struct on the
+// fleet's home planet: one struct_defense_remove when the fleet leaves
+// home, silence while it hops between enemy planets, one
+// struct_defense_add when it returns. structs.struct_defender is never
+// touched — these are presence signals, not relationship changes.
+func TestPhase6_Fleet_CarriedPlanetaryDefensePresence(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		bc := derivBctx(720010)
+
+		seedPlanetForActivity(t, tx, testFleetDefHome, "structs1owner")
+		seedPlanetForActivity(t, tx, testFleetDefEnemyA, "structs1owner")
+		seedPlanetForActivity(t, tx, testFleetDefEnemyB, "structs1owner")
+		seedFleetAt(t, tx, testFleetDefFleet, testFleetDefHome, "docked")
+		seedStructAt(t, tx, testFleetDefProtected, testFleetDefProtectedIndex, testFleetDefHome)
+		seedStructOnFleet(t, tx, testFleetDefDefender, testFleetDefDefenderIndex, testFleetDefFleet)
+
+		if err := (structDefenderHandler{}).Handle(ctx, tx, bc, mustJSON(t, map[string]any{
+			"defendingStructId": testFleetDefDefender,
+			"protectedStructId": testFleetDefProtected,
+		})); err != nil {
+			t.Fatalf("seed defender: %v", err)
+		}
+		// Guard the premise: if the upsert didn't flag this planetary the
+		// emit query matches nothing and every assertion below passes
+		// vacuously.
+		var planetary bool
+		if err := tx.QueryRow(ctx,
+			`SELECT is_planetary FROM structs.struct_defender WHERE defending_struct_id=$1`,
+			testFleetDefDefender).Scan(&planetary); err != nil {
+			t.Fatalf("read is_planetary: %v", err)
+		}
+		if !planetary {
+			t.Fatalf("seeded defense has is_planetary=false; want true")
+		}
+
+		// Leave home: remove anchored on home, nothing on the destination.
+		moveFleet(t, tx, bc, testFleetDefFleet, testFleetDefEnemyA)
+		if got := countPlanetActivity(t, tx, testFleetDefHome, "struct_defense_remove"); got != 1 {
+			t.Fatalf("struct_defense_remove on home = %d; want 1", got)
+		}
+		if got := countPlanetActivity(t, tx, testFleetDefEnemyA, "struct_defense_add"); got != 0 {
+			t.Errorf("struct_defense_add on enemy A = %d; want 0", got)
+		}
+
+		// Detail must be indistinguishable from a chain-driven defense
+		// event: the same two keys and nothing else, so the webapp needs
+		// no change to react to it.
+		var defID, protID string
+		var keys int
+		if err := tx.QueryRow(ctx,
+			`SELECT detail->>'defender_struct_id', detail->>'protected_struct_id',
+			        (SELECT count(*) FROM jsonb_object_keys(detail))
+			   FROM structs.planet_activity
+			  WHERE planet_id=$1 AND category='struct_defense_remove'`,
+			testFleetDefHome).Scan(&defID, &protID, &keys); err != nil {
+			t.Fatalf("read remove detail: %v", err)
+		}
+		if defID != testFleetDefDefender {
+			t.Errorf("remove defender = %q want %q", defID, testFleetDefDefender)
+		}
+		if protID != testFleetDefProtected {
+			t.Errorf("remove protected = %q want %q", protID, testFleetDefProtected)
+		}
+		if keys != 2 {
+			t.Errorf("remove detail has %d keys; want exactly 2 (chain-driven shape)", keys)
+		}
+
+		// Enemy A to enemy B: the protected struct is on neither planet,
+		// so both sides match zero rows. This is what keeps a multi-hop
+		// raid from spamming defense events.
+		moveFleet(t, tx, bc, testFleetDefFleet, testFleetDefEnemyB)
+		for _, planet := range []string{testFleetDefEnemyA, testFleetDefEnemyB} {
+			for _, cat := range []string{"struct_defense_remove", "struct_defense_add"} {
+				if got := countPlanetActivity(t, tx, planet, cat); got != 0 {
+					t.Errorf("%s on %s after enemy-to-enemy hop = %d; want 0", cat, planet, got)
+				}
+			}
+		}
+		if got := countPlanetActivity(t, tx, testFleetDefHome, "struct_defense_remove"); got != 1 {
+			t.Errorf("home struct_defense_remove after hop = %d; want 1 (unchanged)", got)
+		}
+
+		// Home again: one add, and no second remove.
+		moveFleet(t, tx, bc, testFleetDefFleet, testFleetDefHome)
+		if got := countPlanetActivity(t, tx, testFleetDefHome, "struct_defense_add"); got != 1 {
+			t.Fatalf("struct_defense_add on home = %d; want 1", got)
+		}
+		if got := countPlanetActivity(t, tx, testFleetDefHome, "struct_defense_remove"); got != 1 {
+			t.Errorf("home struct_defense_remove total = %d; want 1", got)
+		}
+		var addDef, addProt string
+		if err := tx.QueryRow(ctx,
+			`SELECT detail->>'defender_struct_id', detail->>'protected_struct_id'
+			   FROM structs.planet_activity
+			  WHERE planet_id=$1 AND category='struct_defense_add'`,
+			testFleetDefHome).Scan(&addDef, &addProt); err != nil {
+			t.Fatalf("read add detail: %v", err)
+		}
+		if addDef != testFleetDefDefender || addProt != testFleetDefProtected {
+			t.Errorf("add detail = (%q, %q) want (%q, %q)",
+				addDef, addProt, testFleetDefDefender, testFleetDefProtected)
+		}
+
+		// The relationship itself is untouched by the round trip.
+		var stillThere bool
+		if err := tx.QueryRow(ctx,
+			`SELECT is_planetary FROM structs.struct_defender WHERE defending_struct_id=$1`,
+			testFleetDefDefender).Scan(&stillThere); err != nil {
+			t.Fatalf("defender row missing after round trip: %v", err)
+		}
+		if !stillThere {
+			t.Errorf("is_planetary flipped to false; the move must not write struct_defender")
+		}
+	})
+}
+
+// TestPhase6_Fleet_SameFleetDefenseSilentOnMove covers the shape most of
+// the live rows have: defender and protected ride the same fleet, so they
+// travel together and a move must emit nothing.
+func TestPhase6_Fleet_SameFleetDefenseSilentOnMove(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		bc := derivBctx(720011)
+
+		const (
+			home      = "2-990975"
+			away      = "2-990976"
+			fleetID   = "3-990975"
+			defender  = "5-990975"
+			protected = "5-990976"
+		)
+		seedPlanetForActivity(t, tx, home, "structs1owner")
+		seedPlanetForActivity(t, tx, away, "structs1owner")
+		seedFleetAt(t, tx, fleetID, home, "docked")
+		seedStructOnFleet(t, tx, defender, 990975, fleetID)
+		seedStructOnFleet(t, tx, protected, 990976, fleetID)
+
+		if err := (structDefenderHandler{}).Handle(ctx, tx, bc, mustJSON(t, map[string]any{
+			"defendingStructId": defender,
+			"protectedStructId": protected,
+		})); err != nil {
+			t.Fatalf("seed defender: %v", err)
+		}
+
+		moveFleet(t, tx, bc, fleetID, away)
+		for _, planet := range []string{home, away} {
+			for _, cat := range []string{"struct_defense_remove", "struct_defense_add"} {
+				if got := countPlanetActivity(t, tx, planet, cat); got != 0 {
+					t.Errorf("%s on %s = %d; want 0 (same-fleet defense travels with the fleet)",
+						cat, planet, got)
+				}
+			}
+		}
+	})
+}
+
 // -------- struct_attribute (Phase 6d) --------
 
 func TestPhase6_StructAttr_StatusEmitsActivity(t *testing.T) {

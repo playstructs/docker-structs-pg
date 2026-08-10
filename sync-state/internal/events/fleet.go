@@ -24,6 +24,10 @@ import (
 // the dropped PLANET_ACTIVITY_FLEET_MOVE trigger (cache-system.sql:1201-1262)
 // used to write. The Go port fixes TWO long-standing bugs in the SQL
 // trigger — see emitFleetMoveActivity.
+//
+// On top of that it emits struct_defense_remove / struct_defense_add for
+// the planetary defenses the fleet carries — behavior with no SQL-trigger
+// ancestor. See emitFleetDefensePresence.
 type fleetHandler struct{}
 
 func (fleetHandler) CompositeKey() string {
@@ -146,8 +150,16 @@ func emitFleetMoveActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p 
 	if err := emitFleetMoveSide(ctx, tx, bctx, p.ID, prevLocID, prevStatus, "fleet_depart"); err != nil {
 		return fmt.Errorf("depart: %w", err)
 	}
+	if err := emitFleetDefensePresence(ctx, tx, bctx, p.ID, prevLocID,
+		"struct_defense_remove"); err != nil {
+		return fmt.Errorf("depart defenses: %w", err)
+	}
 	if err := emitFleetMoveSide(ctx, tx, bctx, p.ID, p.LocationID, p.Status, "fleet_arrive"); err != nil {
 		return fmt.Errorf("arrive: %w", err)
+	}
+	if err := emitFleetDefensePresence(ctx, tx, bctx, p.ID, p.LocationID,
+		"struct_defense_add"); err != nil {
+		return fmt.Errorf("arrive defenses: %w", err)
 	}
 	return nil
 }
@@ -204,6 +216,82 @@ func emitFleetMoveSide(ctx context.Context, tx pgx.Tx, bctx BlockContext, fleetI
 		Detail:      detailJSON,
 		BlockHeight: bctx.Height,
 	})
+	return nil
+}
+
+// fleetPlanetaryDefensesSQL lists the planetary defense relationships a
+// moving fleet carries for one planet: the defender rides the fleet, the
+// protected struct sits on that planet. is_planetary is the pre-computed
+// flag, so this never re-derives location_type per row.
+//
+// Anchoring on the protected struct's planet is what keeps a raid quiet
+// in between: a planet-located protected struct never moves, so a fleet
+// that leaves home matches only on its home planet and never on the
+// enemy planets it hops through. That also makes an ownership or
+// fleet-status filter redundant — this predicate is strictly narrower.
+const fleetPlanetaryDefensesSQL = `
+SELECT d.defending_struct_id, d.protected_struct_id
+  FROM structs.struct_defender d
+  JOIN structs.struct ds ON ds.id = d.defending_struct_id
+  JOIN structs.struct ps ON ps.id = d.protected_struct_id
+ WHERE d.is_planetary
+   AND ds.location_type = 'fleet'
+   AND ds.location_id   = $1
+   AND ps.location_type = 'planet'
+   AND ps.location_id   = $2
+   AND NOT ds.is_destroyed
+   AND NOT ps.is_destroyed
+ ORDER BY d.defending_struct_id`
+
+// fleetDefensePair is one carried defense relationship.
+type fleetDefensePair struct{ defender, protected string }
+
+// fleetPlanetaryDefenses collects the carried defenses into a slice
+// before the caller emits anything: insertStructAttrActivity runs
+// nextPlanetActivitySeq, and pgx forbids a second statement on the same
+// tx while a Rows cursor is still open.
+func fleetPlanetaryDefenses(ctx context.Context, tx pgx.Tx, fleetID, planetID string) ([]fleetDefensePair, error) {
+	rows, err := tx.Query(ctx, fleetPlanetaryDefensesSQL, fleetID, planetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pairs []fleetDefensePair
+	for rows.Next() {
+		var p fleetDefensePair
+		if err := rows.Scan(&p.defender, &p.protected); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, p)
+	}
+	return pairs, rows.Err()
+}
+
+// emitFleetDefensePresence emits one defense event per planetary defense
+// the fleet carries for planetID — struct_defense_remove as the fleet
+// leaves, struct_defense_add as it returns.
+//
+// Category and detail are identical to the chain-driven defense events in
+// struct_attribute.go, so the webapp handles these with no change and
+// cannot tell the two apart. structs.struct_defender is deliberately left
+// untouched: the chain keeps the relationship across the move, so this is
+// a presence signal only.
+func emitFleetDefensePresence(ctx context.Context, tx pgx.Tx, bctx BlockContext, fleetID, planetID, category string) error {
+	if planetID == "" {
+		return nil
+	}
+	pairs, err := fleetPlanetaryDefenses(ctx, tx, fleetID, planetID)
+	if err != nil {
+		return fmt.Errorf("planetary defenses fleet=%s planet=%s: %w", fleetID, planetID, err)
+	}
+	for _, p := range pairs {
+		if err := insertStructAttrActivity(ctx, tx, bctx, planetID, category, map[string]any{
+			"defender_struct_id":  p.defender,
+			"protected_struct_id": p.protected,
+		}); err != nil {
+			return fmt.Errorf("%s defender=%s planet=%s: %w", category, p.defender, planetID, err)
+		}
+	}
 	return nil
 }
 

@@ -53,6 +53,35 @@ nothing downstream is expected to regress:
   the per-block tx. Fixed: source from `bctx.Height` so replays land
   the correct historical block.
 
+## Behavior with no SQL-trigger ancestor
+
+### Defense presence on fleet movement
+
+`fleetHandler` emits `struct_defense_remove` / `struct_defense_add` for
+the planetary defenses a moving fleet carries — a defender riding the
+fleet while the struct it protects sits on a planet
+(`struct_defender.is_planetary`). The remove is anchored on the planet
+departed, the add on the planet arrived at. Because every
+`structs.planet_activity` insert fires `planet_activity_notify`, these
+reach the webapp on the `grass` channel like any other activity row.
+
+Two properties worth knowing:
+
+- **The events are indistinguishable from the chain-driven ones.**
+  Category and detail (`defender_struct_id`, `protected_struct_id`) match
+  what `struct_attribute.go` emits, so the webapp reacts with no change
+  and no consumer can tell a fleet departure from a real clear. The
+  tradeoff is deliberate: `structs.struct_defender` is never written, so
+  a client re-reading the table while the fleet is away still sees the
+  defense. Nothing is persisted, so there is no sweep and nothing to
+  reconcile at startup — a departure missed while `sync-state` was down
+  simply has no matching remove, and the next return still emits its add.
+- **Multi-hop raids are quiet in between.** Both sides require the
+  protected struct to be on the anchor planet, and a planet-located
+  struct never moves, so a fleet that leaves home to raid matches only
+  on its home planet. Hops between enemy planets emit nothing. This is
+  why the query needs no planet-ownership or fleet-status filter.
+
 ## Running alongside a catching-up node
 
 `sync-state` (without `-one-shot`) does NOT require the upstream
