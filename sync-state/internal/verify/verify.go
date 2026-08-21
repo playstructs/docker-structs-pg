@@ -121,6 +121,7 @@ var allChecks = []checkEntry{
 	{"genesis_loaded", checkGenesisLoaded},
 	{"ordered_timeseries_monotonic", checkOrderedTimeseriesMonotonic},
 	{"ledger_balance_sanity", checkLedgerBalanceSanity},
+	{"api_read_models", checkAPIReadModels},
 }
 
 func selectChecks(opts Options) []checkEntry {

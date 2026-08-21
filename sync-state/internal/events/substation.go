@@ -51,5 +51,9 @@ func (substationHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 	); err != nil {
 		return fmt.Errorf("substation upsert id=%s: %w", p.ID, err)
 	}
-	return upsertPlayerObject(ctx, tx, p.ID, p.Owner)
+	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
+		return err
+	}
+	bctx.Dirty.Substation(p.ID)
+	return nil
 }

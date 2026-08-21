@@ -17,4 +17,7 @@ type Guild struct {
 	Owner                               string  `json:"owner"`
 	Name                                string  `json:"name"`
 	PFP                                 string  `json:"pfp"`
+	// v0.21.0 also emits bankConvertInFee, bankConvertOutFee, and
+	// charterSolverId. Those are not persisted yet; payload.Decode
+	// ignores unknown JSON fields so ingest stays compatible.
 }

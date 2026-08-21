@@ -16,9 +16,10 @@ package events
 // subsystem.
 func AllHandlers() []Handler {
 	return []Handler{
-		// Phase 2 — entity handlers (12)
+		// Phase 2 — entity handlers (13)
 		allocationHandler{},
 		agreementHandler{},
+		deleteHandler{},
 		guildHandler{},
 		infusionHandler{},
 		fleetHandler{},

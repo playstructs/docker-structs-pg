@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/buffers"
+	"sync-state/internal/readmodel"
 )
 
 // connect opens a single connection to the integration PG. Skips the
@@ -111,7 +112,8 @@ func bctx() BlockContext {
 		BlockTime: time.Now(),
 		TipHeight: 100,
 		TxIndex:   -1, MsgIndex: -1, EventIndex: 0,
-		Buf: buffers.New(),
+		Buf:   buffers.New(),
+		Dirty: readmodel.NewDirty(),
 	}
 }
 
@@ -230,6 +232,94 @@ func TestHandler_Agreement(t *testing.T) {
 	})
 }
 
+func TestHandler_DeleteAgreement(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		const (
+			providerID  = "10-990040"
+			agreementID = "11-990041"
+		)
+		if err := (providerHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"id": providerID, "index": 990040, "substationId": "4-1",
+			"rate":         map[string]any{"amount": "100", "denom": "uvert"},
+			"accessPolicy": "open", "capacityMinimum": "1", "capacityMaximum": "1000",
+			"durationMinimum": "10", "durationMaximum": "10000",
+			"providerCancellationPenalty": "5", "consumerCancellationPenalty": "10",
+			"creator": "creator", "owner": "owner-player",
+		})); err != nil {
+			t.Fatalf("provider: %v", err)
+		}
+		if err := (agreementHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"id": agreementID, "providerId": providerID, "allocationId": "6-1",
+			"capacity": "1000", "startBlock": "100", "endBlock": "200",
+			"creator": "creator", "owner": "owner-player",
+		})); err != nil {
+			t.Fatalf("agreement: %v", err)
+		}
+		bc := bctx()
+		if err := (deleteHandler{}).Handle(ctx, tx, bc, mustJSON(t, map[string]any{"objectId": agreementID})); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		var n int
+		_ = tx.QueryRow(ctx, `SELECT COUNT(*) FROM structs.agreement WHERE id=$1`, agreementID).Scan(&n)
+		if n != 0 {
+			t.Fatalf("agreement still present")
+		}
+		_ = tx.QueryRow(ctx, `SELECT COUNT(*) FROM structs.player_object WHERE object_id=$1`, agreementID).Scan(&n)
+		if n != 0 {
+			t.Fatalf("player_object sidecar still present")
+		}
+		if _, ok := bc.Dirty.Providers[providerID]; !ok {
+			t.Fatalf("provider %s not marked dirty", providerID)
+		}
+	})
+}
+
+func TestHandler_DeleteProviderCascadesAgreements(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		const (
+			providerID  = "10-990042"
+			agreementID = "11-990043"
+		)
+		if err := (providerHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"id": providerID, "index": 990042, "substationId": "4-1",
+			"rate":         map[string]any{"amount": "100", "denom": "uvert"},
+			"accessPolicy": "open", "capacityMinimum": "1", "capacityMaximum": "1000",
+			"durationMinimum": "10", "durationMaximum": "10000",
+			"providerCancellationPenalty": "5", "consumerCancellationPenalty": "10",
+			"creator": "creator", "owner": "owner-player",
+		})); err != nil {
+			t.Fatalf("provider: %v", err)
+		}
+		if err := (agreementHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"id": agreementID, "providerId": providerID, "allocationId": "6-1",
+			"capacity": "1000", "startBlock": "100", "endBlock": "200",
+			"creator": "creator", "owner": "owner-player",
+		})); err != nil {
+			t.Fatalf("agreement: %v", err)
+		}
+		if err := (deleteHandler{}).Handle(ctx, tx, bctx(), json.RawMessage(`"`+providerID+`"`)); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		var n int
+		_ = tx.QueryRow(ctx, `SELECT COUNT(*) FROM structs.provider WHERE id=$1`, providerID).Scan(&n)
+		if n != 0 {
+			t.Fatalf("provider still present")
+		}
+		_ = tx.QueryRow(ctx, `SELECT COUNT(*) FROM structs.agreement WHERE id=$1`, agreementID).Scan(&n)
+		if n != 0 {
+			t.Fatalf("cascaded agreement still present")
+		}
+		_ = tx.QueryRow(ctx, `SELECT COUNT(*) FROM structs.player_object WHERE object_id IN ($1,$2)`, providerID, agreementID).Scan(&n)
+		if n != 0 {
+			t.Fatalf("sidecars still present")
+		}
+	})
+}
+
 func TestHandler_Guild(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
@@ -272,7 +362,7 @@ func TestHandler_Infusion(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		raw := mustJSON(t, map[string]any{
+		payload := map[string]any{
 			"destinationId":   "5-99",
 			"address":         "structs1addr",
 			"destinationType": "struct",
@@ -282,8 +372,8 @@ func TestHandler_Infusion(t *testing.T) {
 			"power":           "42",
 			"ratio":           "100",
 			"commission":      "5",
-		})
-		if err := (infusionHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
+		}
+		if err := (infusionHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, payload)); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 		var fuelP, defusingP int64
@@ -293,6 +383,24 @@ func TestHandler_Infusion(t *testing.T) {
 			"5-99", "structs1addr").Scan(&fuelP, &defusingP, &commission)
 		if fuelP != 1234567890 || defusingP != 0 || commission != 5 {
 			t.Errorf("got fuel_p=%d defusing_p=%d commission=%d", fuelP, defusingP, commission)
+		}
+		var playerID string
+		_ = tx.QueryRow(ctx,
+			`SELECT player_id FROM structs.infusion WHERE destination_id=$1 AND address=$2`,
+			"5-99", "structs1addr").Scan(&playerID)
+		if playerID != "1-1" {
+			t.Errorf("player_id=%q want 1-1", playerID)
+		}
+		// v0.21 re-homes infusion.playerId on the same (destination, address).
+		payload["playerId"] = "1-2"
+		if err := (infusionHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, payload)); err != nil {
+			t.Fatalf("owner update: %v", err)
+		}
+		_ = tx.QueryRow(ctx,
+			`SELECT player_id FROM structs.infusion WHERE destination_id=$1 AND address=$2`,
+			"5-99", "structs1addr").Scan(&playerID)
+		if playerID != "1-2" {
+			t.Errorf("updated player_id=%q want 1-2", playerID)
 		}
 	})
 }
@@ -469,6 +577,34 @@ func TestHandler_Provider(t *testing.T) {
 		if amount != 100 || denom != "uvert" {
 			t.Errorf("rate: amount=%d denom=%q", amount, denom)
 		}
+		raw2 := mustJSON(t, map[string]any{
+			"id":                          "test-prov-1",
+			"index":                       1,
+			"substationId":                "s-1",
+			"rate":                        map[string]any{"amount": "250", "denom": "ualpha"},
+			"accessPolicy":                "open",
+			"capacityMinimum":             "1",
+			"capacityMaximum":             "1000",
+			"durationMinimum":             "10",
+			"durationMaximum":             "10000",
+			"providerCancellationPenalty": "5",
+			"consumerCancellationPenalty": "10",
+			"creator":                     "creator",
+			"owner":                       "owner-player",
+		})
+		bc := bctx()
+		if err := (providerHandler{}).Handle(ctx, tx, bc, raw2); err != nil {
+			t.Fatalf("rate update: %v", err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT rate_amount, rate_denom FROM structs.provider WHERE id=$1`, "test-prov-1").Scan(&amount, &denom); err != nil {
+			t.Fatal(err)
+		}
+		if amount != 250 || denom != "ualpha" {
+			t.Errorf("updated rate: amount=%d denom=%q", amount, denom)
+		}
+		if _, ok := bc.Dirty.Providers["test-prov-1"]; !ok {
+			t.Error("provider update did not dirty provider")
+		}
 	})
 }
 
@@ -558,6 +694,7 @@ func TestHandler_StructType(t *testing.T) {
 			"secondaryWeaponArmourPiercing":           false,
 			"generatingRate":                          2,
 			"class":                                   "Command Ship",
+			"canDefend":                               true,
 		})
 		if err := (structTypeHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
 			t.Fatalf("insert: %v", err)
@@ -588,6 +725,27 @@ func TestHandler_StructType(t *testing.T) {
 		).Scan(&primAP, &secAP)
 		if !primAP || secAP {
 			t.Errorf("armour_piercing: primary=%v secondary=%v want true/false", primAP, secAP)
+		}
+		var canDefend bool
+		if err := tx.QueryRow(ctx, `SELECT can_defend FROM structs.struct_type WHERE id=$1`, 9999).Scan(&canDefend); err != nil {
+			t.Fatal(err)
+		}
+		if !canDefend {
+			t.Error("can_defend=false want true after insert")
+		}
+		var withChainField map[string]any
+		if err := json.Unmarshal(raw, &withChainField); err != nil {
+			t.Fatal(err)
+		}
+		withChainField["canDefend"] = false
+		if err := (structTypeHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, withChainField)); err != nil {
+			t.Fatalf("chain refresh: %v", err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT can_defend FROM structs.struct_type WHERE id=$1`, 9999).Scan(&canDefend); err != nil {
+			t.Fatal(err)
+		}
+		if canDefend {
+			t.Error("can_defend=true want false after chain refresh")
 		}
 	})
 }

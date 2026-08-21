@@ -8,7 +8,7 @@ import (
 )
 
 // upsertPlayerObject writes the structs.player_object sidecar shared by 9
-// of the 12 Phase 2 entity handlers (every owner-bearing entity plus
+// of the Phase 2 entity handlers (every owner-bearing entity plus
 // player's self-mapping). Mirrors the SQL pattern:
 //
 //	INSERT INTO structs.player_object(object_id, player_id) VALUES ($1,$2)

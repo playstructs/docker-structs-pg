@@ -13,7 +13,8 @@ import (
 // structTypeHandler ports cache.handle_event_struct_type
 // (cache-trigger-add-queue-20260121-bigly-refactor.sql:885-1389).
 //
-// 67 writable columns. build_draw/passive_draw/generating_rate map to *_p
+// Writable chain columns include build_draw/passive_draw/generating_rate,
+// which map to *_p
 // columns; their non-_p companions are GENERATED. is_command is derived in Go from
 // class == 'Command Ship'. The *_array bitmask-derivative columns are
 // also GENERATED and never written here.
@@ -24,7 +25,11 @@ import (
 // primary/secondaryWeaponGuaranteedShots (67/68) have no DB column and are
 // intentionally not written.
 //
-// The IS DISTINCT FROM guard compares all 67 writable columns as a single
+// structsd v0.21.0 emits authoritative StructType.canDefend values
+// (fleet=true, planetary=false). It is appended as $70 so all existing
+// argument positions remain stable.
+//
+// The IS DISTINCT FROM guard compares all writable columns as a single
 // row tuple (matches the SQL handler's row-comparison form). We keep the
 // same tuple shape to ensure spurious updates are suppressed identically.
 type structTypeHandler struct{}
@@ -56,7 +61,7 @@ INSERT INTO structs.struct_type (
     unguided_defensive_success_rate_numerator, unguided_defensive_success_rate_denominator,
     guided_defensive_success_rate_numerator, guided_defensive_success_rate_denominator,
     trigger_raid_defeat_by_destruction,
-    primary_weapon_armour_piercing, secondary_weapon_armour_piercing,
+    primary_weapon_armour_piercing, secondary_weapon_armour_piercing, can_defend,
     updated_at,
     class, class_abbreviation, default_cosmetic_model_number, default_cosmetic_name,
     is_command
@@ -82,7 +87,7 @@ INSERT INTO structs.struct_type (
     $58, $59,
     $60, $61,
     $62,
-    $68, $69,
+    $68, $69, $70,
     NOW(),
     $63, $64, $65, $66,
     $67
@@ -151,6 +156,7 @@ ON CONFLICT (id) DO UPDATE
        trigger_raid_defeat_by_destruction = EXCLUDED.trigger_raid_defeat_by_destruction,
        primary_weapon_armour_piercing = EXCLUDED.primary_weapon_armour_piercing,
        secondary_weapon_armour_piercing = EXCLUDED.secondary_weapon_armour_piercing,
+       can_defend = EXCLUDED.can_defend,
        updated_at = NOW(),
        class = EXCLUDED.class,
        class_abbreviation = EXCLUDED.class_abbreviation,
@@ -221,6 +227,7 @@ ON CONFLICT (id) DO UPDATE
     structs.struct_type.trigger_raid_defeat_by_destruction,
     structs.struct_type.primary_weapon_armour_piercing,
     structs.struct_type.secondary_weapon_armour_piercing,
+    structs.struct_type.can_defend,
     structs.struct_type.class,
     structs.struct_type.class_abbreviation,
     structs.struct_type.default_cosmetic_model_number,
@@ -290,6 +297,7 @@ ON CONFLICT (id) DO UPDATE
     EXCLUDED.trigger_raid_defeat_by_destruction,
     EXCLUDED.primary_weapon_armour_piercing,
     EXCLUDED.secondary_weapon_armour_piercing,
+    EXCLUDED.can_defend,
     EXCLUDED.class,
     EXCLUDED.class_abbreviation,
     EXCLUDED.default_cosmetic_model_number,
@@ -306,10 +314,10 @@ func (structTypeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 		return fmt.Errorf("struct_type: zero id")
 	}
 
-	// Positional arg list: must align with $1..$69 in structTypeUpsertSQL.
+	// Positional arg list: must align with $1..$70 in structTypeUpsertSQL.
 	// $62 is trigger_raid_defeat_by_destruction; $63-66 are class/cosmetic
 	// fields; $67 is the derived is_command; $68/$69 are the armour-piercing
-	// booleans.
+	// booleans; $70 is can_defend.
 	args := []any{
 		// $1..$3
 		p.ID.Int64(), payload.NullableText(p.Type), payload.NullableText(p.Category),
@@ -381,6 +389,8 @@ func (structTypeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 		// original $1..$67 set so the existing positions stay stable.
 		p.PrimaryWeaponArmourPiercing.Bool(),
 		p.SecondaryWeaponArmourPiercing.Bool(),
+		// $70 can_defend (v0.21.0)
+		p.CanDefend.Bool(),
 	}
 
 	if _, err := tx.Exec(ctx, structTypeUpsertSQL, args...); err != nil {

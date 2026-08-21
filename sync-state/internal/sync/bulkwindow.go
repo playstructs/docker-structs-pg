@@ -68,11 +68,9 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		SkipStatementTimeout:      true,
 	}
 
-	// One buffer for the entire window — handler rows pile up across
-	// blocks and flush once via pgx.CopyFrom right before commit.
-	// Window order is preserved because applyBlockInTx is called in
-	// ascending height order and each block's handlers append in the
-	// chain's deterministic intra-block order.
+	// Reuse one buffer, but applyBlockInTx flushes it after every block so
+	// that block's current-state projections can see its authoritative rows.
+	// The outer transaction still commits the complete window atomically.
 	buf := buffers.New()
 
 	var allPending []pendingHandlerError
@@ -87,10 +85,6 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 				he:     he,
 			})
 		}
-	}
-
-	if err := buf.Flush(ctx, tx); err != nil {
-		return fmt.Errorf("bulk flush buffer h=%d..%d: %w", blocks[0].Height, blocks[len(blocks)-1].Height, err)
 	}
 
 	last := blocks[len(blocks)-1]

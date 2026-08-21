@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,8 @@ ON CONFLICT (address) DO UPDATE
  WHERE structs.player_address.status    IS DISTINCT FROM EXCLUDED.status
     OR structs.player_address.player_id IS DISTINCT FROM EXCLUDED.player_id`
 
+const addressPreviousPlayerSQL = `SELECT player_id FROM structs.player_address WHERE address = $1`
+
 func (addressHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Address](raw)
 	if err != nil {
@@ -70,8 +73,17 @@ func (addressHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, 
 	if p.Address == "" {
 		return fmt.Errorf("address: empty address")
 	}
+	var previous *string
+	if err := tx.QueryRow(ctx, addressPreviousPlayerSQL, p.Address).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("address previous player addr=%s: %w", p.Address, err)
+	}
 	if _, err := tx.Exec(ctx, addressUpsertSQL, p.Address, payload.NullableText(p.PlayerID)); err != nil {
 		return fmt.Errorf("address upsert addr=%s: %w", p.Address, err)
 	}
+	bctx.Dirty.Address(p.Address)
+	if previous != nil {
+		bctx.Dirty.Player(*previous)
+	}
+	bctx.Dirty.Player(p.PlayerID)
 	return nil
 }

@@ -166,6 +166,47 @@ func TestHandler_AddressAssociation_WritesWhenPlayerExists(t *testing.T) {
 	})
 }
 
+func TestHandler_AddressAssociation_DirtiesOldAndNewPlayer(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		for _, spec := range []struct {
+			id    string
+			index int
+		}{
+			{"1-991001", 991001},
+			{"1-991002", 991002},
+		} {
+			raw := mustJSON(t, map[string]any{"id": spec.id, "index": spec.index, "creator": "creator"})
+			if err := (playerHandler{}).Handle(ctx, tx, bctx(), raw); err != nil {
+				t.Fatalf("seed %s: %v", spec.id, err)
+			}
+		}
+		first := mustJSON(t, map[string]any{
+			"address": "structs1reassoc991", "playerIndex": 991001, "registrationStatus": "approved",
+		})
+		if err := (addressAssociationHandler{}).Handle(ctx, tx, bctx(), first); err != nil {
+			t.Fatal(err)
+		}
+		bc := bctx()
+		second := mustJSON(t, map[string]any{
+			"address": "structs1reassoc991", "playerIndex": 991002, "registrationStatus": "approved",
+		})
+		if err := (addressAssociationHandler{}).Handle(ctx, tx, bc, second); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := bc.Dirty.Players["1-991001"]; !ok {
+			t.Error("old player was not dirtied")
+		}
+		if _, ok := bc.Dirty.Players["1-991002"]; !ok {
+			t.Error("new player was not dirtied")
+		}
+		if _, ok := bc.Dirty.Addresses["structs1reassoc991"]; !ok {
+			t.Error("address was not dirtied")
+		}
+	})
+}
+
 func TestHandler_Permission_InsertAndDelete(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {

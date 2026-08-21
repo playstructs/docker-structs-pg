@@ -14,6 +14,7 @@ import (
 	"sync-state/internal/buffers"
 	"sync-state/internal/db"
 	"sync-state/internal/events"
+	"sync-state/internal/readmodel"
 	"sync-state/internal/rpc"
 )
 
@@ -25,7 +26,7 @@ type BlockBundle struct {
 	BlockTime           time.Time
 	BlockHashHex        string
 	ProposerHex         string
-	RawTxs              []string    // base64 from /block.block.data.txs
+	RawTxs              []string // base64 from /block.block.data.txs
 	TxResults           []rpc.TxResult
 	FinalizeBlockEvents []rpc.Event
 }
@@ -36,14 +37,16 @@ type BlockBundle struct {
 //     handler errors collect into pendingErrors (block still commits)
 //  2. bank ledger derivation (bank/staking events -> structs.ledger,
 //     structs.defusion) — Go port of cache.PROCESS_BLOCK_LEDGER
-//  3. mirror raw rows to sync_state.raw_* if -mirror-raw is set
-//  4. UPSERT structs.current_block with the new status/lag/tip
-//  5. emit pg_notify('grass', ...) directly so the webapp gets a heartbeat
+//  3. flush buffered authoritative rows, then recompute dirty api_*
+//     projections and stamp api_refresh_state
+//  4. mirror raw rows to sync_state.raw_* if -mirror-raw is set
+//  5. UPSERT structs.current_block with the new status/lag/tip
+//  6. emit pg_notify('grass', ...) directly so the webapp gets a heartbeat
 //     regardless of whether structs.current_block actually changed (the
 //     GRASS trigger guards against no-op UPDATEs)
-//  6. write sync_state.block_log
-//  7. bump sync_state.sync_cursor
-//  8. commit
+//  7. write sync_state.block_log
+//  8. bump sync_state.sync_cursor
+//  9. commit
 //
 // After commit, pending handler-error rows are written to
 // sync_state.handler_error_log (outside the per-block tx so they survive
@@ -65,10 +68,6 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 	if err != nil {
 		return err
 	}
-	if err := buf.Flush(ctx, tx); err != nil {
-		return fmt.Errorf("flush buffer h=%d: %w", bundle.Height, err)
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit h=%d: %w", bundle.Height, err)
 	}
@@ -88,7 +87,8 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 //
 // buf is the per-block (streaming) or per-window (bulk) append-only row
 // buffer. Event handlers and bank.ProcessBlock push rows into buf;
-// callers are responsible for invoking buf.Flush(ctx, tx) before commit.
+// applyBlockInTx flushes it after bank so api_* recomputation can see
+// this block's authoritative ledger/stat rows.
 func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBundle, tipHeight int64, buf *buffers.Buffer, opts applyOpts) (*blockApplyResult, error) {
 	if !opts.SkipStatementTimeout && s.cfg.StatementTimeout > 0 {
 		ms := s.cfg.StatementTimeout.Milliseconds()
@@ -99,7 +99,8 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 
 	pendingErrs := make([]events.HandlerError, 0)
 	numEvents := 0
-	if err := s.dispatchEvents(ctx, tx, bundle, buf, &pendingErrs, &numEvents); err != nil {
+	dirty := readmodel.NewDirty()
+	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents); err != nil {
 		return nil, fmt.Errorf("dispatch h=%d: %w", bundle.Height, err)
 	}
 
@@ -128,6 +129,14 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 			Error:        fmt.Sprintf("savepoint commit: %v", err),
 			Severity:     events.SeverityError,
 		})
+	}
+
+	dirty.Ledger(buf.Ledger)
+	if err := buf.Flush(ctx, tx); err != nil {
+		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
+	}
+	if err := readmodel.Recompute(ctx, tx, dirty, bundle.Height, bundle.BlockTime); err != nil {
+		return nil, fmt.Errorf("api projections h=%d: %w", bundle.Height, err)
 	}
 
 	if s.cfg.MirrorRaw {
@@ -196,13 +205,14 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 //
 // Within an event we walk attributes in attribute order, dedup'd by key
 // (keep first occurrence) to match cache.attributes's UNIQUE constraint.
-func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, buf *buffers.Buffer, errs *[]events.HandlerError, numEvents *int) error {
+func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, buf *buffers.Buffer, dirty *readmodel.Dirty, errs *[]events.HandlerError, numEvents *int) error {
 	bctx := events.BlockContext{
 		ChainID:   b.ChainID,
 		Height:    b.Height,
 		BlockTime: b.BlockTime,
 		TipHeight: b.Height, // applyBlock tracks tipHeight separately; handlers don't currently need it
 		Buf:       buf,
+		Dirty:     dirty,
 	}
 
 	// Finalize-block events (BeginBlock/EndBlock): tx_index = -1.

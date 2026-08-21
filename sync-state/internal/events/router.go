@@ -171,6 +171,7 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 	// pushes before failing get truncated alongside the SAVEPOINT
 	// rollback. Nil-safe — only the sync orchestrator wires Buf.
 	bufSnap := bctx.Buf.Snapshot()
+	dirtySnap := bctx.Dirty.Snapshot()
 
 	// recover() so a panic in one handler doesn't abort the whole block;
 	// the block still commits (other handlers + cursor + block_log), but
@@ -179,6 +180,7 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		if rec := recover(); rec != nil {
 			_ = sp.Rollback(ctx)
 			bctx.Buf.Restore(bufSnap)
+			bctx.Dirty.Restore(dirtySnap)
 			he = &HandlerError{
 				CompositeKey: compositeKey,
 				Payload:      raw,
@@ -203,6 +205,8 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		// the warn row records what happened either way.
 		if errors.Is(err, ErrSkipWithWarn) {
 			if cerr := sp.Commit(ctx); cerr != nil {
+				bctx.Buf.Restore(bufSnap)
+				bctx.Dirty.Restore(dirtySnap)
 				// Commit-after-warn failure means the outer tx is in
 				// trouble; surface as a real error rather than warn.
 				return &HandlerError{
@@ -230,6 +234,7 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		// interesting; outer tx may still be alive).
 		_ = sp.Rollback(ctx)
 		bctx.Buf.Restore(bufSnap)
+		bctx.Dirty.Restore(dirtySnap)
 		return &HandlerError{
 			CompositeKey: compositeKey,
 			Payload:      raw,
@@ -241,6 +246,8 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		}, nil
 	}
 	if err := sp.Commit(ctx); err != nil {
+		bctx.Buf.Restore(bufSnap)
+		bctx.Dirty.Restore(dirtySnap)
 		// RELEASE SAVEPOINT failed — handler's writes are lost; log
 		// and continue. The outer tx is likely still alive.
 		return &HandlerError{

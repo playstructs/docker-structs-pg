@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -33,6 +34,8 @@ ON CONFLICT (id) DO UPDATE
     OR structs.agreement.start_block IS DISTINCT FROM EXCLUDED.start_block
     OR structs.agreement.end_block   IS DISTINCT FROM EXCLUDED.end_block`
 
+const agreementPreviousProviderSQL = `SELECT provider_id FROM structs.agreement WHERE id = $1`
+
 func (agreementHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Agreement](raw)
 	if err != nil {
@@ -40,6 +43,10 @@ func (agreementHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext
 	}
 	if p.ID == "" {
 		return fmt.Errorf("agreement: empty id")
+	}
+	var previous *string
+	if err := tx.QueryRow(ctx, agreementPreviousProviderSQL, p.ID).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("agreement previous provider id=%s: %w", p.ID, err)
 	}
 	if _, err := tx.Exec(ctx, agreementUpsertSQL,
 		p.ID,
@@ -53,5 +60,12 @@ func (agreementHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext
 	); err != nil {
 		return fmt.Errorf("agreement upsert id=%s: %w", p.ID, err)
 	}
-	return upsertPlayerObject(ctx, tx, p.ID, p.Owner)
+	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
+		return err
+	}
+	if previous != nil {
+		bctx.Dirty.Provider(*previous)
+	}
+	bctx.Dirty.Provider(p.ProviderID)
+	return nil
 }

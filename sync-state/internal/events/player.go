@@ -66,7 +66,7 @@ ON CONFLICT (id) DO UPDATE
 
 // playerPrevGuildSelectSQL fetches the player's existing guild_id so we
 // can detect a change and propagate it to player_address.
-const playerPrevGuildSelectSQL = `SELECT guild_id FROM structs.player WHERE id = $1`
+const playerPreviousProjectionDepsSQL = `SELECT guild_id, substation_id FROM structs.player WHERE id = $1`
 
 // playerAddressGuildPropagateSQL ports cache.UDPATE_ADDRESS_GUILD (note
 // the typo in the SQL function name; the trigger name is the canonical
@@ -93,10 +93,11 @@ func (playerHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	}
 
 	var (
-		prevExists   bool
-		prevGuildPtr *string
+		prevExists        bool
+		prevGuildPtr      *string
+		prevSubstationPtr *string
 	)
-	err = tx.QueryRow(ctx, playerPrevGuildSelectSQL, p.ID).Scan(&prevGuildPtr)
+	err = tx.QueryRow(ctx, playerPreviousProjectionDepsSQL, p.ID).Scan(&prevGuildPtr, &prevSubstationPtr)
 	switch {
 	case err == nil:
 		prevExists = true
@@ -138,6 +139,13 @@ func (playerHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 					p.ID, prevGuild, p.GuildID, err)
 			}
 		}
+		bctx.Dirty.Guild(prevGuild)
+		if prevSubstationPtr != nil {
+			bctx.Dirty.Substation(*prevSubstationPtr)
+		}
 	}
+	bctx.Dirty.Player(p.ID)
+	bctx.Dirty.Guild(p.GuildID)
+	bctx.Dirty.Substation(p.SubstationID)
 	return nil
 }

@@ -21,6 +21,10 @@ import (
 // columns; their non-_p companions are GENERATED in the schema and must
 // not be touched here.
 //
+// structsd v0.21.0 re-homes infusion.playerId on address reassignment
+// while keeping the (destination_id, address) key. The conflict UPDATE
+// must write player_id or the upgrade-block repair is silently dropped.
+//
 // When destination_type='struct' we also emit the ledger pair the
 // dropped ADD_INFUSION_LEDGER_ENTRY trigger
 // (trigger-infusion-ledger-entry.sql) used to write — see
@@ -41,13 +45,15 @@ INSERT INTO structs.infusion (
     created_at, updated_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 ON CONFLICT (destination_id, address) DO UPDATE
-   SET fuel_p     = EXCLUDED.fuel_p,
+   SET player_id  = EXCLUDED.player_id,
+       fuel_p     = EXCLUDED.fuel_p,
        defusing_p = EXCLUDED.defusing_p,
        power_p    = EXCLUDED.power_p,
        ratio_p    = EXCLUDED.ratio_p,
        commission = EXCLUDED.commission,
        updated_at = NOW()
- WHERE structs.infusion.fuel_p     IS DISTINCT FROM EXCLUDED.fuel_p
+ WHERE structs.infusion.player_id  IS DISTINCT FROM EXCLUDED.player_id
+    OR structs.infusion.fuel_p     IS DISTINCT FROM EXCLUDED.fuel_p
     OR structs.infusion.defusing_p IS DISTINCT FROM EXCLUDED.defusing_p
     OR structs.infusion.power_p    IS DISTINCT FROM EXCLUDED.power_p
     OR structs.infusion.ratio_p    IS DISTINCT FROM EXCLUDED.ratio_p
@@ -111,6 +117,9 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 		if err := emitInfusionLedger(ctx, tx, bctx, p, prevFuelKnown, prevFuel); err != nil {
 			return fmt.Errorf("infusion ledger (%s,%s): %w", p.DestinationID, p.Address, err)
 		}
+	}
+	if p.DestinationType == "reactor" {
+		bctx.Dirty.Reactor(p.DestinationID)
 	}
 	return nil
 }

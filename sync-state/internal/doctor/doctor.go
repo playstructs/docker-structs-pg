@@ -307,6 +307,12 @@ func Run(ctx context.Context, in Inputs) (*Report, error) {
 				r.Fatal = true
 			}
 		}
+		if c := probeAPIProjectionSchema(ctx, in.Pool); c != nil {
+			r.Checks = append(r.Checks, *c)
+			if c.Severity == FATAL {
+				r.Fatal = true
+			}
+		}
 
 		// 12. concurrent update-cache heuristic
 		if !in.SkipCacheConcurrent {
@@ -668,6 +674,7 @@ var canonicalColumns = []struct{ Schema, Table, Column string }{
 	{"structs", "guild", "pfp"},
 	{"structs", "planet", "name"},
 	{"structs", "struct_defender", "is_planetary"},
+	{"structs", "struct_type", "can_defend"},
 }
 
 // probeCanonicalSchema asserts that every column in canonicalColumns
@@ -716,6 +723,51 @@ func probeCanonicalSchema(ctx context.Context, pool *pgxpool.Pool) *Check {
 		Name:     "canonical schema",
 		Severity: FATAL,
 		Detail:   b.String(),
+	}
+}
+
+var apiProjectionTables = []string{
+	"api_refresh_state",
+	"api_inventory",
+	"api_guild_bank",
+	"api_leaderboard_player",
+	"api_leaderboard_guild",
+	"api_leaderboard_reactor",
+	"api_leaderboard_provider",
+	"api_leaderboard_substation",
+}
+
+// probeAPIProjectionSchema requires the Guild API current-state tables.
+// Ingest already FATALs via readmodel.ValidateSchema; the doctor surfaces
+// the same prerequisite before operators start a long catch-up.
+func probeAPIProjectionSchema(ctx context.Context, pool *pgxpool.Pool) *Check {
+	var structsExists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'structs')`,
+	).Scan(&structsExists); err != nil || !structsExists {
+		return nil
+	}
+	var missing []string
+	for _, name := range apiProjectionTables {
+		var exists bool
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'structs' AND tablename = $1)`,
+			name,
+		).Scan(&exists); err != nil || !exists {
+			missing = append(missing, "structs."+name)
+		}
+	}
+	if len(missing) == 0 {
+		return &Check{
+			Name:     "api projection schema",
+			Severity: OK,
+			Detail:   "all structs.api_* current-state tables are deployed",
+		}
+	}
+	return &Check{
+		Name:     "api projection schema",
+		Severity: FATAL,
+		Detail:   fmt.Sprintf("missing %s — apply table-structs-api-read-20260820-current-state before ingest", strings.Join(missing, ", ")),
 	}
 }
 

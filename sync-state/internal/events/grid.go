@@ -110,6 +110,7 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 			if err := writeGridStat(bctx, subIdx, objTypeID, objIndex, 0); err != nil {
 				return fmt.Errorf("grid stat (delete branch) id=%s: %w", p.AttributeID, err)
 			}
+			bctx.Dirty.GridObject(strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex))
 		}
 		return nil
 	}
@@ -144,6 +145,7 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 		if err := writeGridStat(bctx, subIdx, objTypeID, objIndex, val); err != nil {
 			return fmt.Errorf("grid stat (upsert branch) id=%s: %w", p.AttributeID, err)
 		}
+		bctx.Dirty.GridObject(rawObjectID)
 	}
 	return nil
 }

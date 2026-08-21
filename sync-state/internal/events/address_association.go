@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -29,6 +30,7 @@ func (addressAssociationHandler) CompositeKey() string {
 }
 
 const addressAssociationCheckSQL = `SELECT EXISTS (SELECT 1 FROM structs.player WHERE id = $1)`
+const addressAssociationPreviousPlayerSQL = `SELECT player_id FROM structs.player_address WHERE address = $1`
 
 const addressAssociationUpsertSQL = `
 INSERT INTO structs.player_address (
@@ -67,6 +69,10 @@ func (addressAssociationHandler) Handle(ctx context.Context, tx pgx.Tx, bctx Blo
 		return nil
 	}
 
+	var previous *string
+	if err := tx.QueryRow(ctx, addressAssociationPreviousPlayerSQL, p.Address).Scan(&previous); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("address_association previous player addr=%s: %w", p.Address, err)
+	}
 	if _, err := tx.Exec(ctx, addressAssociationUpsertSQL,
 		p.Address,
 		playerID,
@@ -74,5 +80,10 @@ func (addressAssociationHandler) Handle(ctx context.Context, tx pgx.Tx, bctx Blo
 	); err != nil {
 		return fmt.Errorf("address_association upsert addr=%s pid=%s: %w", p.Address, playerID, err)
 	}
+	bctx.Dirty.Address(p.Address)
+	if previous != nil {
+		bctx.Dirty.Player(*previous)
+	}
+	bctx.Dirty.Player(playerID)
 	return nil
 }

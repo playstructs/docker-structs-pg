@@ -7,12 +7,14 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"sync-state/internal/backfill"
 	"sync-state/internal/db"
 	"sync-state/internal/doctor"
 	"sync-state/internal/events"
 	"sync-state/internal/genesis"
+	"sync-state/internal/readmodel"
 	"sync-state/internal/reprocess"
 	"sync-state/internal/rpc"
 	"sync-state/internal/verify"
@@ -534,6 +536,37 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "  Bank ledger balances will be missing genesis credits until")
 		fmt.Fprintln(stderr, "  `sync-state init-genesis` runs. `sync-state verify` will FAIL")
 		fmt.Fprintln(stderr, "  the genesis_loaded check on this state.")
+	}
+
+	// Guild API projections require the structs-pg current-state migration.
+	// Validate before handlers run so an incomplete rollout cannot advance the
+	// chain cursor while leaving API state stale. structsd v0.21.0 is accepted:
+	// canDefend is projected from StructType events, and new guild-bank convert
+	// events flow through standard minted/burned/transfer ledger rows.
+	if err := readmodel.ValidateSchema(ctx, pool.Pool); err != nil {
+		fmt.Fprintf(stderr, "ingest: %v\n", err)
+		return 1
+	}
+	var indexedHeight int64
+	var indexedTime *time.Time
+	if cursor, cerr := db.ReadCursor(ctx, pool.Pool, chainID); cerr == nil {
+		indexedHeight = cursor.LastHeight
+		t := cursor.LastBlockTime
+		indexedTime = &t
+	}
+	needed, berr := readmodel.NeedsBackfill(ctx, pool.Pool, indexedHeight)
+	if berr != nil {
+		fmt.Fprintf(stderr, "ingest: inspect API projection backfill state: %v\n", berr)
+		return 1
+	}
+	if needed {
+		report, berr := readmodel.Backfill(ctx, pool.Pool, indexedHeight, indexedTime)
+		if berr != nil {
+			fmt.Fprintf(stderr, "ingest: API projection backfill: %v\n", berr)
+			return 1
+		}
+		fmt.Fprintf(stderr, "API projection backfill: height=%d rows=%v elapsed=%s\n",
+			report.Height, report.Rows, report.Elapsed.Round(time.Millisecond))
 	}
 
 	// Player guild_rank reconciliation. Runs here — after the writer lock

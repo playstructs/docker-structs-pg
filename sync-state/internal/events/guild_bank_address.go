@@ -34,6 +34,9 @@ ON CONFLICT (address, label) DO UPDATE
        updated_at = EXCLUDED.updated_at
  WHERE structs.address_tag.entry IS DISTINCT FROM EXCLUDED.entry`
 
+const guildBankPreviousGuildSQL = `
+SELECT entry FROM structs.address_tag WHERE address = $1 AND label = 'GuildId'`
+
 func (guildBankAddressHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.GuildBankAddress](raw)
 	if err != nil {
@@ -43,11 +46,21 @@ func (guildBankAddressHandler) Handle(ctx context.Context, tx pgx.Tx, bctx Block
 		return fmt.Errorf("guild_bank_address: missing field (pool=%q guildId=%q)",
 			p.BankCollateralPool, p.GuildID)
 	}
+	var previous *string
+	err = tx.QueryRow(ctx, guildBankPreviousGuildSQL, p.BankCollateralPool).Scan(&previous)
+	if err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("guild_bank_address previous guild pool=%s: %w", p.BankCollateralPool, err)
+	}
 	if _, err := tx.Exec(ctx, guildBankAddressUpsertSQL,
 		p.BankCollateralPool,
 		p.GuildID,
 	); err != nil {
 		return fmt.Errorf("guild_bank_address upsert guild=%s: %w", p.GuildID, err)
 	}
+	if previous != nil {
+		bctx.Dirty.Guild(*previous)
+	}
+	bctx.Dirty.Guild(p.GuildID)
+	bctx.Dirty.Address(p.BankCollateralPool)
 	return nil
 }

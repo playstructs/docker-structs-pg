@@ -49,5 +49,9 @@ func (reactorHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, 
 	); err != nil {
 		return fmt.Errorf("reactor upsert id=%s: %w", p.ID, err)
 	}
-	return upsertPlayerObject(ctx, tx, p.ID, p.Owner)
+	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
+		return err
+	}
+	bctx.Dirty.Reactor(p.ID)
+	return nil
 }

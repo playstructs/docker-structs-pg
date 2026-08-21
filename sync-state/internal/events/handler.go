@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/buffers"
+	"sync-state/internal/readmodel"
 )
 
 // Handler is implemented by one struct per chain event sync-state knows how
@@ -71,4 +72,9 @@ type BlockContext struct {
 	// pgx.CopyFrom-flushes them before commit. nil-safe so tests that
 	// drive handlers in isolation don't need to construct one.
 	Buf *buffers.Buffer
+
+	// Dirty is shared across every event in the block. Handlers mark the
+	// authoritative entities they changed; the orchestrator recomputes the
+	// corresponding api_* rows after buffered authoritative writes flush.
+	Dirty *readmodel.Dirty
 }

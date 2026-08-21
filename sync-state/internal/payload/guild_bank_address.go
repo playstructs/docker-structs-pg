@@ -10,4 +10,7 @@ package payload
 type GuildBankAddress struct {
 	BankCollateralPool string `json:"bankCollateralPool"`
 	GuildID            string `json:"guildId"`
+	// v0.21.0 also emits bankTokenPool. Guild-bank collateral still
+	// comes from the Bank Collateral Pool tag; the token-pool address
+	// is ignored until product asks to index it.
 }

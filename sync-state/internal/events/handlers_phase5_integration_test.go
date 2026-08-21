@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/buffers"
+	"sync-state/internal/readmodel"
 )
 
 // fixedBctx returns a BlockContext with a pinned BlockTime so tests can
@@ -39,6 +40,7 @@ func fixedBctx(height int64) BlockContext {
 		MsgIndex:   -1,
 		EventIndex: 0,
 		Buf:        buffers.New(),
+		Dirty:      readmodel.NewDirty(),
 	}
 }
 
@@ -508,6 +510,37 @@ func TestHandler_GuildBankAddress_WritesTwoAddressTags(t *testing.T) {
 		}
 		if guildEntry != "0-7" {
 			t.Errorf("GuildId entry = %q; want 0-7", guildEntry)
+		}
+	})
+}
+
+func TestHandler_GuildBankAddress_DirtiesOldAndNewGuild(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		first := mustJSON(t, map[string]any{
+			"bankCollateralPool": "structs1retagpool",
+			"guildId":            "0-991010",
+		})
+		if err := (guildBankAddressHandler{}).Handle(ctx, tx, fixedBctx(1), first); err != nil {
+			t.Fatal(err)
+		}
+		bc := fixedBctx(2)
+		second := mustJSON(t, map[string]any{
+			"bankCollateralPool": "structs1retagpool",
+			"guildId":            "0-991011",
+		})
+		if err := (guildBankAddressHandler{}).Handle(ctx, tx, bc, second); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := bc.Dirty.Guilds["0-991010"]; !ok {
+			t.Error("old guild was not dirtied")
+		}
+		if _, ok := bc.Dirty.Guilds["0-991011"]; !ok {
+			t.Error("new guild was not dirtied")
+		}
+		if _, ok := bc.Dirty.Addresses["structs1retagpool"]; !ok {
+			t.Error("pool address was not dirtied")
 		}
 	})
 }
