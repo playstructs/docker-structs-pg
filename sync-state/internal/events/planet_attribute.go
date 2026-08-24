@@ -27,9 +27,15 @@ import (
 // changes (including a change to zero, i.e. the delete branch). planet_id is
 // the attribute's own object id ("2-<index>").
 //
+// v0.21.0: ore mine/refine clocks moved from struct attrs 3/4 onto the
+// planet (attrTypes 12/13). Those emit the existing
+// struct_block_ore_mine_start / struct_block_ore_refine_start categories
+// with detail {planet_id, block}. Raid-pause (11) and active-quantity
+// (14/15) are indexed only — no grass emit.
+//
 // attributeId grammar: "{attrType}-{objectTypeId}-{objectIndex}"
 //
-//   - attrType     (split_part 1) — 0..10 (label table below).
+//   - attrType     (split_part 1) — 0..15 (label table below).
 //   - objectTypeId (split_part 2) — 0..11 (objecttype labels).
 //   - objectIndex  (split_part 3) — numeric index for the planet.
 //
@@ -44,8 +50,11 @@ func (planetAttributeHandler) CompositeKey() string {
 	return "structs.structs.EventPlanetAttribute.planetAttributeRecord"
 }
 
-// planetAttrLabels mirrors the SQL CASE on lines 133-145 of the 20260203
-// migration. Indexed by attrType (split_part 1).
+// planetAttrLabels is indexed by attrType (split_part 1). Types 0–10
+// match the 20260203 SQL CASE. Types 11–15 are v0.21.0 ore clocks
+// (stored string keys, not proto enum names — proto uses
+// planetBlockStartOreMine / planetBlockStartOreRefine because the
+// struct-type names were already taken).
 var planetAttrLabels = [...]string{
 	"planetaryShield",
 	"repairNetworkQuantity",
@@ -58,6 +67,11 @@ var planetAttrLabels = [...]string{
 	"orbitalJammingStationQuantity",
 	"advancedOrbitalJammingStationQuantity",
 	"blockStartRaid",
+	"blockRaiderArrived",
+	"blockStartOreMine",
+	"blockStartOreRefine",
+	"oreMiningActiveQuantity",
+	"oreRefiningActiveQuantity",
 }
 
 const planetAttributeDeleteSQL = `DELETE FROM structs.planet_attribute WHERE id = $1`
@@ -84,8 +98,8 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		return fmt.Errorf("planet_attribute: %w", err)
 	}
 
-	// Capture the prior stored value before mutating so the v0.18.0
-	// shield_change / block_raid_start derivations can report old->new.
+	// Capture the prior stored value before mutating so shield / raid /
+	// ore-clock activity can report the change (including a clear to 0).
 	oldVal, err := planetAttributePrevVal(ctx, tx, p.AttributeID)
 	if err != nil {
 		return err
@@ -131,10 +145,13 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 }
 
 // planet_attribute attrType values that drive a planet_activity timeline row
-// (see planetAttrLabels for the full label map).
+// (see planetAttrLabels for the full label map). Types 11 / 14 / 15 are
+// indexed but do not emit.
 const (
-	planetAttrTypePlanetaryShield = 0
-	planetAttrTypeBlockStartRaid  = 10
+	planetAttrTypePlanetaryShield     = 0
+	planetAttrTypeBlockStartRaid      = 10
+	planetAttrTypeBlockStartOreMine   = 12
+	planetAttrTypeBlockStartOreRefine = 13
 )
 
 const planetAttributePrevValSQL = `SELECT val FROM structs.planet_attribute WHERE id = $1`
@@ -154,11 +171,11 @@ func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (int64, e
 	return val, nil
 }
 
-// emitPlanetAttributeActivity buffers a planet_activity row for the v0.18.0
-// shield_change / block_raid_start categories when a planet-scoped
-// planetaryShield (attrType 0) or blockStartRaid (attrType 10) value changes.
-// Only the two tracked attrTypes on a planet object produce a row; any other
-// attribute, non-planet object, or no-op change is skipped.
+// emitPlanetAttributeActivity buffers a planet_activity row when a
+// tracked planet-scoped attribute changes. Shield / raid carry old+new
+// values; ore clocks (v0.21.0) reuse the existing grass categories with
+// detail {planet_id, block}. Any other attribute, non-planet object, or
+// no-op change is skipped.
 func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType, objTypeID, objIndex int, oldVal, newVal int64) error {
 	if oldVal == newVal {
 		return nil
@@ -167,25 +184,43 @@ func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockConte
 		return nil
 	}
 
-	var category, newKey, oldKey string
+	planetID := objecttype.Format(objecttype.Planet, objIndex)
+	var category string
+	var detailMap map[string]any
 	switch attrType {
 	case planetAttrTypePlanetaryShield:
-		category, newKey, oldKey = "shield_change", "planetary_shield", "planetary_shield_old"
+		category = "shield_change"
+		detailMap = map[string]any{
+			"planetary_shield":     newVal,
+			"planetary_shield_old": oldVal,
+		}
 	case planetAttrTypeBlockStartRaid:
-		category, newKey, oldKey = "block_raid_start", "block_start_raid", "block_start_raid_old"
+		category = "block_raid_start"
+		detailMap = map[string]any{
+			"block_start_raid":     newVal,
+			"block_start_raid_old": oldVal,
+		}
+	case planetAttrTypeBlockStartOreMine:
+		category = "struct_block_ore_mine_start"
+		detailMap = map[string]any{
+			"planet_id": planetID,
+			"block":     newVal,
+		}
+	case planetAttrTypeBlockStartOreRefine:
+		category = "struct_block_ore_refine_start"
+		detailMap = map[string]any{
+			"planet_id": planetID,
+			"block":     newVal,
+		}
 	default:
 		return nil
 	}
 
-	planetID := objecttype.Format(objecttype.Planet, objIndex)
 	seq, err := nextPlanetActivitySeq(ctx, tx, planetID)
 	if err != nil {
 		return fmt.Errorf("seq planet=%s: %w", planetID, err)
 	}
-	detail, err := json.Marshal(map[string]any{
-		newKey: newVal,
-		oldKey: oldVal,
-	})
+	detail, err := json.Marshal(detailMap)
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}

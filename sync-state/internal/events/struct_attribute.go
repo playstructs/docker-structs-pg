@@ -35,6 +35,7 @@ import (
 //     guard. If the upsert actually wrote (rowcount > 0):
 //
 //   - attrType 0 (health) → append to stat_struct_health.
+//
 //   - attrType 1 (status) → append to stat_struct_status AND, if
 //     bit 32 (destroyed flag) is set, UPDATE structs.struct
 //     setting is_destroyed=true and destroyed_block=bctx.Height.
@@ -56,8 +57,8 @@ var structAttrLabels = [...]string{
 	"health",               // 0
 	"status",               // 1
 	"blockStartBuild",      // 2
-	"blockStartOreMine",    // 3
-	"blockStartOreRefine",  // 4
+	"blockStartOreMine",    // 3 leftover after v0.21.0; live clock is planet attr 12
+	"blockStartOreRefine",  // 4 leftover after v0.21.0; live clock is planet attr 13
 	"protectedStructIndex", // 5
 	"typeCount",            // 6
 }
@@ -253,16 +254,12 @@ func emitStructAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockConte
 			"struct_id": structID,
 			"block":     newVal,
 		})
-	case 3: // blockStartOreMine
-		return emitStructAttributeOnStructPlanet(ctx, tx, bctx, structID, "struct_block_ore_mine_start", map[string]any{
-			"struct_id": structID,
-			"block":     newVal,
-		})
-	case 4: // blockStartOreRefine
-		return emitStructAttributeOnStructPlanet(ctx, tx, bctx, structID, "struct_block_ore_refine_start", map[string]any{
-			"struct_id": structID,
-			"block":     newVal,
-		})
+	case 3, 4:
+		// v0.21.0: ore mine/refine clocks live on planet attrs 12/13.
+		// Struct attrs 3/4 are still upserted/deleted so upgrade-style
+		// value=0 events clear leftover rows, but they no longer emit
+		// grass. See emitPlanetAttributeActivity.
+		return nil
 	case 5: // protectedStructIndex
 		if oldVal > 0 {
 			if err := emitStructDefenseRemove(ctx, tx, bctx, oldVal, structID); err != nil {
@@ -351,7 +348,7 @@ func insertStructAttrActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 
 // parseStructAttributeID splits "{attrType}-{objTypeId}-{objIndex}[-{subIndex}]"
 // into ints. subIndex is optional and defaults to 0 (matches the SQL CASE
-// on line 55: `WHEN '' THEN 0 ELSE … END`).
+// on line 55: `WHEN ” THEN 0 ELSE … END`).
 func parseStructAttributeID(id string) (attrType, objTypeID, objIndex, subIndex int, err error) {
 	a := splitPart(id, "-", 1)
 	b := splitPart(id, "-", 2)

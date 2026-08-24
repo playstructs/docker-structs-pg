@@ -39,7 +39,7 @@ type StructAttribute struct {
 // (cache-trigger-add-queue-20260203-add-new-events.sql:95-158)
 //
 // attributeId grammar: "{attrType}-{objectTypeId}-{objectIndex}"
-// where attrType is 0..10 (see planet_attribute.go for labels).
+// where attrType is 0..15 (see planet_attribute.go for labels).
 // No sub_index column on structs.planet_attribute.
 //
 // "" or "0" value => DELETE.

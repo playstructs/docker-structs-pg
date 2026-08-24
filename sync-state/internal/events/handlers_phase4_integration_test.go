@@ -475,7 +475,7 @@ func TestHandler_PlanetAttribute_AllLabels(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		// Spot-check every attrType label (0..10) maps to the correct
+		// Spot-check every attrType label (0..15) maps to the correct
 		// attribute_type column value. Use planet index 8888 so cleanup
 		// (transaction rollback) doesn't interfere with anything real.
 		for attrType, want := range planetAttrLabels {
@@ -591,20 +591,31 @@ func TestHandler_PlanetAttribute_BlockRaidStartActivity(t *testing.T) {
 }
 
 // TestHandler_PlanetAttribute_NoActivityForOtherAttrs verifies that
-// attribute types other than planetaryShield/blockStartRaid never emit a
-// planet_activity row.
+// attribute types other than planetaryShield / blockStartRaid / ore
+// clocks (12/13) never emit a planet_activity row. Types 11 / 14 / 15
+// are indexed only.
 func TestHandler_PlanetAttribute_NoActivityForOtherAttrs(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		// attrType 1 = repairNetworkQuantity on planet index 77.
-		handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
-			mustJSON(t, map[string]any{"attributeId": "1-2-77", "value": "3"}))
+		quiet := []struct {
+			id  string
+			msg string
+		}{
+			{"1-2-77", "attrType 1 repairNetworkQuantity"},
+			{"11-2-77", "attrType 11 blockRaiderArrived"},
+			{"14-2-77", "attrType 14 oreMiningActiveQuantity"},
+			{"15-2-77", "attrType 15 oreRefiningActiveQuantity"},
+		}
+		for _, c := range quiet {
+			handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
+				mustJSON(t, map[string]any{"attributeId": c.id, "value": "3"}))
+		}
 		var n int
 		_ = tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.planet_activity WHERE planet_id='2-77'`).Scan(&n)
 		if n != 0 {
-			t.Errorf("expected no planet_activity rows for attrType 1, got %d", n)
+			t.Errorf("expected no planet_activity rows for quiet attrs, got %d", n)
 		}
 	})
 }

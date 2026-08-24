@@ -147,6 +147,7 @@ func TestParsePlanetAttributeID(t *testing.T) {
 	}{
 		{"0-2-1", 0, 2, 1, false},
 		{"10-2-99", 10, 2, 99, false},
+		{"12-2-7", 12, 2, 7, false}, // v0.21.0 planet ore-mine clock
 		{"", 0, 0, 0, true},
 		{"0", 0, 0, 0, true},
 		{"a-2-1", 0, 0, 0, true},
@@ -213,12 +214,17 @@ func TestPlanetAttrLabelFor(t *testing.T) {
 		"orbitalJammingStationQuantity",
 		"advancedOrbitalJammingStationQuantity",
 		"blockStartRaid",
+		"blockRaiderArrived",
+		"blockStartOreMine",
+		"blockStartOreRefine",
+		"oreMiningActiveQuantity",
+		"oreRefiningActiveQuantity",
 	} {
 		if got := planetAttrLabelFor(i); got != want {
 			t.Errorf("planetAttrLabelFor(%d) = %q want %q", i, got, want)
 		}
 	}
-	if got := planetAttrLabelFor(11); got != "" {
-		t.Errorf("planetAttrLabelFor(11) = %q want empty", got)
+	if got := planetAttrLabelFor(16); got != "" {
+		t.Errorf("planetAttrLabelFor(16) = %q want empty", got)
 	}
 }
