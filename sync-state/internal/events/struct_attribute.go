@@ -24,21 +24,15 @@ import (
 //   - objectIndex     (split_part 3) — numeric index for the struct.
 //   - subIndex        (split_part 4) — optional, defaults to 0.
 //
-// Two branches keyed on payload.value:
+// "" or numeric 0 → UPSERT val=0 (keep-zero). If the upsert actually wrote
+// (rowcount > 0):
 //
-//   - value == "" or numeric 0 → DELETE structs.struct_attribute. If the
-//     row was actually deleted (rowcount > 0) AND attrType == 0 (health),
-//     also append a `value=0` row to stat_struct_health (status's stat
-//     delete-side is intentionally commented out in 20260203 — we match).
-//
-//   - else → UPSERT structs.struct_attribute with the `IS DISTINCT FROM val`
-//     guard. If the upsert actually wrote (rowcount > 0):
-//
-//   - attrType 0 (health) → append to stat_struct_health.
-//
+//   - attrType 0 (health) → append to stat_struct_health (including the
+//     zero sentinel so consumers see the clear).
 //   - attrType 1 (status) → append to stat_struct_status AND, if
 //     bit 32 (destroyed flag) is set, UPDATE structs.struct
 //     setting is_destroyed=true and destroyed_block=bctx.Height.
+//   - attrType 5 with oldVal > 0 and newVal == 0 → struct_defense_remove.
 //
 // Note on destroyed_block: the SQL reads
 // `(SELECT height FROM structs.current_block LIMIT 1)`. We use
@@ -68,8 +62,6 @@ var structAttrLabels = [...]string{
 // (`(value & 32) > 0`) and the same bit view-struct.sql:51 keys
 // `view.struct_status.destroyed` off of.
 const structDestroyedBit = 32
-
-const structAttributeDeleteSQL = `DELETE FROM structs.struct_attribute WHERE id = $1`
 
 const structAttributeUpsertSQL = `
 INSERT INTO structs.struct_attribute (
@@ -119,17 +111,13 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 
 	rawObjectID := strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
 
-	// Delete branch: SQL is `IF v.value = '' OR (v.value)::INTEGER = 0`.
-	// Empty parses as zero-rows for the int route, so test it separately.
-	if p.Value == "" {
-		return structAttrDelete(ctx, tx, bctx, p.AttributeID, attrType, objIndex, rawObjectID, oldVal)
-	}
-	val, err := strconv.ParseInt(p.Value, 10, 64)
-	if err != nil {
-		return fmt.Errorf("struct_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
-	}
-	if val == 0 {
-		return structAttrDelete(ctx, tx, bctx, p.AttributeID, attrType, objIndex, rawObjectID, oldVal)
+	// Empty or "0" → val 0; keep the row so updated_since sees clears.
+	var val int64
+	if p.Value != "" {
+		val, err = strconv.ParseInt(p.Value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("struct_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
+		}
 	}
 
 	objTypeLabel := ""
@@ -154,7 +142,7 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	}
 
 	switch attrType {
-	case 0: // health
+	case 0: // health (including zero sentinel on clear)
 		bctx.Buf.StatStructHealth = append(bctx.Buf.StatStructHealth, buffers.StatRow{
 			Time:        bctx.BlockTime.UTC(),
 			ObjectIndex: objIndex,
@@ -189,55 +177,21 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	return nil
 }
 
-// structAttrDelete handles the "value is empty or zero" branch. Mirrors
-// SQL lines 21-33 of the 20260207 migration: only attrType 0 (health)
-// writes a sentinel `value=0` to its stat hypertable on delete; status's
-// stat insert is commented out in 20260203 and we don't second-guess it.
-//
-// Activity emit on DELETE: the SQL function references NEW.attribute_type
-// inside the TG_OP='DELETE' branch — but on DELETE, NEW is NULL in PG.
-// So the CASE never matches and the DELETE branch is effectively dead
-// code in the SQL trigger. We FIX this by using attrType (which we
-// already parsed from the attributeId) — the protectedStructIndex case
-// emits a struct_defense_remove using OLD.val. This is the SQL's
-// clearly-intended behavior; documenting the divergence.
-func structAttrDelete(ctx context.Context, tx pgx.Tx, bctx BlockContext, attributeID string, attrType, objIndex int, rawObjectID string, oldVal int64) error {
-	tag, err := tx.Exec(ctx, structAttributeDeleteSQL, attributeID)
-	if err != nil {
-		return fmt.Errorf("struct_attribute delete id=%s: %w", attributeID, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return nil
-	}
-	if attrType == 0 {
-		bctx.Buf.StatStructHealth = append(bctx.Buf.StatStructHealth, buffers.StatRow{
-			Time:        bctx.BlockTime.UTC(),
-			ObjectIndex: objIndex,
-			Value:       0,
-			BlockHeight: bctx.Height,
-		})
-	}
-	if attrType == 5 && oldVal > 0 {
-		// protectedStructIndex delete → fixed-bug emit (see comment above).
-		if err := emitStructDefenseRemove(ctx, tx, bctx, oldVal, rawObjectID); err != nil {
-			return fmt.Errorf("struct_attribute defense_remove (delete) id=%s: %w", attributeID, err)
-		}
-	}
-	return nil
-}
-
 // emitStructAttributeActivity is the INSERT/UPDATE side of
 // PLANET_ACTIVITY_STRUCT_ATTRIBUTE (cache-trigger-planet-activity-
 // struct-attribute-20260118-fix-bad-location.sql:50-132). Each case is
 // the SQL trigger's per-attribute_type branch, ported 1:1 with the
 // IS NOT NULL guard the SQL added in the 20260118 fix.
 //
-// Note: the SQL omits a struct_health row in the DELETE branch and
-// in the val-zero UPSERT path (we send "value=0" only as a stat).
-// We match.
+// Note: the SQL omits a struct_health row on val-zero (we send "value=0"
+// only as a stat). We match. protectedStructIndex going to 0 still emits
+// struct_defense_remove via the oldVal > 0 branch below.
 func emitStructAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType int, oldVal, newVal int64, structID string) error {
 	switch attrType {
 	case 0: // health
+		if newVal == 0 {
+			return nil // zero is stat-only; matches legacy SQL
+		}
 		return emitStructAttributeOnStructPlanet(ctx, tx, bctx, structID, "struct_health", map[string]any{
 			"struct_id":  structID,
 			"health":     newVal,
@@ -256,9 +210,8 @@ func emitStructAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockConte
 		})
 	case 3, 4:
 		// v0.21.0: ore mine/refine clocks live on planet attrs 12/13.
-		// Struct attrs 3/4 are still upserted/deleted so upgrade-style
-		// value=0 events clear leftover rows, but they no longer emit
-		// grass. See emitPlanetAttributeActivity.
+		// Struct attrs 3/4 are still upserted (including val=0 clears) so
+		// leftover rows stay addressable, but they no longer emit grass.
 		return nil
 	case 5: // protectedStructIndex
 		if oldVal > 0 {

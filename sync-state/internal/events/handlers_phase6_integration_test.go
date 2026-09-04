@@ -15,9 +15,9 @@
 //     no emit on first INSERT; status='away' includes fleet_list.
 //   - struct_attribute: emits struct_status / struct_health /
 //     struct_block_build_start / struct_defense_add / struct_defense_remove
-//     for each attribute_type; protectedStructIndex DELETE emits
-//     struct_defense_remove (the SQL trigger's dead-code branch we fixed).
-//     v0.21.0: leftover struct attrs 3/4 no longer emit ore-clock grass.
+//     for each attribute_type; protectedStructIndex clear (val=0) emits
+//     struct_defense_remove. v0.21.0: leftover struct attrs 3/4 no longer
+//     emit ore-clock grass.
 package events
 
 import (
@@ -750,19 +750,26 @@ func TestPhase6_StructAttr_ProtectedIndexDeleteEmitsDefenseRemove(t *testing.T) 
 			t.Fatalf("setup struct_defense_add = %d; want 1", got)
 		}
 
-		// Now delete the attribute → struct_defense_remove on the
-		// protected struct's planet. This exercises the SQL-trigger
-		// dead-code DELETE branch we fixed.
+		// Now clear the attribute (keep-zero → val=0) → struct_defense_remove
+		// on the protected struct's planet.
 		clear := mustJSON(t, map[string]any{
 			"attributeId": "5-5-999043-0",
 			"value":       "",
 		})
 		if err := (structAttributeHandler{}).Handle(ctx, tx, bc, clear); err != nil {
-			t.Fatalf("delete: %v", err)
+			t.Fatalf("clear: %v", err)
 		}
 		flushBuf(t, ctx, tx, bc)
 		if got := countPlanetActivity(t, tx, "2-999042", "struct_defense_remove"); got != 1 {
-			t.Errorf("struct_defense_remove on delete = %d; want 1 (SQL bug fixed)", got)
+			t.Errorf("struct_defense_remove on clear = %d; want 1", got)
+		}
+		var val int64
+		if err := tx.QueryRow(ctx,
+			`SELECT val FROM structs.struct_attribute WHERE id='5-5-999043-0'`).Scan(&val); err != nil {
+			t.Fatalf("protectedStructIndex after clear: %v", err)
+		}
+		if val != 0 {
+			t.Errorf("protectedStructIndex val=%d want 0 after clear", val)
 		}
 	})
 }

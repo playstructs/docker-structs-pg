@@ -24,8 +24,8 @@ import (
 // them from the planetaryShield (attrType 0) and blockStartRaid (attrType 10)
 // attributes. We read the prior structs.planet_attribute.val before writing
 // and emit a timeline row carrying both the old and new value whenever it
-// changes (including a change to zero, i.e. the delete branch). planet_id is
-// the attribute's own object id ("2-<index>").
+// changes (including a change to zero). planet_id is the attribute's own
+// object id ("2-<index>").
 //
 // v0.21.0: ore mine/refine clocks moved from struct attrs 3/4 onto the
 // planet (attrTypes 12/13). Those emit the existing
@@ -39,11 +39,8 @@ import (
 //   - objectTypeId (split_part 2) — 0..11 (objecttype labels).
 //   - objectIndex  (split_part 3) — numeric index for the planet.
 //
-// Two branches keyed on payload.value:
-//
-//   - value == "" or numeric 0 → DELETE structs.planet_attribute.
-//   - else                     → UPSERT structs.planet_attribute with the
-//     `IS DISTINCT FROM val` guard.
+// "" or numeric 0 → UPSERT val=0 (keep-zero: "absent" must not mean both
+// never-indexed and cleared, and updated_since must see clears).
 type planetAttributeHandler struct{}
 
 func (planetAttributeHandler) CompositeKey() string {
@@ -74,8 +71,6 @@ var planetAttrLabels = [...]string{
 	"oreRefiningActiveQuantity",
 }
 
-const planetAttributeDeleteSQL = `DELETE FROM structs.planet_attribute WHERE id = $1`
-
 const planetAttributeUpsertSQL = `
 INSERT INTO structs.planet_attribute (
     id, object_id, object_type, attribute_type, val, updated_at
@@ -105,8 +100,7 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		return err
 	}
 
-	// newVal is 0 in the delete branch (empty or numeric-zero value),
-	// otherwise the parsed attribute value.
+	// Empty or "0" → newVal 0; keep the row so updated_since sees clears.
 	var newVal int64
 	if p.Value != "" {
 		newVal, err = strconv.ParseInt(p.Value, 10, 64)
@@ -115,27 +109,21 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		}
 	}
 
-	if newVal == 0 {
-		if _, err := tx.Exec(ctx, planetAttributeDeleteSQL, p.AttributeID); err != nil {
-			return fmt.Errorf("planet_attribute delete id=%s: %w", p.AttributeID, err)
-		}
-	} else {
-		objTypeLabel := ""
-		if k, ok := objecttype.FromID(objTypeID); ok {
-			objTypeLabel = k.Label()
-		}
-		attrLabel := planetAttrLabelFor(attrType)
-		rawObjectID := strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
+	objTypeLabel := ""
+	if k, ok := objecttype.FromID(objTypeID); ok {
+		objTypeLabel = k.Label()
+	}
+	attrLabel := planetAttrLabelFor(attrType)
+	rawObjectID := strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
 
-		if _, err := tx.Exec(ctx, planetAttributeUpsertSQL,
-			p.AttributeID,
-			rawObjectID,
-			nullIfEmpty(objTypeLabel),
-			nullIfEmpty(attrLabel),
-			newVal,
-		); err != nil {
-			return fmt.Errorf("planet_attribute upsert id=%s: %w", p.AttributeID, err)
-		}
+	if _, err := tx.Exec(ctx, planetAttributeUpsertSQL,
+		p.AttributeID,
+		rawObjectID,
+		nullIfEmpty(objTypeLabel),
+		nullIfEmpty(attrLabel),
+		newVal,
+	); err != nil {
+		return fmt.Errorf("planet_attribute upsert id=%s: %w", p.AttributeID, err)
 	}
 
 	if err := emitPlanetAttributeActivity(ctx, tx, bctx, attrType, objTypeID, objIndex, oldVal, newVal); err != nil {
@@ -158,7 +146,7 @@ const planetAttributePrevValSQL = `SELECT val FROM structs.planet_attribute WHER
 
 // planetAttributePrevVal returns the currently-stored val for the attribute,
 // or 0 when no row exists (a not-yet-set attribute reads as zero, matching
-// the chain's proto3 default semantics used by the delete branch).
+// the chain's proto3 default semantics used by the keep-zero clear path).
 func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (int64, error) {
 	var val int64
 	err := tx.QueryRow(ctx, planetAttributePrevValSQL, id).Scan(&val)

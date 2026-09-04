@@ -163,27 +163,30 @@ func TestHandler_StructAttribute_HealthUpsert_WritesStat(t *testing.T) {
 	})
 }
 
-func TestHandler_StructAttribute_ZeroValueDeletes(t *testing.T) {
+func TestHandler_StructAttribute_ZeroValueKeepsRow(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
-		// Seed a health row first so there's something to delete.
 		seed := mustJSON(t, map[string]any{"attributeId": "0-5-9999", "value": "50"})
 		handle(t, ctx, tx, structAttributeHandler{}, bctx(), seed)
-		// value="0" should DELETE per the 20260203 migration.
 		zero := mustJSON(t, map[string]any{"attributeId": "0-5-9999", "value": "0"})
 		handle(t, ctx, tx, structAttributeHandler{}, bctx(), zero)
-		var n int
-		_ = tx.QueryRow(ctx, `SELECT count(*) FROM structs.struct_attribute WHERE id=$1`, "0-5-9999").Scan(&n)
-		if n != 0 {
-			t.Errorf("expected row deleted on value=0, count=%d", n)
+		var atype string
+		var val int64
+		if err := tx.QueryRow(ctx,
+			`SELECT attribute_type, val FROM structs.struct_attribute WHERE id=$1`,
+			"0-5-9999").Scan(&atype, &val); err != nil {
+			t.Fatalf("row after value=0: %v", err)
+		}
+		if atype != "health" || val != 0 {
+			t.Errorf("after value=0: atype=%q val=%d want health/0", atype, val)
 		}
 		var zeros int
 		_ = tx.QueryRow(ctx,
 			`SELECT count(*) FROM structs.stat_struct_health WHERE object_index=$1 AND value=0`,
 			9999).Scan(&zeros)
 		if zeros != 1 {
-			t.Errorf("expected 1 zero sentinel in stat_struct_health on delete, got %d", zeros)
+			t.Errorf("expected 1 zero sentinel in stat_struct_health on clear, got %d", zeros)
 		}
 	})
 }
@@ -416,7 +419,7 @@ func TestHandler_StructAttribute_SubIndexParsed(t *testing.T) {
 
 // -------- planet_attribute --------
 
-func TestHandler_PlanetAttribute_UpsertAndDelete(t *testing.T) {
+func TestHandler_PlanetAttribute_UpsertAndClear(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
@@ -444,18 +447,19 @@ func TestHandler_PlanetAttribute_UpsertAndDelete(t *testing.T) {
 			t.Errorf("after update val=%d want 9", val)
 		}
 
-		// Delete via value="0".
+		// Clear via value="0" — keep-zero leaves the row at val=0.
 		zero := mustJSON(t, map[string]any{"attributeId": "0-2-7", "value": "0"})
 		handle(t, ctx, tx, planetAttributeHandler{}, bctx(), zero)
-		var n int
-		_ = tx.QueryRow(ctx, `SELECT count(*) FROM structs.planet_attribute WHERE id=$1`, "0-2-7").Scan(&n)
-		if n != 0 {
-			t.Errorf("expected row deleted on value=0, count=%d", n)
+		_ = tx.QueryRow(ctx,
+			`SELECT attribute_type, val FROM structs.planet_attribute WHERE id=$1`,
+			"0-2-7").Scan(&atype, &val)
+		if atype != "planetaryShield" || val != 0 {
+			t.Errorf("after value=0: atype=%q val=%d want planetaryShield/0", atype, val)
 		}
 	})
 }
 
-func TestHandler_PlanetAttribute_EmptyValueDeletes(t *testing.T) {
+func TestHandler_PlanetAttribute_EmptyValueClears(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
@@ -463,10 +467,15 @@ func TestHandler_PlanetAttribute_EmptyValueDeletes(t *testing.T) {
 		handle(t, ctx, tx, planetAttributeHandler{}, bctx(), ins)
 		del := mustJSON(t, map[string]any{"attributeId": "10-2-50", "value": ""})
 		handle(t, ctx, tx, planetAttributeHandler{}, bctx(), del)
-		var n int
-		_ = tx.QueryRow(ctx, `SELECT count(*) FROM structs.planet_attribute WHERE id=$1`, "10-2-50").Scan(&n)
-		if n != 0 {
-			t.Errorf("expected row deleted on empty value, count=%d", n)
+		var atype string
+		var val int64
+		if err := tx.QueryRow(ctx,
+			`SELECT attribute_type, val FROM structs.planet_attribute WHERE id=$1`,
+			"10-2-50").Scan(&atype, &val); err != nil {
+			t.Fatalf("row after empty value: %v", err)
+		}
+		if atype != "blockStartRaid" || val != 0 {
+			t.Errorf("after empty: atype=%q val=%d want blockStartRaid/0", atype, val)
 		}
 	})
 }

@@ -56,28 +56,34 @@ func TestHandler_PlanetAttribute_OreClockTypes11to15(t *testing.T) {
 	})
 }
 
-// TestHandler_PlanetAttribute_OreClockZeroDeletes removes the planet row
-// when type 12/13 is written as 0 or empty.
-func TestHandler_PlanetAttribute_OreClockZeroDeletes(t *testing.T) {
+// TestHandler_PlanetAttribute_OreClockZeroKeepsRow leaves val=0 when type
+// 12/13 is written as 0 or empty (keep-zero).
+func TestHandler_PlanetAttribute_OreClockZeroKeepsRow(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
 		cases := []struct {
 			id    string
+			label string
 			clear string
 		}{
-			{"12-2-999061", "0"},
-			{"13-2-999062", ""},
+			{"12-2-999061", "blockStartOreMine", "0"},
+			{"13-2-999062", "blockStartOreRefine", ""},
 		}
 		for _, c := range cases {
 			handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
 				mustJSON(t, map[string]any{"attributeId": c.id, "value": "100"}))
 			handle(t, ctx, tx, planetAttributeHandler{}, bctx(),
 				mustJSON(t, map[string]any{"attributeId": c.id, "value": c.clear}))
-			var n int
-			_ = tx.QueryRow(ctx, `SELECT count(*) FROM structs.planet_attribute WHERE id=$1`, c.id).Scan(&n)
-			if n != 0 {
-				t.Errorf("%s value=%q: expected delete, count=%d", c.id, c.clear, n)
+			var atype string
+			var val int64
+			if err := tx.QueryRow(ctx,
+				`SELECT attribute_type, val FROM structs.planet_attribute WHERE id=$1`,
+				c.id).Scan(&atype, &val); err != nil {
+				t.Fatalf("%s value=%q: %v", c.id, c.clear, err)
+			}
+			if atype != c.label || val != 0 {
+				t.Errorf("%s value=%q: atype=%q val=%d want %s/0", c.id, c.clear, atype, val, c.label)
 			}
 		}
 	})
@@ -198,17 +204,19 @@ func TestHandler_StructAttribute_OreClockDeleteDoesNotResurrect(t *testing.T) {
 		handle(t, ctx, tx, structAttributeHandler{}, bctx(),
 			mustJSON(t, map[string]any{"attributeId": "3-5-999060", "value": "99"}))
 
-		// Upgrade-style delete of leftover struct clocks.
+		// Upgrade-style clear of leftover struct clocks (keep-zero → val=0).
 		for _, id := range []string{"3-5-999060", "4-5-999060"} {
 			handle(t, ctx, tx, structAttributeHandler{}, bctx(),
 				mustJSON(t, map[string]any{"attributeId": id, "value": "0"}))
 		}
 
-		var n int
-		_ = tx.QueryRow(ctx,
-			`SELECT count(*) FROM structs.struct_attribute WHERE id IN ('3-5-999060','4-5-999060')`).Scan(&n)
-		if n != 0 {
-			t.Errorf("leftover struct attrs still present, count=%d", n)
+		var leftoverVal int64
+		if err := tx.QueryRow(ctx,
+			`SELECT val FROM structs.struct_attribute WHERE id='3-5-999060'`).Scan(&leftoverVal); err != nil {
+			t.Fatalf("leftover struct attr after clear: %v", err)
+		}
+		if leftoverVal != 0 {
+			t.Errorf("leftover struct attr 3 val=%d want 0", leftoverVal)
 		}
 
 		var blockStart int64

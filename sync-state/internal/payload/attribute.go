@@ -27,8 +27,8 @@ type Grid struct {
 // where attrType is 0..6 (see struct_attribute.go for labels).
 // subIndex is optional and defaults to 0.
 //
-// "" or "0" value => DELETE (the 20260203 migration added the numeric-zero
-// tombstone semantics so chain-emitted proto3 defaults don't accumulate).
+// "" or "0" value => UPSERT val=0 (keep-zero). Chain proto3 defaults used
+// to DELETE; we keep the row so updated_since can see clears.
 type StructAttribute struct {
 	AttributeID string `json:"attributeId"`
 	Value       string `json:"value"`
@@ -42,7 +42,7 @@ type StructAttribute struct {
 // where attrType is 0..15 (see planet_attribute.go for labels).
 // No sub_index column on structs.planet_attribute.
 //
-// "" or "0" value => DELETE.
+// "" or "0" value => UPSERT val=0 (keep-zero).
 type PlanetAttribute struct {
 	AttributeID string `json:"attributeId"`
 	Value       string `json:"value"`
