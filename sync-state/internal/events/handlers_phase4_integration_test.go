@@ -191,6 +191,32 @@ func TestHandler_StructAttribute_ZeroValueKeepsRow(t *testing.T) {
 	})
 }
 
+// TestHandler_StructAttribute_StatusClearPreservesRow ensures empty/"0"
+// status does not wipe the destroyed bit — /api/struct/player/{id} uses
+// COALESCE(sa_status.val, 0) during STRUCT_SWEEP_DELAY.
+func TestHandler_StructAttribute_StatusClearPreservesRow(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		seed := mustJSON(t, map[string]any{"attributeId": "1-5-9998", "value": "32"})
+		handle(t, ctx, tx, structAttributeHandler{}, bctx(), seed)
+
+		for _, clear := range []string{"0", ""} {
+			handle(t, ctx, tx, structAttributeHandler{}, bctx(),
+				mustJSON(t, map[string]any{"attributeId": "1-5-9998", "value": clear}))
+			var val int64
+			if err := tx.QueryRow(ctx,
+				`SELECT val FROM structs.struct_attribute WHERE id=$1`,
+				"1-5-9998").Scan(&val); err != nil {
+				t.Fatalf("status after clear %q: %v", clear, err)
+			}
+			if val != 32 {
+				t.Errorf("status after clear %q: val=%d want 32 (preserved)", clear, val)
+			}
+		}
+	})
+}
+
 func TestHandler_StructAttribute_StatusBit32_StampsDestroy(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {

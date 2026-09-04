@@ -27,8 +27,8 @@ type Grid struct {
 // where attrType is 0..6 (see struct_attribute.go for labels).
 // subIndex is optional and defaults to 0.
 //
-// "" or "0" value => UPSERT val=0 (keep-zero). Chain proto3 defaults used
-// to DELETE; we keep the row so updated_since can see clears.
+// "" or "0" value => UPSERT val=0 (keep-zero), except status (attrType 1)
+// which ignores clears so destroyed bits survive STRUCT_SWEEP_DELAY.
 type StructAttribute struct {
 	AttributeID string `json:"attributeId"`
 	Value       string `json:"value"`

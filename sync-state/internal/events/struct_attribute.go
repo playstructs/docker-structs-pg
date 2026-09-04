@@ -24,8 +24,10 @@ import (
 //   - objectIndex     (split_part 3) — numeric index for the struct.
 //   - subIndex        (split_part 4) — optional, defaults to 0.
 //
-// "" or numeric 0 → UPSERT val=0 (keep-zero). If the upsert actually wrote
-// (rowcount > 0):
+// "" or numeric 0 → UPSERT val=0 (keep-zero), except attrType 1 (status):
+// a clear is ignored so corpses keep the destroyed bit for STRUCT_SWEEP_DELAY
+// (/api/struct/player/{id} uses COALESCE(sa_status.val, 0)). If the upsert
+// actually wrote (rowcount > 0):
 //
 //   - attrType 0 (health) → append to stat_struct_health (including the
 //     zero sentinel so consumers see the clear).
@@ -118,6 +120,12 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		if err != nil {
 			return fmt.Errorf("struct_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
 		}
+	}
+
+	// Status clear would make /api/struct/player/{id} report COALESCE(0)
+	// as alive/unbuilt during STRUCT_SWEEP_DELAY. Leave the last status.
+	if attrType == 1 && val == 0 {
+		return nil
 	}
 
 	objTypeLabel := ""
