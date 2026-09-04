@@ -234,7 +234,7 @@ func TestFetchAllPlanetAttributes_TwoPages(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
-		if r.URL.Path != "/structs/structs/planet_attribute" {
+		if r.URL.Path != "/structs/planet_attribute" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		q := r.URL.Query()

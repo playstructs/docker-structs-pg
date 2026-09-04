@@ -239,13 +239,15 @@ func PrintPlanetAttributeReport(w io.Writer, r PlanetAttributeReport) {
 	}
 }
 
-// fetchAllPlanetAttributes pages GET {lcd}/structs/structs/planet_attribute
-// until pagination.next_key is empty.
+// fetchAllPlanetAttributes pages GET {lcd}/structs/planet_attribute until
+// pagination.next_key is empty. Path matches update-cache
+// (/structs/{entity}); /structs/structs/planet_attribute is a 501 on this
+// chain's grpc-gateway (Unimplemented).
 func fetchAllPlanetAttributes(ctx context.Context, client *http.Client, lcdBase string, pageLimit int) ([]payload.PlanetAttribute, error) {
 	var all []payload.PlanetAttribute
 	var nextKey string
 	for {
-		u := fmt.Sprintf("%s/structs/structs/planet_attribute?pagination.limit=%d",
+		u := fmt.Sprintf("%s/structs/planet_attribute?pagination.limit=%d",
 			trimTrailingSlash(lcdBase), pageLimit)
 		if nextKey != "" {
 			u += "&pagination.key=" + url.QueryEscape(nextKey)

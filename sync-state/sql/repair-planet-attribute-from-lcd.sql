@@ -14,7 +14,9 @@
 --   1. Export the LCD store (one page is enough at limit 100000):
 --
 --        LCD=https://<lcd host>
---        curl -s "$LCD/structs/structs/planet_attribute?pagination.limit=100000" \
+--        # Path is /structs/planet_attribute (same as update-cache).
+--        # /structs/structs/planet_attribute returns HTTP 501 on this chain.
+--        curl -s "$LCD/structs/planet_attribute?pagination.limit=100000" \
 --          | jq -r '.planetAttributeRecords[] | [.attributeId, .value] | @tsv' \
 --          > /tmp/planet_attribute.tsv
 --
