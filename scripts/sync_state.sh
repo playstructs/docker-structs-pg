@@ -49,12 +49,16 @@
 #   SYNC_STATE_SKIP_DOCTOR        default false (skip RPC + trigger probes;
 #                                    writer lock is always acquired)
 #
-#   --- player guild_rank startup sweep ---
-#   At ingest startup, structs.player.guild_rank is reconciled against the
-#   LCD player snapshot (the EventPlayer handler dropped guildRank for a
-#   long stretch). Runs before the first block, is a no-op once in sync,
-#   and degrades to a warning if the LCD is unreachable.
-#   SYNC_STATE_PLAYER_RANK_SWEEP  default true (false => skip the sweep)
+#   --- LCD startup sweeps ---
+#   At ingest startup, before the first block:
+#   - structs.player.guild_rank is reconciled against the LCD player
+#     snapshot (EventPlayer historically dropped guildRank).
+#   - structs.planet_attribute is re-seeded from the LCD store (heals
+#     missed EventPlanetAttribute ranges, e.g. ore-clock cutover).
+#   Both are no-ops once in sync and degrade to a warning if the LCD
+#   is unreachable.
+#   SYNC_STATE_PLAYER_RANK_SWEEP         default true (false => skip)
+#   SYNC_STATE_PLANET_ATTRIBUTE_SWEEP    default true (false => skip)
 #   STRUCTS_API_URL               default http://structsd:1317 (LCD base;
 #                                    shared with update-cache)
 #   PAGE_LIMIT                    default 10000 (LCD pagination.limit per page)

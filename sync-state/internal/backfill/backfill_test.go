@@ -12,6 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"sync-state/internal/payload"
 )
 
 func TestFetchAllPlayers_TwoPages(t *testing.T) {
@@ -225,5 +227,88 @@ func TestApplyDefenderPlanetary_CorrectsAndIdempotent(t *testing.T) {
 	}
 	if n2 != 0 {
 		t.Errorf("pass2 updated %d rows; want 0 (idempotent)", n2)
+	}
+}
+
+func TestFetchAllPlanetAttributes_TwoPages(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/structs/structs/planet_attribute" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("pagination.limit") != "2" {
+			t.Errorf("pagination.limit = %q want 2", q.Get("pagination.limit"))
+		}
+		key := q.Get("pagination.key")
+		w.Header().Set("Content-Type", "application/json")
+		switch key {
+		case "":
+			next := "page2"
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"planetAttributeRecords": []map[string]any{
+					{"attributeId": "12-2-1", "value": "100"},
+					{"attributeId": "13-2-1", "value": "200"},
+				},
+				"pagination": map[string]any{"next_key": next},
+			})
+		case "page2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"planetAttributeRecords": []map[string]any{
+					{"attributeId": "12-2-2", "value": "300"},
+				},
+				"pagination": map[string]any{},
+			})
+		default:
+			t.Errorf("unexpected pagination.key %q", key)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	recs, err := fetchAllPlanetAttributes(context.Background(), srv.Client(), srv.URL, 2)
+	if err != nil {
+		t.Fatalf("fetchAllPlanetAttributes: %v", err)
+	}
+	if hits != 2 {
+		t.Errorf("hits = %d want 2", hits)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("len = %d want 3", len(recs))
+	}
+	if recs[0].AttributeID != "12-2-1" || recs[0].Value != "100" {
+		t.Errorf("recs[0] = %+v", recs[0])
+	}
+	if recs[2].AttributeID != "12-2-2" {
+		t.Errorf("recs[2] = %+v", recs[2])
+	}
+}
+
+func TestPlanetAttributeRows_FiltersAndLabels(t *testing.T) {
+	rows, skipped := planetAttributeRows([]payload.PlanetAttribute{
+		{AttributeID: "12-2-27693", Value: "2470534"},
+		{AttributeID: "13-2-27693", Value: "0"},
+		{AttributeID: "12-5-1", Value: "1"},     // struct object type
+		{AttributeID: "99-2-1", Value: "1"},      // unknown attr type
+		{AttributeID: "12-2-1-extra", Value: "1"}, // wrong arity
+		{AttributeID: "12-2-bad", Value: "x"},    // bad value
+		{AttributeID: "0-2-1", Value: ""},        // empty → 0
+	})
+	if skipped != 4 {
+		t.Errorf("skipped = %d want 4", skipped)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("len(rows) = %d want 3", len(rows))
+	}
+	if rows[0].ID != "12-2-27693" || rows[0].ObjectID != "2-27693" ||
+		rows[0].AttributeType != "blockStartOreMine" || rows[0].Val != 2470534 {
+		t.Errorf("rows[0] = %+v", rows[0])
+	}
+	if rows[1].AttributeType != "blockStartOreRefine" || rows[1].Val != 0 {
+		t.Errorf("rows[1] = %+v", rows[1])
+	}
+	if rows[2].AttributeType != "planetaryShield" || rows[2].Val != 0 {
+		t.Errorf("rows[2] = %+v", rows[2])
 	}
 }

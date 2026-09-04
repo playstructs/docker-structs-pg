@@ -591,6 +591,26 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Player guild_rank sweep disabled (-player-rank-sweep=false).")
 	}
 
+	// Planet attribute re-seed. EventPlanetAttribute only rewrites when
+	// val changes, so a missed block range (ore-clock cutover, crash)
+	// leaves stale ore clocks that poison view.work. Reconcile the full
+	// LCD store before handlers run; unreachable LCD is a warning.
+	if cfg.PlanetAttributeSweep {
+		report, serr := backfill.SweepPlanetAttributes(ctx, backfill.PlanetAttributeInputs{
+			Pool:      pool.Pool,
+			LCDBase:   cfg.LCDURL,
+			PageLimit: cfg.LCDPageLimit,
+		})
+		if serr != nil {
+			fmt.Fprintf(stderr, "WARN: planet attribute sweep skipped: %v\n", serr)
+			fmt.Fprintf(stderr, "  planet_attribute stays as-is; EventPlanetAttribute still populates going forward.\n")
+		} else {
+			backfill.PrintPlanetAttributeReport(stderr, report)
+		}
+	} else {
+		fmt.Fprintln(stderr, "Planet attribute sweep disabled (-planet-attribute-sweep=false).")
+	}
+
 	// Stale defender reconciliation. Pure SQL — the chain never emits
 	// EventStructDefenderClear when the *protected* struct dies, so
 	// orphaned rows accumulate until the destroy-path cleanup landed.

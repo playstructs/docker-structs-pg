@@ -12,6 +12,10 @@
 //
 //   - SweepPlayerRanks: EventPlayer historically omitted guildRank (a
 //     20260427 SQL rewrite bug). Reconciles against the LCD snapshot.
+//   - SweepPlanetAttributes: EventPlanetAttribute only rewrites when val
+//     changes, so a missed block range (e.g. ore-clock cutover) leaves
+//     stale rows until the next chain change. Re-seeds all planet
+//     attribute types from the LCD store and zeros pruned ids.
 //   - SweepStaleDefenders: the chain never emits EventStructDefenderClear
 //     when the *protected* struct dies. Deletes orphaned
 //     struct_defender + protectedStructIndex attribute rows. Pure SQL;
