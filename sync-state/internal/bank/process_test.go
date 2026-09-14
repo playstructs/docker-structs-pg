@@ -197,7 +197,7 @@ func TestHandleTransfer_StructInfusionSkipsSent(t *testing.T) {
 	}
 	buf := buffers.New()
 	tm := time.Date(2026, 6, 2, 22, 0, 0, 0, time.UTC)
-	if err := handleTransfer(buf, 977521, tm, group[1], group); err != nil {
+	if err := handleTransfer(buf, 977521, tm, eventIdent{ChainID: "test"}, group[1], group); err != nil {
 		t.Fatalf("handleTransfer: %v", err)
 	}
 	if len(buf.Ledger) != 1 {
@@ -213,7 +213,7 @@ func TestHandleTransfer_NormalTransferWritesBoth(t *testing.T) {
 	buf := buffers.New()
 	tm := time.Date(2026, 6, 2, 22, 0, 0, 0, time.UTC)
 	ev := transferEventTest("structs1sender", "structs1recipient", "50ualpha")
-	if err := handleTransfer(buf, 1000, tm, ev, []rpc.Event{ev}); err != nil {
+	if err := handleTransfer(buf, 1000, tm, eventIdent{ChainID: "test"}, ev, []rpc.Event{ev}); err != nil {
 		t.Fatalf("handleTransfer: %v", err)
 	}
 	if len(buf.Ledger) != 2 {
@@ -249,7 +249,7 @@ func TestHandleTransfer_AlphaRefineSkipsReceived(t *testing.T) {
 	}
 	buf := buffers.New()
 	tm := time.Date(2026, 4, 3, 3, 0, 0, 0, time.UTC)
-	if err := handleTransfer(buf, 107304, tm, group[1], group); err != nil {
+	if err := handleTransfer(buf, 107304, tm, eventIdent{ChainID: "test"}, group[1], group); err != nil {
 		t.Fatalf("handleTransfer: %v", err)
 	}
 	if len(buf.Ledger) != 1 {

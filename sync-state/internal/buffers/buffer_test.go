@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+func TestEncodeLedgerEventIndex(t *testing.T) {
+	if got := EncodeLedgerEventIndex(5, 1); got != 5*LedgerLegStride+1 {
+		t.Fatalf("got %d", got)
+	}
+	// Event 0 legs 0..3 occupy 0..3; event 1 starts at 8.
+	if EncodeLedgerEventIndex(0, 3) >= EncodeLedgerEventIndex(1, 0) {
+		t.Fatal("leg encoding collides with the next event")
+	}
+}
+
 func TestSnapshotRestore_TruncatesPostSnapshotRows(t *testing.T) {
 	b := New()
 	b.Ledger = append(b.Ledger, LedgerRow{Address: "a"})

@@ -148,6 +148,9 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	if tag.RowsAffected() == 0 {
 		return nil
 	}
+	if attrType == 1 || attrType == 2 {
+		bctx.Dirty.Struct(rawObjectID)
+	}
 
 	switch attrType {
 	case 0: // health (including zero sentinel on clear)

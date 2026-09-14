@@ -650,7 +650,7 @@ SELECT COUNT(*), COUNT(*) FILTER (WHERE source_height < $1 - 1)
 FROM structs.api_refresh_state
 WHERE model = ANY(ARRAY[
   'inventory','guild_bank','leaderboard_player','leaderboard_guild',
-  'leaderboard_reactor','leaderboard_provider','leaderboard_substation'
+  'leaderboard_reactor','leaderboard_provider','leaderboard_substation','work'
 ])`, cursor.LastHeight).Scan(&models, &stale); err != nil {
 		r.Status = StatusFail
 		r.Detail = fmt.Sprintf("refresh state: %v", err)

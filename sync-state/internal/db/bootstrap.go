@@ -238,8 +238,10 @@ var bootstrapStatements = []string{
 		PRIMARY KEY (chain_id, composite_key)
 	)`,
 
-	`CREATE INDEX IF NOT EXISTS unknown_event_log_count_idx
-		ON sync_state.unknown_event_log (chain_id, count DESC)`,
+	// Indexing `count` made every increment a non-HOT update (~8.3M
+	// updates, 74k autovacuums on a 600 kB table, zero scans). structs-pg
+	// dropped it; DROP IF EXISTS stops this writer from recreating it.
+	`DROP INDEX IF EXISTS sync_state.unknown_event_log_count_idx`,
 
 	// --- genesis_log ---------------------------------------------------------
 	//

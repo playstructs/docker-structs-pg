@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -123,6 +124,9 @@ func (r *Router) Count() int { return len(r.handlers) }
 func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, compositeKey string, raw json.RawMessage) (he *HandlerError, fatal error) {
 	h := r.Lookup(compositeKey)
 	if h == nil {
+		if IgnoreUnknown(compositeKey) {
+			return nil, nil
+		}
 		r.unknownMu.Lock()
 		r.unknownCounts[compositeKey]++
 		d, ok := r.unknownDeltas[compositeKey]
@@ -330,4 +334,22 @@ func ptrIfNotNeg(v int) *int {
 		return nil
 	}
 	return &v
+}
+
+// IgnoreUnknown reports composite keys that must never reach
+// sync_state.unknown_event_log. Cosmos SDK distribution emits
+// commission.* and rewards.* on every block (~5 attributes, millions of
+// row updates); cosmos.* / ibc.* modules are similarly unhandled by
+// design. structs.* keys are never ignored.
+func IgnoreUnknown(compositeKey string) bool {
+	switch {
+	case compositeKey == "commission", compositeKey == "rewards":
+		return true
+	case strings.HasPrefix(compositeKey, "commission."),
+		strings.HasPrefix(compositeKey, "rewards."),
+		strings.HasPrefix(compositeKey, "cosmos."),
+		strings.HasPrefix(compositeKey, "ibc."):
+		return true
+	}
+	return false
 }

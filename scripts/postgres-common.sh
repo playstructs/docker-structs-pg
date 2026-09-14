@@ -129,3 +129,23 @@ EOF
   chown postgres:postgres "${dropin}"
   echo "memory settings: shared_buffers=${shared} (${dropin})"
 }
+
+# Ensure pg_stat_statements is preloaded. The structs-pg change
+# extension-pg-stat-statements-20260914 CREATEs the extension once the
+# library is in shared_preload_libraries. A conf.d drop-in overrides the
+# volume's postgresql.conf so existing pgetc stacks pick this up on
+# restart without a manual rewrite.
+postgres_apply_preload_libraries() {
+  local confdir dropin
+  confdir="$(pg_conf_dir)"
+  dropin="${confdir}/conf.d/structs-preload.conf"
+  mkdir -p "${confdir}/conf.d"
+
+  cat >"${dropin}" <<EOF
+# Generated at container start. pg_stat_statements must be preloaded
+# before CREATE EXTENSION can record statement statistics.
+shared_preload_libraries = 'timescaledb,pg_cron,pg_stat_statements'
+EOF
+  chown postgres:postgres "${dropin}"
+  echo "preload libraries: timescaledb,pg_cron,pg_stat_statements (${dropin})"
+}

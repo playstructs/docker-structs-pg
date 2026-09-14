@@ -34,10 +34,9 @@ func (oreMigrateHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 		return fmt.Errorf("ore_migrate: missing address (new=%q old=%q)", p.PrimaryAddress, p.OldPrimaryAddress)
 	}
 	amt := p.Amount.String()
-	t := bctx.BlockTime.UTC()
-	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
-		buffers.LedgerRow{Address: p.PrimaryAddress, Counterparty: p.OldPrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "migrated", Direction: "credit", Denom: "ore"},
-		buffers.LedgerRow{Address: p.OldPrimaryAddress, Counterparty: p.PrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "migrated", Direction: "debit", Denom: "ore"},
+	appendLedger(bctx,
+		buffers.LedgerRow{Address: p.PrimaryAddress, Counterparty: p.OldPrimaryAddress, AmountP: amt, Action: "migrated", Direction: "credit", Denom: "ore"},
+		buffers.LedgerRow{Address: p.OldPrimaryAddress, Counterparty: p.PrimaryAddress, AmountP: amt, Action: "migrated", Direction: "debit", Denom: "ore"},
 	)
 	_ = tx
 	return nil

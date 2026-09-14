@@ -41,14 +41,12 @@ func (oreMineHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, 
 	if p.PrimaryAddress == "" {
 		return fmt.Errorf("ore_mine: empty primaryAddress")
 	}
-	bctx.Buf.Ledger = append(bctx.Buf.Ledger, buffers.LedgerRow{
-		Address:     p.PrimaryAddress,
-		AmountP:     p.Amount.String(),
-		BlockHeight: bctx.Height,
-		Time:        bctx.BlockTime.UTC(),
-		Action:      "mined",
-		Direction:   "credit",
-		Denom:       "ore",
+	appendLedger(bctx, buffers.LedgerRow{
+		Address:   p.PrimaryAddress,
+		AmountP:   p.Amount.String(),
+		Action:    "mined",
+		Direction: "credit",
+		Denom:     "ore",
 	})
 	_ = tx // tx unused — leaf row deferred to buffers.Flush
 	return nil

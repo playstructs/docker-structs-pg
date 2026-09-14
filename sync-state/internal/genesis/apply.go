@@ -53,25 +53,27 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, loaded *LoadedDocument) (*Ap
 
 	rps := make(map[string]int64, 4)
 
-	bankRows, err := insertBankBalances(ctx, tx, doc)
+	seq := 0
+
+	bankRows, err := insertBankBalances(ctx, tx, doc, &seq)
 	if err != nil {
 		return nil, fmt.Errorf("genesis: bank section: %w", err)
 	}
 	rps["bank"] = bankRows
 
-	delRows, err := insertDelegations(ctx, tx, doc)
+	delRows, err := insertDelegations(ctx, tx, doc, &seq)
 	if err != nil {
 		return nil, fmt.Errorf("genesis: delegations section: %w", err)
 	}
 	rps["delegations"] = delRows
 
-	unbRows, err := insertUnbondings(ctx, tx, doc)
+	unbRows, err := insertUnbondings(ctx, tx, doc, &seq)
 	if err != nil {
 		return nil, fmt.Errorf("genesis: unbondings section: %w", err)
 	}
 	rps["unbondings"] = unbRows
 
-	oreRows, err := insertPlayerOre(ctx, tx, doc)
+	oreRows, err := insertPlayerOre(ctx, tx, doc, &seq)
 	if err != nil {
 		return nil, fmt.Errorf("genesis: player ore section: %w", err)
 	}
@@ -116,8 +118,8 @@ type ApplyReport struct {
 // insertBankBalances flattens (.address, .coins[].denom, .amount) into
 // one ledger row per coin. Mirrors section 1 of the shell script
 // verbatim (direction='credit', action='genesis').
-func insertBankBalances(ctx context.Context, tx pgx.Tx, doc *Document) (int64, error) {
-	return execLedgerInserts(ctx, tx, ledgerBankRows(doc))
+func insertBankBalances(ctx context.Context, tx pgx.Tx, doc *Document, seq *int) (int64, error) {
+	return execLedgerInserts(ctx, tx, doc.ChainID, seq, ledgerBankRows(doc))
 }
 
 // ledgerRow is the canonical (address, counterparty, amount_p, time,
@@ -132,6 +134,10 @@ type ledgerRow struct {
 	Action       string
 	Direction    string
 	Denom        string
+	ChainID      string
+	TxIndex      int
+	MsgIndex     int
+	EventIndex   int
 }
 
 func ledgerBankRows(doc *Document) []ledgerRow {
@@ -156,7 +162,7 @@ func ledgerBankRows(doc *Document) []ledgerRow {
 // both — matching how the shell script and downstream consumers model
 // staking positions: both parties carry credit-side accounting for the
 // same locked stake, with counterparty cross-referenced.
-func insertDelegations(ctx context.Context, tx pgx.Tx, doc *Document) (int64, error) {
+func insertDelegations(ctx context.Context, tx pgx.Tx, doc *Document, seq *int) (int64, error) {
 	// Pre-build validator lookup once.
 	type valInfo struct{ tokens, shares string }
 	vals := make(map[string]valInfo, len(doc.AppState.Staking.Validators))
@@ -197,13 +203,13 @@ func insertDelegations(ctx context.Context, tx pgx.Tx, doc *Document) (int64, er
 			},
 		)
 	}
-	return execLedgerInserts(ctx, tx, rows)
+	return execLedgerInserts(ctx, tx, doc.ChainID, seq, rows)
 }
 
 // insertUnbondings flattens (.entries[].balance) into 2 ledger rows per
 // entry, denom='ualpha.defusing', direction='credit'. Same shape as
 // delegations, just a different denom.
-func insertUnbondings(ctx context.Context, tx pgx.Tx, doc *Document) (int64, error) {
+func insertUnbondings(ctx context.Context, tx pgx.Tx, doc *Document, seq *int) (int64, error) {
 	var rows []ledgerRow
 	for _, u := range doc.AppState.Staking.UnbondingDelegations {
 		for _, e := range u.Entries {
@@ -229,7 +235,7 @@ func insertUnbondings(ctx context.Context, tx pgx.Tx, doc *Document) (int64, err
 			)
 		}
 	}
-	return execLedgerInserts(ctx, tx, rows)
+	return execLedgerInserts(ctx, tx, doc.ChainID, seq, rows)
 }
 
 // insertPlayerOre walks app_state.structs.gridList for attribute IDs
@@ -242,7 +248,7 @@ func insertUnbondings(ctx context.Context, tx pgx.Tx, doc *Document) (int64, err
 // matches the shell script's `select($addr != "")` guard. Worth a TODO
 // to log them when STRICT mode is added, but for now silent-drop keeps
 // us bug-compatible with the existing importer.
-func insertPlayerOre(ctx context.Context, tx pgx.Tx, doc *Document) (int64, error) {
+func insertPlayerOre(ctx context.Context, tx pgx.Tx, doc *Document, seq *int) (int64, error) {
 	addrByIndex := make(map[string]string, len(doc.AppState.Structs.PlayerList))
 	for _, p := range doc.AppState.Structs.PlayerList {
 		addrByIndex[p.Index] = p.PrimaryAddress
@@ -272,7 +278,7 @@ func insertPlayerOre(ctx context.Context, tx pgx.Tx, doc *Document) (int64, erro
 			Denom:     "ore",
 		})
 	}
-	return execLedgerInserts(ctx, tx, rows)
+	return execLedgerInserts(ctx, tx, doc.ChainID, seq, rows)
 }
 
 // execLedgerInserts performs the actual multi-row INSERT in
@@ -281,11 +287,18 @@ func insertPlayerOre(ctx context.Context, tx pgx.Tx, doc *Document) (int64, erro
 // under (8000 * 7 = 56000). Most chain genesis files are
 // orders of magnitude smaller than that; the chunking is here for
 // production-scale safety, not testnet.
-func execLedgerInserts(ctx context.Context, tx pgx.Tx, rows []ledgerRow) (int64, error) {
+func execLedgerInserts(ctx context.Context, tx pgx.Tx, chainID string, seq *int, rows []ledgerRow) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	const batchSize = 8000
+	for i := range rows {
+		rows[i].ChainID = chainID
+		rows[i].TxIndex = -1
+		rows[i].MsgIndex = -1
+		rows[i].EventIndex = *seq
+		*seq++
+	}
+	const batchSize = 5000 // 12 placeholders/row; stay under PG's 65535 limit
 	var total int64
 	for i := 0; i < len(rows); i += batchSize {
 		end := i + batchSize
@@ -304,15 +317,15 @@ func execLedgerInserts(ctx context.Context, tx pgx.Tx, rows []ledgerRow) (int64,
 func execLedgerBatch(ctx context.Context, tx pgx.Tx, rows []ledgerRow) (int64, error) {
 	var (
 		placeholders = make([]string, 0, len(rows))
-		args         = make([]any, 0, len(rows)*7)
+		args         = make([]any, 0, len(rows)*11)
 	)
 	for _, r := range rows {
 		base := len(args)
 		placeholders = append(placeholders, fmt.Sprintf(
-			"($%d, $%d, $%d, 0, $%d, $%d, $%d, $%d)",
+			"($%d, $%d, $%d, 0, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			base+1, base+2, base+3, base+4, base+5, base+6, base+7,
+			base+8, base+9, base+10, base+11,
 		))
-		// Order matches the column list below.
 		var cp any
 		if r.Counterparty != "" {
 			cp = r.Counterparty
@@ -321,11 +334,13 @@ func execLedgerBatch(ctx context.Context, tx pgx.Tx, rows []ledgerRow) (int64, e
 		}
 		args = append(args,
 			r.Address, cp, r.AmountP, r.Time, r.Action, r.Direction, r.Denom,
+			r.ChainID, r.TxIndex, r.MsgIndex, r.EventIndex,
 		)
 	}
 	sql := `
 		INSERT INTO structs.ledger
-			(address, counterparty, amount_p, block_height, time, action, direction, denom)
+			(address, counterparty, amount_p, block_height, time, action, direction, denom,
+			 chain_id, tx_index, msg_index, event_index)
 		VALUES ` + strings.Join(placeholders, ",")
 	tag, err := tx.Exec(ctx, sql, args...)
 	if err != nil {

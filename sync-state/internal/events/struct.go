@@ -16,7 +16,9 @@ import (
 // (cache-trigger-add-queue-20260121-bigly-refactor.sql:749-827).
 //
 // Note: is_destroyed is set to FALSE on first INSERT and never touched on
-// UPDATE — the struct_attribute handler (Phase 3) owns destruction state.
+// UPDATE. Destruction is stamped by the struct_attribute handler (status
+// bit 32) and by EventDelete, which tombstones the row instead of
+// deleting it.
 //
 // Also emits the struct_move planet_activity row that the dropped
 // PLANET_ACTIVITY_STRUCT_MOVEMENT trigger (cache-system.sql:1148-1178)
@@ -62,9 +64,9 @@ func (structHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	}
 
 	var (
-		prevExists                                bool
+		prevExists                                 bool
 		prevLocType, prevLocID, prevOperatingAmbit *string
-		prevSlot                                  int64
+		prevSlot                                   int64
 	)
 	err = tx.QueryRow(ctx, structPrevSelectSQL, p.ID).Scan(
 		&prevLocType, &prevLocID, &prevOperatingAmbit, &prevSlot,
@@ -93,6 +95,13 @@ func (structHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	}
 	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
 		return err
+	}
+	bctx.Dirty.Struct(p.ID)
+	if p.LocationType == "planet" {
+		bctx.Dirty.Planet(p.LocationID)
+	}
+	if prevExists && prevLocType != nil && *prevLocType == "planet" && prevLocID != nil {
+		bctx.Dirty.Planet(*prevLocID)
 	}
 
 	if prevExists {

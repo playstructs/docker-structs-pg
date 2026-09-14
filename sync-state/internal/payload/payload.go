@@ -16,6 +16,7 @@
 package payload
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -123,7 +124,7 @@ type Raw = json.RawMessage
 // We initially used it to coerce empty strings to SQL NULL, but that
 // diverges from the original SQL handlers — `jsonb_to_record` writes
 // chain-emitted "" as the empty string, not NULL, and the IS DISTINCT
-// FROM guards specifically rely on '' vs NULL being treated as different.
+// FROM guards specifically rely on ” vs NULL being treated as different.
 // The chain emits explicit values for every proto3 field (default zero
 // for ints, "" for unset texts), so passing them verbatim is byte-equal
 // to the SQL handler's behaviour. The helper is still useful at handler
@@ -147,6 +148,39 @@ func MustMarshal(v any) []byte {
 	return b
 }
 
+// UnwrapJSONString peels JSON string wrapping until the value is an object,
+// array, or a bare scalar. v0.21 EventDelete.objectId arrives as a
+// JSON-encoded string (quotes included); encodeAttributeValue used to wrap
+// that again, so handler_error_log payloads look like `"\"5-262312\""`.
+// Bounded to four peels so a malformed payload cannot loop.
+func UnwrapJSONString(raw json.RawMessage) json.RawMessage {
+	cur := bytes.TrimSpace(raw)
+	for i := 0; i < 4; i++ {
+		if len(cur) < 2 || cur[0] != '"' {
+			return cur
+		}
+		var s string
+		if err := json.Unmarshal(cur, &s); err != nil {
+			return cur
+		}
+		next := strings.TrimSpace(s)
+		if next == "" {
+			return cur
+		}
+		switch next[0] {
+		case '{', '[', '"':
+			cur = []byte(s)
+			continue
+		}
+		enc, err := json.Marshal(s)
+		if err != nil {
+			return cur
+		}
+		return enc
+	}
+	return cur
+}
+
 // Decode unmarshals raw into a freshly-zeroed T. Used by handlers as the
 // first line of Handle(): payload.Decode[payload.Player](raw).
 func Decode[T any](raw json.RawMessage) (T, error) {
@@ -154,17 +188,7 @@ func Decode[T any](raw json.RawMessage) (T, error) {
 	if len(raw) == 0 {
 		return p, fmt.Errorf("empty payload")
 	}
-	// Accept payloads that arrive as a JSON-encoded string (chain wraps
-	// the entire message JSON in a string for some event attributes).
-	if raw[0] == '"' {
-		var unq string
-		if err := json.Unmarshal(raw, &unq); err == nil {
-			if err := json.Unmarshal([]byte(unq), &p); err != nil {
-				return p, fmt.Errorf("decode %T: unwrap+unmarshal: %w", p, err)
-			}
-			return p, nil
-		}
-	}
+	raw = UnwrapJSONString(raw)
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return p, fmt.Errorf("decode %T: %w", p, err)
 	}

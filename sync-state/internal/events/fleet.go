@@ -110,6 +110,10 @@ func (fleetHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, ra
 	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
 		return err
 	}
+	bctx.Dirty.Planet(p.LocationID)
+	if prevExists {
+		bctx.Dirty.Planet(derefStr(prevLocID))
+	}
 
 	if prevExists {
 		prevLoc := derefStr(prevLocID)
@@ -165,7 +169,7 @@ func emitFleetMoveActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p 
 }
 
 // fleetMoveListSQL walks the per-planet linked list of "away" fleets
-// starting from the queue head (location_list_forward = ''). Mirrors
+// starting from the queue head (location_list_forward = ”). Mirrors
 // the WITH RECURSIVE in PLANET_ACTIVITY_FLEET_MOVE. We do this only
 // when fleet_status='away' and we're emitting either side of a move.
 const fleetMoveListSQL = `

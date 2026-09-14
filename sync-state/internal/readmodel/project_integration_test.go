@@ -51,7 +51,7 @@ func TestRecomputeAgainstDeployedSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := Recompute(ctx, tx, d, 999999999, time.Now().UTC()); err != nil {
+		if err := Recompute(ctx, tx, d, 999999999, time.Now().UTC(), InventoryFromLedger()); err != nil {
 			t.Fatal(err)
 		}
 		var models int

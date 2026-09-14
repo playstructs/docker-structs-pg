@@ -37,14 +37,15 @@ func ProcessBlock(
 	buf *buffers.Buffer,
 	height int64,
 	blockTime time.Time,
+	chainID string,
 	finalize []rpc.Event,
 	txResults []rpc.TxResult,
 ) error {
-	if err := processGroup(ctx, tx, buf, height, blockTime, finalize); err != nil {
+	if err := processGroup(ctx, tx, buf, height, blockTime, chainID, -1, finalize); err != nil {
 		return fmt.Errorf("finalize: %w", err)
 	}
 	for i, tr := range txResults {
-		if err := processGroup(ctx, tx, buf, height, blockTime, tr.Events); err != nil {
+		if err := processGroup(ctx, tx, buf, height, blockTime, chainID, i, tr.Events); err != nil {
 			return fmt.Errorf("tx[%d]: %w", i, err)
 		}
 	}
@@ -54,12 +55,12 @@ func ProcessBlock(
 // ProcessBuffer is a convenience wrapper for callers that already hold an
 // EventBuffer (e.g. the legacy Capture path). New callers should prefer
 // ProcessBlock so they don't pay the extra Capture filtering pass.
-func ProcessBuffer(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, blockTime time.Time, evBuf EventBuffer) error {
-	if err := processGroup(ctx, tx, buf, evBuf.Height, blockTime, evBuf.Finalize); err != nil {
+func ProcessBuffer(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, blockTime time.Time, chainID string, evBuf EventBuffer) error {
+	if err := processGroup(ctx, tx, buf, evBuf.Height, blockTime, chainID, -1, evBuf.Finalize); err != nil {
 		return fmt.Errorf("finalize: %w", err)
 	}
 	for i, evs := range evBuf.Txs {
-		if err := processGroup(ctx, tx, buf, evBuf.Height, blockTime, evs); err != nil {
+		if err := processGroup(ctx, tx, buf, evBuf.Height, blockTime, chainID, i, evs); err != nil {
 			return fmt.Errorf("tx[%d]: %w", i, err)
 		}
 	}
@@ -69,33 +70,34 @@ func ProcessBuffer(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, blockTim
 // processGroup walks every bank-relevant event in `events` and pushes
 // rows into buf, passing the same slice as the cross-event lookup pool.
 // Non-bank events are skipped silently.
-func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height int64, t time.Time, events []rpc.Event) error {
-	for _, ev := range events {
+func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height int64, t time.Time, chainID string, txIndex int, events []rpc.Event) error {
+	for evIdx, ev := range events {
 		if !IsBankEventType(ev.Type) {
 			continue
 		}
+		id := eventIdent{ChainID: chainID, TxIndex: txIndex, EventIndex: evIdx}
 		var err error
 		switch ev.Type {
 		case "transfer":
-			err = handleTransfer(buf, height, t, ev, events)
+			err = handleTransfer(buf, height, t, id, ev, events)
 		case "coinbase":
-			err = handleCoinbase(buf, height, t, ev)
+			err = handleCoinbase(buf, height, t, id, ev)
 		case "burn":
-			err = handleBurn(buf, height, t, ev)
+			err = handleBurn(buf, height, t, id, ev)
 		case "delegate":
-			err = handleDelegate(buf, height, t, ev)
+			err = handleDelegate(buf, height, t, id, ev)
 		case "redelegate":
-			err = handleRedelegate(buf, height, t, ev, events)
+			err = handleRedelegate(buf, height, t, id, ev, events)
 		case "complete_redelegation":
-			err = handleCompleteRedelegation(buf, height, t, ev)
+			err = handleCompleteRedelegation(buf, height, t, id, ev)
 		case "unbond":
-			err = handleUnbond(buf, height, t, ev)
+			err = handleUnbond(buf, height, t, id, ev)
 		case "cancel_unbond":
-			err = handleCancelUnbond(buf, height, t, ev)
+			err = handleCancelUnbond(buf, height, t, id, ev)
 		case "complete_unbonding":
-			err = handleCompleteUnbonding(buf, height, t, ev)
+			err = handleCompleteUnbonding(buf, height, t, id, ev)
 		case "create_validator":
-			err = handleCreateValidator(buf, height, t, ev, events)
+			err = handleCreateValidator(buf, height, t, id, ev, events)
 		}
 		if err != nil {
 			return fmt.Errorf("%s: %w", ev.Type, err)
@@ -106,11 +108,22 @@ func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height in
 	return nil
 }
 
+// eventIdent is the chain coordinate of the event producing ledger rows.
+// MsgIndex is always -1 for bank events (they are not proto message
+// indexes). EventIndex is the in-block event offset; legs are encoded
+// via buffers.EncodeLedgerEventIndex.
+type eventIdent struct {
+	ChainID    string
+	TxIndex    int
+	EventIndex int
+}
+
 // --- buffer helpers ----------------------------------------------------
 
-// pushLedger appends one structs.ledger row with the given counterparty.
-// Use pushLedgerNoCp for actions without a counterparty (coinbase, burn).
-func pushLedger(buf *buffers.Buffer, address, counterparty, amount string, h int64, t time.Time, action, direction, denom string) {
+// pushLedger appends one structs.ledger row with the given counterparty
+// and source-event identity. Use pushLedgerNoCp for actions without a
+// counterparty (coinbase, burn).
+func pushLedger(buf *buffers.Buffer, id eventIdent, leg int, address, counterparty, amount string, h int64, t time.Time, action, direction, denom string) {
 	buf.Ledger = append(buf.Ledger, buffers.LedgerRow{
 		Address:      address,
 		Counterparty: counterparty,
@@ -120,11 +133,15 @@ func pushLedger(buf *buffers.Buffer, address, counterparty, amount string, h int
 		Action:       action,
 		Direction:    direction,
 		Denom:        denom,
+		ChainID:      id.ChainID,
+		TxIndex:      id.TxIndex,
+		MsgIndex:     -1,
+		EventIndex:   buffers.EncodeLedgerEventIndex(id.EventIndex, leg),
 	})
 }
 
-func pushLedgerNoCp(buf *buffers.Buffer, address, amount string, h int64, t time.Time, action, direction, denom string) {
-	pushLedger(buf, address, "", amount, h, t, action, direction, denom)
+func pushLedgerNoCp(buf *buffers.Buffer, id eventIdent, leg int, address, amount string, h int64, t time.Time, action, direction, denom string) {
+	pushLedger(buf, id, leg, address, "", amount, h, t, action, direction, denom)
 }
 
 // pushDefusion appends a structs.defusion row. completion is the raw
@@ -270,7 +287,7 @@ func isAlphaRefineTx(group []rpc.Event) bool {
 // Alpha refine txs are the mirror case: alphaRefineHandler already credits
 // the player via 'refined', so skip the recipient 'received' row but keep
 // 'sent' on the pool so minted+sent still net correctly there.
-func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, group []rpc.Event) error {
+func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event, group []rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
@@ -278,37 +295,37 @@ func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, gro
 	recipient := findAttr(ev, "recipient")
 	sender := findAttr(ev, "sender")
 	if isStructInfusionTx(group) {
-		pushLedger(buf, recipient, sender, amt, h, t, "received", "credit", denom)
+		pushLedger(buf, id, 0, recipient, sender, amt, h, t, "received", "credit", denom)
 		return nil
 	}
 	if isAlphaRefineTx(group) {
-		pushLedger(buf, sender, recipient, amt, h, t, "sent", "debit", denom)
+		pushLedger(buf, id, 0, sender, recipient, amt, h, t, "sent", "debit", denom)
 		return nil
 	}
-	pushLedger(buf, sender, recipient, amt, h, t, "sent", "debit", denom)
-	pushLedger(buf, recipient, sender, amt, h, t, "received", "credit", denom)
+	pushLedger(buf, id, 0, sender, recipient, amt, h, t, "sent", "debit", denom)
+	pushLedger(buf, id, 1, recipient, sender, amt, h, t, "received", "credit", denom)
 	return nil
 }
 
 // handleCoinbase ports the WHEN 'coinbase' branch (cache-system.sql:1454-1469).
 // 1 ledger row: minter 'minted' credit, no counterparty.
-func handleCoinbase(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+func handleCoinbase(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
-	pushLedgerNoCp(buf, findAttr(ev, "minter"), amt, h, t, "minted", "credit", denom)
+	pushLedgerNoCp(buf, id, 0, findAttr(ev, "minter"), amt, h, t, "minted", "credit", denom)
 	return nil
 }
 
 // handleBurn ports the WHEN 'burn' branch (cache-system.sql:1471-1486).
 // 1 ledger row: burner 'burned' debit, no counterparty.
-func handleBurn(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+func handleBurn(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
-	pushLedgerNoCp(buf, findAttr(ev, "burner"), amt, h, t, "burned", "debit", denom)
+	pushLedgerNoCp(buf, id, 0, findAttr(ev, "burner"), amt, h, t, "burned", "debit", denom)
 	return nil
 }
 
@@ -318,16 +335,16 @@ func handleBurn(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
 //  1. delegator (sender) debit '<denom>' (infused)
 //  2. delegator credit '<denom>.infused'
 //  3. validator (recipient) credit '<denom>.infused'
-func handleDelegate(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+func handleDelegate(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
 	validator := findAttr(ev, "validator")
 	delegator := findAttr(ev, "delegator")
-	pushLedger(buf, delegator, validator, amt, h, t, "infused", "debit", denom)
-	pushLedger(buf, delegator, validator, amt, h, t, "infused", "credit", denom+".infused")
-	pushLedger(buf, validator, delegator, amt, h, t, "infused", "credit", denom+".infused")
+	pushLedger(buf, id, 0, delegator, validator, amt, h, t, "infused", "debit", denom)
+	pushLedger(buf, id, 1, delegator, validator, amt, h, t, "infused", "credit", denom+".infused")
+	pushLedger(buf, id, 2, validator, delegator, amt, h, t, "infused", "credit", denom+".infused")
 	return nil
 }
 
@@ -345,7 +362,7 @@ func handleDelegate(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) err
 //  4. (delegator, dst_val, credit, <denom>.defusing)
 //
 // defusion row: (dst_val, delegator, 'r', amount, denom, completion_time, NOW()).
-func handleRedelegate(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, group []rpc.Event) error {
+func handleRedelegate(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event, group []rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
@@ -355,10 +372,10 @@ func handleRedelegate(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, g
 	delegator := findInGroup(group, "withdraw_rewards", "delegator")
 	completion := findAttr(ev, "completion_time")
 
-	pushLedger(buf, src, delegator, amt, h, t, "diversion_started", "debit", denom+".infused")
-	pushLedger(buf, delegator, src, amt, h, t, "diversion_started", "debit", denom+".infused")
-	pushLedger(buf, dst, delegator, amt, h, t, "diversion_started", "credit", denom+".defusing")
-	pushLedger(buf, delegator, dst, amt, h, t, "diversion_started", "credit", denom+".defusing")
+	pushLedger(buf, id, 0, src, delegator, amt, h, t, "diversion_started", "debit", denom+".infused")
+	pushLedger(buf, id, 1, delegator, src, amt, h, t, "diversion_started", "debit", denom+".infused")
+	pushLedger(buf, id, 2, dst, delegator, amt, h, t, "diversion_started", "credit", denom+".defusing")
+	pushLedger(buf, id, 3, delegator, dst, amt, h, t, "diversion_started", "credit", denom+".defusing")
 	if completion != "" {
 		if err := pushDefusion(buf, dst, delegator, "r", amt, denom, completion, t); err != nil {
 			return err
@@ -370,31 +387,31 @@ func handleRedelegate(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, g
 // handleCompleteRedelegation ports the WHEN 'complete_redelegation' branch
 // (cache-system.sql:1557-1583). 4 ledger rows: 2 'diversion_completed' debits
 // on '<denom>.defusing' + 2 'diversion_completed' credits on '<denom>.infused'.
-func handleCompleteRedelegation(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+func handleCompleteRedelegation(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
 	dst := findAttr(ev, "destination_validator")
 	delegator := findAttr(ev, "delegator")
-	pushLedger(buf, dst, delegator, amt, h, t, "diversion_completed", "debit", denom+".defusing")
-	pushLedger(buf, delegator, dst, amt, h, t, "diversion_completed", "debit", denom+".defusing")
-	pushLedger(buf, dst, delegator, amt, h, t, "diversion_completed", "credit", denom+".infused")
-	pushLedger(buf, delegator, dst, amt, h, t, "diversion_completed", "credit", denom+".infused")
+	pushLedger(buf, id, 0, dst, delegator, amt, h, t, "diversion_completed", "debit", denom+".defusing")
+	pushLedger(buf, id, 1, delegator, dst, amt, h, t, "diversion_completed", "debit", denom+".defusing")
+	pushLedger(buf, id, 2, dst, delegator, amt, h, t, "diversion_completed", "credit", denom+".infused")
+	pushLedger(buf, id, 3, delegator, dst, amt, h, t, "diversion_completed", "credit", denom+".infused")
 	return nil
 }
 
 // handleUnbond ports the WHEN 'unbond' branch (cache-system.sql:1585-1620).
 // 4 ledger 'defusion_started' rows + 1 defusion row (type 'u').
 //
-//	sender    = delegator (user)
-//	recipient = validator
+//		sender    = delegator (user)
+//		recipient = validator
 //
-//  1. (val, deleg, debit, <denom>.infused)
-//  2. (deleg, val, debit, <denom>.infused)
-//  3. (val, deleg, credit, <denom>.defusing)
-//  4. (deleg, val, credit, <denom>.defusing)
-func handleUnbond(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+//	 1. (val, deleg, debit, <denom>.infused)
+//	 2. (deleg, val, debit, <denom>.infused)
+//	 3. (val, deleg, credit, <denom>.defusing)
+//	 4. (deleg, val, credit, <denom>.defusing)
+func handleUnbond(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
@@ -403,10 +420,10 @@ func handleUnbond(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error
 	deleg := findAttr(ev, "delegator")
 	completion := findAttr(ev, "completion_time")
 
-	pushLedger(buf, val, deleg, amt, h, t, "defusion_started", "debit", denom+".infused")
-	pushLedger(buf, deleg, val, amt, h, t, "defusion_started", "debit", denom+".infused")
-	pushLedger(buf, val, deleg, amt, h, t, "defusion_started", "credit", denom+".defusing")
-	pushLedger(buf, deleg, val, amt, h, t, "defusion_started", "credit", denom+".defusing")
+	pushLedger(buf, id, 0, val, deleg, amt, h, t, "defusion_started", "debit", denom+".infused")
+	pushLedger(buf, id, 1, deleg, val, amt, h, t, "defusion_started", "debit", denom+".infused")
+	pushLedger(buf, id, 2, val, deleg, amt, h, t, "defusion_started", "credit", denom+".defusing")
+	pushLedger(buf, id, 3, deleg, val, amt, h, t, "defusion_started", "credit", denom+".defusing")
 	if completion != "" {
 		if err := pushDefusion(buf, val, deleg, "u", amt, denom, completion, t); err != nil {
 			return err
@@ -418,17 +435,17 @@ func handleUnbond(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error
 // handleCancelUnbond ports the WHEN 'cancel_unbond' branch
 // (cache-system.sql:1621-1645). 4 ledger 'defusion_cancelled' rows that
 // reverse handleUnbond's first four.
-func handleCancelUnbond(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+func handleCancelUnbond(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
 	val := findAttr(ev, "validator")
 	deleg := findAttr(ev, "delegator")
-	pushLedger(buf, val, deleg, amt, h, t, "defusion_cancelled", "debit", denom+".defusing")
-	pushLedger(buf, deleg, val, amt, h, t, "defusion_cancelled", "debit", denom+".defusing")
-	pushLedger(buf, val, deleg, amt, h, t, "defusion_cancelled", "credit", denom+".infused")
-	pushLedger(buf, deleg, val, amt, h, t, "defusion_cancelled", "credit", denom+".infused")
+	pushLedger(buf, id, 0, val, deleg, amt, h, t, "defusion_cancelled", "debit", denom+".defusing")
+	pushLedger(buf, id, 1, deleg, val, amt, h, t, "defusion_cancelled", "debit", denom+".defusing")
+	pushLedger(buf, id, 2, val, deleg, amt, h, t, "defusion_cancelled", "credit", denom+".infused")
+	pushLedger(buf, id, 3, deleg, val, amt, h, t, "defusion_cancelled", "credit", denom+".infused")
 	return nil
 }
 
@@ -438,29 +455,29 @@ func handleCancelUnbond(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event)
 //  1. (val, deleg, debit, <denom>.defusing)
 //  2. (deleg, val, debit, <denom>.defusing)
 //  3. (deleg, val, credit, <denom>)   ← back to base denom (delegator's wallet)
-func handleCompleteUnbonding(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event) error {
+func handleCompleteUnbonding(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
 	}
 	val := findAttr(ev, "validator")
 	deleg := findAttr(ev, "delegator")
-	pushLedger(buf, val, deleg, amt, h, t, "defusion_completed", "debit", denom+".defusing")
-	pushLedger(buf, deleg, val, amt, h, t, "defusion_completed", "debit", denom+".defusing")
-	pushLedger(buf, deleg, val, amt, h, t, "defusion_completed", "credit", denom)
+	pushLedger(buf, id, 0, val, deleg, amt, h, t, "defusion_completed", "debit", denom+".defusing")
+	pushLedger(buf, id, 1, deleg, val, amt, h, t, "defusion_completed", "debit", denom+".defusing")
+	pushLedger(buf, id, 2, deleg, val, amt, h, t, "defusion_completed", "credit", denom)
 	return nil
 }
 
 // handleCreateValidator ports the WHEN 'create_validator' branch
 // (cache-system.sql:1671-1699). 3 ledger rows for the initial self-delegation:
 //
-//	sender    = sibling coin_spent.spender (within same tx)
-//	recipient = create_validator.validator
+//		sender    = sibling coin_spent.spender (within same tx)
+//		recipient = create_validator.validator
 //
-//  1. (sender, val, debit, <denom>)
-//  2. (val, sender, credit, <denom>.infused)
-//  3. (sender, val, credit, <denom>.infused)
-func handleCreateValidator(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Event, group []rpc.Event) error {
+//	 1. (sender, val, debit, <denom>)
+//	 2. (val, sender, credit, <denom>.infused)
+//	 3. (sender, val, credit, <denom>.infused)
+func handleCreateValidator(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev rpc.Event, group []rpc.Event) error {
 	amt, denom, ok := findAmount(ev)
 	if !ok {
 		return nil
@@ -468,8 +485,8 @@ func handleCreateValidator(buf *buffers.Buffer, h int64, t time.Time, ev rpc.Eve
 	val := findAttr(ev, "validator")
 	spender := findInGroup(group, "coin_spent", "spender")
 
-	pushLedger(buf, spender, val, amt, h, t, "infused", "debit", denom)
-	pushLedger(buf, val, spender, amt, h, t, "infused", "credit", denom+".infused")
-	pushLedger(buf, spender, val, amt, h, t, "infused", "credit", denom+".infused")
+	pushLedger(buf, id, 0, spender, val, amt, h, t, "infused", "debit", denom)
+	pushLedger(buf, id, 1, val, spender, amt, h, t, "infused", "credit", denom+".infused")
+	pushLedger(buf, id, 2, spender, val, amt, h, t, "infused", "credit", denom+".infused")
 	return nil
 }

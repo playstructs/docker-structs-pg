@@ -42,6 +42,10 @@ services:
       - ${DIRECT_POSTGRES_PORT:-5432}:5432
     restart: on-failure
     stop_grace_period: 120s
+    # Parallel hash joins allocate DSM in /dev/shm. Docker's 64 MB default
+    # fails with "could not resize shared memory segment ... No space left
+    # on device". Keep max_parallel_workers_per_gather at 1 until this is set.
+    shm_size: 1gb
     deploy:
       resources:
         limits:

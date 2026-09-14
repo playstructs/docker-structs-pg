@@ -396,5 +396,6 @@ func (structTypeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 	if _, err := tx.Exec(ctx, structTypeUpsertSQL, args...); err != nil {
 		return fmt.Errorf("struct_type upsert id=%d: %w", p.ID.Int64(), err)
 	}
+	bctx.Dirty.StructType(p.ID.Int64())
 	return nil
 }

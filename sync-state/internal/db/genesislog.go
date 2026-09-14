@@ -14,13 +14,13 @@ import (
 // GenesisLogRow mirrors sync_state.genesis_log. Pointer-free since every
 // column is NOT NULL.
 type GenesisLogRow struct {
-	ChainID         string
-	AppliedAt       time.Time
-	Source          string
-	GenesisTime     time.Time
-	SHA256          string
-	RowsPerSection  map[string]int64
-	TotalRows       int64
+	ChainID        string
+	AppliedAt      time.Time
+	Source         string
+	GenesisTime    time.Time
+	SHA256         string
+	RowsPerSection map[string]int64
+	TotalRows      int64
 }
 
 // ReadGenesisLog returns the row for chainID, or (nil, nil) when no row
@@ -87,10 +87,11 @@ func WriteGenesisLog(ctx context.Context, tx pgx.Tx, row GenesisLogRow) error {
 // action='genesis'. Used by Apply for replay safety — re-running
 // init-genesis truncates the previous load before re-inserting.
 //
-// structs.ledger has no chain_id column (single-chain DB by design, see
-// `indexer-insert-genesis.sh` in docker-structsd which does the same),
-// so this is a global wipe of the genesis tag; safe because the
-// genesis_log row is the single source of truth for "is genesis applied?".
+// structs.ledger now carries a nullable source-event identity; genesis
+// rows populate it (chain_id, tx_index=-1, msg_index=-1, event_index
+// sequential) so they participate in the unique index. This DELETE is
+// still keyed on action='genesis' because that tag is the import's
+// idempotency unit.
 func DeleteGenesisLedgerRows(ctx context.Context, tx pgx.Tx) (int64, error) {
 	tag, err := tx.Exec(ctx, `DELETE FROM structs.ledger WHERE action = 'genesis'`)
 	if err != nil {

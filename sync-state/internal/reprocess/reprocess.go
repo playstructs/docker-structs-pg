@@ -229,14 +229,15 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 	}
 
 	dirty.Ledger(buf.Ledger)
-	if err := buf.Flush(ctx, tx); err != nil {
+	deltas, err := buf.Flush(ctx, tx)
+	if err != nil {
 		return nil, fmt.Errorf("flush buffer: %w", err)
 	}
 	cursor, err := db.ReadCursor(ctx, in.Pool, in.ChainID)
 	if err != nil {
 		return nil, fmt.Errorf("read cursor for projection refresh: %w", err)
 	}
-	if err := readmodel.Recompute(ctx, tx, dirty, cursor.LastHeight, cursor.LastBlockTime); err != nil {
+	if err := readmodel.Recompute(ctx, tx, dirty, cursor.LastHeight, cursor.LastBlockTime, readmodel.InventoryFromDeltas(deltas)); err != nil {
 		return nil, fmt.Errorf("recompute API projections: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

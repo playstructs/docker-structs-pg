@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"sync-state/internal/buffers"
 	"sync-state/internal/objecttype"
 )
 
@@ -18,6 +19,43 @@ var modelNames = []string{
 	"leaderboard_reactor",
 	"leaderboard_provider",
 	"leaderboard_substation",
+	"work",
+}
+
+type inventoryMode int
+
+const (
+	inventoryFromLedger inventoryMode = iota
+	inventoryFromDeltas
+	inventorySkip
+)
+
+// InventoryPlan selects how Recompute writes structs.api_inventory.
+type InventoryPlan struct {
+	mode   inventoryMode
+	deltas []buffers.LedgerDelta
+}
+
+// InventoryFromLedger rebuilds dirty address/player rows from a full
+// ledger aggregate. Used by tests and as a repair path.
+func InventoryFromLedger() InventoryPlan {
+	return InventoryPlan{mode: inventoryFromLedger}
+}
+
+// InventoryFromDeltas applies RETURNING deltas from the ledger insert
+// (replay-safe: ON CONFLICT returns nothing) then rebuilds dirty player
+// rows from address inventory.
+func InventoryFromDeltas(deltas []buffers.LedgerDelta) InventoryPlan {
+	if deltas == nil {
+		deltas = []buffers.LedgerDelta{}
+	}
+	return InventoryPlan{mode: inventoryFromDeltas, deltas: deltas}
+}
+
+// InventoryAlreadyWritten skips inventory (the caller ran the one-shot
+// backfill in the same transaction).
+func InventoryAlreadyWritten() InventoryPlan {
+	return InventoryPlan{mode: inventorySkip}
 }
 
 // ValidateSchema fails before ingest starts when structs-pg has not deployed
@@ -32,7 +70,7 @@ FROM unnest(ARRAY[
   'api_refresh_state','api_inventory','api_guild_bank',
   'api_leaderboard_player','api_leaderboard_guild',
   'api_leaderboard_reactor','api_leaderboard_provider',
-  'api_leaderboard_substation'
+  'api_leaderboard_substation','api_work'
 ]) AS wanted(name)
 WHERE to_regclass('structs.' || name) IS NULL`).Scan(&missing); err != nil {
 		return fmt.Errorf("validate api projection schema: %w", err)
@@ -40,6 +78,16 @@ WHERE to_regclass('structs.' || name) IS NULL`).Scan(&missing); err != nil {
 	if len(missing) != 0 {
 		return fmt.Errorf("structs-pg API projection migrations are incomplete; missing structs.%s",
 			strings.Join(missing, ", structs."))
+	}
+	var identCols int
+	if err := q.QueryRow(ctx, `
+SELECT COUNT(*) FROM information_schema.columns
+ WHERE table_schema = 'structs' AND table_name = 'ledger'
+   AND column_name IN ('chain_id','tx_index','msg_index','event_index')`).Scan(&identCols); err != nil {
+		return fmt.Errorf("validate ledger identity columns: %w", err)
+	}
+	if identCols != 4 {
+		return fmt.Errorf("structs-pg ledger source-event identity is incomplete; apply table-ledger-20260914-source-event-identity")
 	}
 	return nil
 }
@@ -69,6 +117,9 @@ func Expand(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 		return err
 	}
 	if err := expandGuildTokenHolders(ctx, tx, d); err != nil {
+		return err
+	}
+	if err := expandWorkDeps(ctx, tx, d); err != nil {
 		return err
 	}
 	return nil
@@ -161,23 +212,85 @@ WHERE owner_type = 'player'
 	return rows.Err()
 }
 
+func expandWorkDeps(ctx context.Context, tx pgx.Tx, d *Dirty) error {
+	if len(d.StructTypes) > 0 {
+		rows, err := tx.Query(ctx, `SELECT id FROM structs.struct WHERE type = ANY($1::bigint[])`, d.StructTypeIDs())
+		if err != nil {
+			return fmt.Errorf("expand dirty struct types: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			d.Struct(id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if len(d.PlayerOre) > 0 {
+		rows, err := tx.Query(ctx, `SELECT id FROM structs.struct WHERE owner = ANY($1::varchar[])`, d.PlayerOreIDs())
+		if err != nil {
+			return fmt.Errorf("expand dirty player ore: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			d.Struct(id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Recompute applies every model in dependency order and advances each model's
 // refresh state only after its write succeeds.
-func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTime any) error {
+func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTime any, inv InventoryPlan) error {
 	if err := Expand(ctx, tx, d); err != nil {
 		return err
+	}
+	switch inv.mode {
+	case inventorySkip:
+		// Caller already wrote api_inventory (one-shot backfill).
+	case inventoryFromDeltas:
+		if err := applyInventoryDeltas(ctx, tx, d, inv.deltas); err != nil {
+			return fmt.Errorf("inventory: %w", err)
+		}
+		if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
+			return fmt.Errorf("inventory refresh_state: %w", err)
+		}
+	default:
+		if err := recomputeInventory(ctx, tx, d); err != nil {
+			return fmt.Errorf("inventory: %w", err)
+		}
+		if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
+			return fmt.Errorf("inventory refresh_state: %w", err)
+		}
 	}
 	steps := []struct {
 		model string
 		fn    func(context.Context, pgx.Tx, *Dirty) error
 	}{
-		{"inventory", recomputeInventory},
 		{"guild_bank", recomputeGuildBank},
 		{"leaderboard_player", recomputePlayers},
 		{"leaderboard_guild", recomputeGuilds},
 		{"leaderboard_reactor", recomputeReactors},
 		{"leaderboard_provider", recomputeProviders},
 		{"leaderboard_substation", recomputeSubstations},
+		{"work", func(ctx context.Context, tx pgx.Tx, d *Dirty) error {
+			return recomputeWork(ctx, tx, d, height)
+		}},
 	}
 	for _, step := range steps {
 		if err := step.fn(ctx, tx, d); err != nil {
@@ -227,6 +340,73 @@ FROM structs.player_address pa
 JOIN structs.ledger l ON l.address = pa.address
 WHERE pa.player_id = ANY($1::varchar[])
 GROUP BY pa.player_id, l.denom`, players)
+	return err
+}
+
+func applyInventoryDeltas(ctx context.Context, tx pgx.Tx, d *Dirty, deltas []buffers.LedgerDelta) error {
+	if len(deltas) > 0 {
+		addrs := make([]string, len(deltas))
+		denoms := make([]string, len(deltas))
+		amounts := make([]string, len(deltas))
+		for i, delta := range deltas {
+			addrs[i] = delta.Address
+			denoms[i] = delta.Denom
+			amounts[i] = delta.Delta
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
+SELECT 'address'::structs.object_type, address, denom, SUM(delta)
+FROM unnest($1::varchar[], $2::varchar[], $3::numeric[]) AS t(address, denom, delta)
+WHERE address IS NOT NULL AND denom IS NOT NULL
+GROUP BY address, denom
+ON CONFLICT (owner_type, owner_id, denom)
+DO UPDATE SET balance = structs.api_inventory.balance + EXCLUDED.balance`,
+			addrs, denoms, amounts); err != nil {
+			return err
+		}
+	}
+	return rebuildPlayerInventory(ctx, tx, d.PlayerIDs())
+}
+
+func rebuildPlayerInventory(ctx context.Context, tx pgx.Tx, players []string) error {
+	if len(players) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+DELETE FROM structs.api_inventory
+WHERE owner_type = 'player' AND owner_id = ANY($1::varchar[])`, players); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
+SELECT 'player'::structs.object_type, pa.player_id, i.denom, SUM(i.balance)
+FROM structs.player_address pa
+JOIN structs.api_inventory i
+  ON i.owner_type = 'address' AND i.owner_id = pa.address
+WHERE pa.player_id = ANY($1::varchar[])
+GROUP BY pa.player_id, i.denom`, players)
+	return err
+}
+
+func recomputeWork(ctx context.Context, tx pgx.Tx, d *Dirty, height int64) error {
+	structs, planets := d.StructIDs(), d.PlanetIDs()
+	if len(structs) == 0 && len(planets) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+DELETE FROM structs.api_work
+ WHERE object_id = ANY($1::varchar[]) OR planet_id = ANY($2::varchar[])
+    OR target_id = ANY($2::varchar[])`, structs, planets); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+INSERT INTO structs.api_work (object_id, player_id, target_id, category,
+    block_start, difficulty_target, location_type, location_id, planet_id, source_height)
+SELECT w.object_id, w.player_id, w.target_id, w.category,
+       w.block_start, w.difficulty_target, w.location_type, w.location_id, w.planet_id, $3
+  FROM view.work w
+ WHERE w.object_id = ANY($1::varchar[]) OR w.planet_id = ANY($2::varchar[])
+    OR w.target_id = ANY($2::varchar[])`, structs, planets, height)
 	return err
 }
 

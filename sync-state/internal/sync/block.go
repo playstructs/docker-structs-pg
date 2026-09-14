@@ -115,7 +115,7 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 			Error:        fmt.Sprintf("savepoint begin: %v", bankErr),
 			Severity:     events.SeverityError,
 		})
-	} else if err := bank.ProcessBlock(ctx, bankSP, buf, bundle.Height, bundle.BlockTime, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
+	} else if err := bank.ProcessBlock(ctx, bankSP, buf, bundle.Height, bundle.BlockTime, bundle.ChainID, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
 		_ = bankSP.Rollback(ctx)
 		buf.Restore(bankBufSnap)
 		pendingErrs = append(pendingErrs, events.HandlerError{
@@ -132,10 +132,11 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 	}
 
 	dirty.Ledger(buf.Ledger)
-	if err := buf.Flush(ctx, tx); err != nil {
+	deltas, err := buf.Flush(ctx, tx)
+	if err != nil {
 		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
 	}
-	if err := readmodel.Recompute(ctx, tx, dirty, bundle.Height, bundle.BlockTime); err != nil {
+	if err := readmodel.Recompute(ctx, tx, dirty, bundle.Height, bundle.BlockTime, readmodel.InventoryFromDeltas(deltas)); err != nil {
 		return nil, fmt.Errorf("api projections h=%d: %w", bundle.Height, err)
 	}
 
@@ -264,11 +265,12 @@ func (s *Syncer) dispatchOneEvent(ctx context.Context, tx pgx.Tx, bctx events.Bl
 
 // encodeAttributeValue turns an attribute Value (always a string in the
 // CometBFT wire format) into a json.RawMessage. If the string already looks
-// like a JSON object/array, we pass it through; otherwise we wrap it as a
+// like JSON (object, array, or string — v0.21 scalar attributes arrive
+// JSON-string-encoded), we pass it through; otherwise we wrap it as a
 // JSON string literal.
 func encodeAttributeValue(v string) json.RawMessage {
 	t := stripWhitespace(v)
-	if len(t) > 0 && (t[0] == '{' || t[0] == '[') {
+	if len(t) > 0 && (t[0] == '{' || t[0] == '[' || t[0] == '"') && json.Valid([]byte(v)) {
 		return json.RawMessage(v)
 	}
 	enc, _ := json.Marshal(v)

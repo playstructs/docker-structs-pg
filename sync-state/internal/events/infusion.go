@@ -159,11 +159,10 @@ func emitInfusionLedger(ctx context.Context, tx pgx.Tx, bctx BlockContext, p pay
 		amount = new(big.Int).Sub(newFuel, prevFuel)
 	}
 
-	t := bctx.BlockTime.UTC()
 	amtStr := amount.String()
-	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
-		buffers.LedgerRow{Address: p.Address, Counterparty: p.DestinationID, AmountP: amtStr, BlockHeight: bctx.Height, Time: t, Action: "infused", Direction: "debit", Denom: "ualpha"},
-		buffers.LedgerRow{Address: p.Address, Counterparty: p.DestinationID, AmountP: amtStr, BlockHeight: bctx.Height, Time: t, Action: "infused", Direction: "credit", Denom: "ualpha.infused"},
+	appendLedger(bctx,
+		buffers.LedgerRow{Address: p.Address, Counterparty: p.DestinationID, AmountP: amtStr, Action: "infused", Direction: "debit", Denom: "ualpha"},
+		buffers.LedgerRow{Address: p.Address, Counterparty: p.DestinationID, AmountP: amtStr, Action: "infused", Direction: "credit", Denom: "ualpha.infused"},
 	)
 	_ = tx
 	return nil

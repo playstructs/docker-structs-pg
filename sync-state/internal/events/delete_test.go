@@ -15,6 +15,10 @@ func TestDecodeDeleteObjectID(t *testing.T) {
 		{"object", `{"objectId":"11-42"}`, "11-42"},
 		{"bare string", `"11-42"`, "11-42"},
 		{"wrapped object", `"{\"objectId\":\"11-42\"}"`, "11-42"},
+		// v0.21 encodes the scalar as a JSON string; encodeAttributeValue
+		// used to wrap that again, which is what handler_error_log stores.
+		{"json-string id", `"\"5-262312\""`, "5-262312"},
+		{"quoted id once", `"\"11-42\""`, "11-42"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

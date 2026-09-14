@@ -232,8 +232,10 @@ CREATE TABLE IF NOT EXISTS sync_state.unknown_event_log (
     last_payload       JSONB,
     PRIMARY KEY (chain_id, composite_key)
 );
-CREATE INDEX IF NOT EXISTS unknown_event_log_count_idx
-    ON sync_state.unknown_event_log (chain_id, count DESC);
+-- Do not index `count`: every increment would become a non-HOT update.
+-- structs-pg dropped unknown_event_log_count_idx; keep it dropped here so
+-- the doctor / bootstrap path cannot recreate it.
+DROP INDEX IF EXISTS sync_state.unknown_event_log_count_idx;
 
 -- ---------------------------------------------------------------------------
 -- sync_state.genesis_log
@@ -436,5 +438,4 @@ CREATE TABLE IF NOT EXISTS sync_state.genesis_log (
 --       ON sync_state.raw_attributes USING btree (chain_id, height);
 --   CREATE INDEX raw_events_height_idx
 --       ON sync_state.raw_events USING btree (chain_id, height);
---   CREATE INDEX unknown_event_log_count_idx
---       ON sync_state.unknown_event_log USING btree (chain_id, count DESC);
+--   unknown_event_log_count_idx was dropped (count updates were non-HOT).

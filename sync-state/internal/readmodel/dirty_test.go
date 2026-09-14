@@ -29,6 +29,7 @@ func TestModelOrder(t *testing.T) {
 	want := []string{
 		"inventory", "guild_bank", "leaderboard_player", "leaderboard_guild",
 		"leaderboard_reactor", "leaderboard_provider", "leaderboard_substation",
+		"work",
 	}
 	if len(modelNames) != len(want) {
 		t.Fatalf("modelNames=%v want %v", modelNames, want)

@@ -77,6 +77,7 @@ func (planetHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
 		return err
 	}
+	bctx.Dirty.Planet(p.ID)
 
 	if p.Name != "" {
 		if _, err := tx.Exec(ctx, planetNameUpdateSQL, p.ID, p.Name); err != nil {

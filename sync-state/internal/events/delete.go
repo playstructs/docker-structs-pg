@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -31,6 +32,11 @@ func (deleteHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	if err != nil {
 		return fmt.Errorf("%w: delete: %v", ErrSkipWithWarn, err)
 	}
+
+	// Structs are tombstones: EventDelete stamps is_destroyed and
+	// leaves the row so /api/struct/player/{id} can keep corpses
+	// through STRUCT_SWEEP_DELAY. Other types still delete.
+	keepPlayerObject := false
 
 	switch kind {
 	case objecttype.Agreement:
@@ -110,32 +116,54 @@ func (deleteHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 		if _, err := tx.Exec(ctx, `DELETE FROM structs.planet WHERE id = $1`, id); err != nil {
 			return fmt.Errorf("delete planet %s: %w", id, err)
 		}
+		bctx.Dirty.Planet(id)
 	case objecttype.Struct:
-		if _, err := tx.Exec(ctx, `DELETE FROM structs.struct WHERE id = $1`, id); err != nil {
-			return fmt.Errorf("delete struct %s: %w", id, err)
+		if _, err := tx.Exec(ctx, structDeleteTombstoneSQL, id, bctx.Height); err != nil {
+			return fmt.Errorf("tombstone struct %s: %w", id, err)
 		}
+		bctx.Dirty.Struct(id)
+		keepPlayerObject = true
 	case objecttype.Fleet:
+		var loc *string
+		if err := tx.QueryRow(ctx, `SELECT location_id FROM structs.fleet WHERE id = $1`, id).Scan(&loc); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("delete fleet location %s: %w", id, err)
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM structs.fleet WHERE id = $1`, id); err != nil {
 			return fmt.Errorf("delete fleet %s: %w", id, err)
+		}
+		if loc != nil {
+			bctx.Dirty.Planet(*loc)
 		}
 	default:
 		return fmt.Errorf("%w: delete: unsupported object type %s for %s", ErrSkipWithWarn, kind, id)
 	}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM structs.player_object WHERE object_id = $1`, id); err != nil {
-		return fmt.Errorf("delete player_object %s: %w", id, err)
+	if !keepPlayerObject {
+		if _, err := tx.Exec(ctx, `DELETE FROM structs.player_object WHERE object_id = $1`, id); err != nil {
+			return fmt.Errorf("delete player_object %s: %w", id, err)
+		}
 	}
 	return nil
 }
 
+// structDeleteTombstoneSQL marks the struct destroyed without removing
+// the row. destroyed_block stays if the status handler already stamped
+// the actual destroy height; EventDelete fills it only when missing.
+const structDeleteTombstoneSQL = `
+UPDATE structs.struct
+   SET is_destroyed    = TRUE,
+       destroyed_block = COALESCE(destroyed_block, $2)
+ WHERE id = $1`
+
 func decodeDeleteObjectID(raw json.RawMessage) (string, error) {
+	raw = payload.UnwrapJSONString(raw)
 	p, err := payload.Decode[payload.Delete](raw)
 	if err == nil && p.ObjectID != "" {
-		return p.ObjectID, nil
+		return strings.Trim(p.ObjectID, `"`), nil
 	}
 	var id string
 	if uerr := json.Unmarshal(raw, &id); uerr == nil && id != "" {
-		return id, nil
+		return strings.Trim(id, `"`), nil
 	}
 	if err != nil {
 		return "", err

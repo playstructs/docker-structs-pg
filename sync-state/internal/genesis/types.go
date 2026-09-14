@@ -19,10 +19,11 @@
 //     produces the negative-balance false alarms seen pre-port).
 //
 // Replay safety: Apply() first deletes every structs.ledger row with
-// action='genesis' and then re-inserts. Re-running init-genesis is
-// always safe; the genesis_log row gets ON CONFLICT-replaced too. The
-// table has no chain_id column (single-chain by design) so the wipe is
-// global per the same convention the shell script uses.
+// action='genesis' and then re-inserts with source-event identity
+// (chain_id, tx_index=-1, msg_index=-1, sequential event_index).
+// Re-running init-genesis is always safe; the genesis_log row gets
+// ON CONFLICT-replaced too. The wipe is still keyed on action='genesis'
+// (the import's idempotency unit), matching the shell script.
 package genesis
 
 import (

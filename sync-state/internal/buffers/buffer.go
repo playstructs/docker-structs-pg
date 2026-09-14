@@ -16,15 +16,45 @@ package buffers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
+// LedgerLegStride is the agreed event_index sub-sequence for multiple
+// ledger rows from one chain event. Stored event_index is
+// chainEventIndex*LedgerLegStride + leg. Max legs today is 4 (unbond /
+// redelegate / complete_redelegation); stride 8 leaves headroom without
+// colliding with the next chain event's encoded indexes.
+const LedgerLegStride = 8
+
+// EncodeLedgerEventIndex maps (chain event_index, leg) onto the unique
+// index column. Every writer — including single-row events at leg 0 —
+// must use this so ON CONFLICT is stable across replays.
+func EncodeLedgerEventIndex(chainEventIndex, leg int) int {
+	return chainEventIndex*LedgerLegStride + leg
+}
+
+// LedgerDelta is one newly-inserted ledger row's contribution to
+// structs.api_inventory. Replayed events (ON CONFLICT DO NOTHING) are
+// omitted, so applying these deltas is idempotent.
+type LedgerDelta struct {
+	Address string
+	Denom   string
+	Delta   string // signed NUMERIC text; credit positive, debit negative
+}
+
 // LedgerRow mirrors a structs.ledger insert. Counterparty may be empty;
 // callers should leave Counterparty as "" for the no-counterparty path
 // (coinbase, burn, ore_mine, alpha_refine) — flush emits NULL for that
 // column when the field is empty.
+//
+// ChainID/TxIndex/MsgIndex/EventIndex are the source-event identity
+// (table-ledger-20260914-source-event-identity). EventIndex must already
+// be EncodeLedgerEventIndex(chainEventIndex, leg). Time must be the
+// block time, never now().
 type LedgerRow struct {
 	Address      string
 	Counterparty string
@@ -34,6 +64,10 @@ type LedgerRow struct {
 	Action       string
 	Direction    string
 	Denom        string
+	ChainID      string
+	TxIndex      int
+	MsgIndex     int
+	EventIndex   int
 }
 
 // DefusionRow mirrors structs.defusion.
@@ -196,96 +230,101 @@ func (b *Buffer) Len() int {
 		len(b.StatStructHealth) + len(b.StatStructStatus)
 }
 
-// Flush emits one pgx.CopyFrom per non-empty buffered table inside tx.
+// Flush emits ledger rows via INSERT … ON CONFLICT DO NOTHING RETURNING
+// (so replay is idempotent and the caller can apply inventory deltas),
+// then one pgx.CopyFrom per remaining non-empty buffered table.
 // Order across tables is fixed (ledger, defusion, planet_activity,
 // stat_*) so any FK-style logical dependency lands deterministically;
 // row order within each table is preserved as appended.
 //
 // After a successful flush every slice is reset to zero length so the
 // buffer can be reused for the next block / window.
-func (b *Buffer) Flush(ctx context.Context, tx pgx.Tx) error {
+func (b *Buffer) Flush(ctx context.Context, tx pgx.Tx) ([]LedgerDelta, error) {
 	if b == nil {
-		return nil
+		return nil, nil
 	}
+	var deltas []LedgerDelta
 	if len(b.Ledger) > 0 {
-		if err := flushLedger(ctx, tx, b.Ledger); err != nil {
-			return err
+		var err error
+		deltas, err = flushLedger(ctx, tx, b.Ledger)
+		if err != nil {
+			return nil, err
 		}
 		b.Ledger = b.Ledger[:0]
 	}
 	if len(b.Defusion) > 0 {
 		if err := flushDefusion(ctx, tx, b.Defusion); err != nil {
-			return err
+			return nil, err
 		}
 		b.Defusion = b.Defusion[:0]
 	}
 	if len(b.PlanetActivity) > 0 {
 		if err := flushPlanetActivity(ctx, tx, b.PlanetActivity); err != nil {
-			return err
+			return nil, err
 		}
 		b.PlanetActivity = b.PlanetActivity[:0]
 	}
 	if len(b.StatOre) > 0 {
 		if err := flushStat(ctx, tx, "stat_ore", true, b.StatOre); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatOre = b.StatOre[:0]
 	}
 	if len(b.StatFuel) > 0 {
 		if err := flushStat(ctx, tx, "stat_fuel", true, b.StatFuel); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatFuel = b.StatFuel[:0]
 	}
 	if len(b.StatCapacity) > 0 {
 		if err := flushStat(ctx, tx, "stat_capacity", true, b.StatCapacity); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatCapacity = b.StatCapacity[:0]
 	}
 	if len(b.StatLoad) > 0 {
 		if err := flushStat(ctx, tx, "stat_load", true, b.StatLoad); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatLoad = b.StatLoad[:0]
 	}
 	if len(b.StatStructsLoad) > 0 {
 		if err := flushStat(ctx, tx, "stat_structs_load", false, b.StatStructsLoad); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatStructsLoad = b.StatStructsLoad[:0]
 	}
 	if len(b.StatPower) > 0 {
 		if err := flushStat(ctx, tx, "stat_power", true, b.StatPower); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatPower = b.StatPower[:0]
 	}
 	if len(b.StatConnectionCapacity) > 0 {
 		if err := flushStat(ctx, tx, "stat_connection_capacity", false, b.StatConnectionCapacity); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatConnectionCapacity = b.StatConnectionCapacity[:0]
 	}
 	if len(b.StatConnectionCount) > 0 {
 		if err := flushStat(ctx, tx, "stat_connection_count", false, b.StatConnectionCount); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatConnectionCount = b.StatConnectionCount[:0]
 	}
 	if len(b.StatStructHealth) > 0 {
 		if err := flushStat(ctx, tx, "stat_struct_health", false, b.StatStructHealth); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatStructHealth = b.StatStructHealth[:0]
 	}
 	if len(b.StatStructStatus) > 0 {
 		if err := flushStat(ctx, tx, "stat_struct_status", false, b.StatStructStatus); err != nil {
-			return err
+			return nil, err
 		}
 		b.StatStructStatus = b.StatStructStatus[:0]
 	}
-	return nil
+	return deltas, nil
 }
 
 // nullable returns *string when s is non-empty, else nil. Used by the
@@ -297,23 +336,70 @@ func nullable(s string) any {
 	return s
 }
 
-func flushLedger(ctx context.Context, tx pgx.Tx, rows []LedgerRow) error {
-	cols := []string{"address", "counterparty", "amount_p", "block_height", "time", "action", "direction", "denom"}
-	src := pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {
-		r := rows[i]
-		return []any{
+func flushLedger(ctx context.Context, tx pgx.Tx, rows []LedgerRow) ([]LedgerDelta, error) {
+	const batchSize = 500 // 12 params/row; stay well under PG's 65535 limit
+	out := make([]LedgerDelta, 0, len(rows))
+	for i := 0; i < len(rows); i += batchSize {
+		end := i + batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		deltas, err := flushLedgerBatch(ctx, tx, rows[i:end])
+		if err != nil {
+			return out, err
+		}
+		out = append(out, deltas...)
+	}
+	return out, nil
+}
+
+func flushLedgerBatch(ctx context.Context, tx pgx.Tx, rows []LedgerRow) ([]LedgerDelta, error) {
+	placeholders := make([]string, 0, len(rows))
+	args := make([]any, 0, len(rows)*12)
+	for _, r := range rows {
+		base := len(args)
+		placeholders = append(placeholders, fmt.Sprintf(
+			"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6,
+			base+7, base+8, base+9, base+10, base+11, base+12,
+		))
+		args = append(args,
+			r.Time,
 			r.Address,
 			nullable(r.Counterparty),
-			nullable(r.AmountP), // NUMERIC; empty → SQL NULL (legacy parity)
+			nullable(r.AmountP),
 			r.BlockHeight,
-			r.Time,
 			r.Action,
 			r.Direction,
 			r.Denom,
-		}, nil
-	})
-	_, err := tx.CopyFrom(ctx, pgx.Identifier{"structs", "ledger"}, cols, src)
-	return err
+			r.ChainID,
+			r.TxIndex,
+			r.MsgIndex,
+			r.EventIndex,
+		)
+	}
+	sql := `
+INSERT INTO structs.ledger
+    (time, address, counterparty, amount_p, block_height, action, direction, denom,
+     chain_id, tx_index, msg_index, event_index)
+VALUES ` + strings.Join(placeholders, ",") + `
+ON CONFLICT (time, chain_id, tx_index, msg_index, event_index) DO NOTHING
+RETURNING address, denom,
+          CASE direction WHEN 'credit' THEN amount_p ELSE -amount_p END::text AS delta`
+	qrows, err := tx.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer qrows.Close()
+	var deltas []LedgerDelta
+	for qrows.Next() {
+		var d LedgerDelta
+		if err := qrows.Scan(&d.Address, &d.Denom, &d.Delta); err != nil {
+			return nil, err
+		}
+		deltas = append(deltas, d)
+	}
+	return deltas, qrows.Err()
 }
 
 func flushDefusion(ctx context.Context, tx pgx.Tx, rows []DefusionRow) error {

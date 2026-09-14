@@ -735,6 +735,7 @@ var apiProjectionTables = []string{
 	"api_leaderboard_reactor",
 	"api_leaderboard_provider",
 	"api_leaderboard_substation",
+	"api_work",
 }
 
 // probeAPIProjectionSchema requires the Guild API current-state tables.

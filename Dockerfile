@@ -62,6 +62,7 @@ RUN  cat /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh && \
             postgresql-18-cron \
             timescaledb-2-postgresql-18 \
             postgresql \
+            postgresql-contrib \
             postgresql-client \
             postgresql-server-dev-all \
      	    sqitch \
@@ -91,7 +92,7 @@ COPY --from=sync-state-builder   /sync-state   /usr/local/bin/sync-state
 
 # Deploy Structs PG
 RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
-    sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'timescaledb,pg_cron'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    sed -i "s/^#shared_preload_libraries.*/shared_preload_libraries = 'timescaledb,pg_cron,pg_stat_statements'/g" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.database_name = 'structs'" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "cron.use_background_workers = on" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     echo "max_worker_processes = 20" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
@@ -106,6 +107,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     su - postgres -c 'createuser -s structs_crawler' && \
     su - postgres -c 'createuser -s structs_webapp' && \
     timescaledb-tune --quiet --yes && \
+    sed -i "s/^#\?shared_preload_libraries.*/shared_preload_libraries = 'timescaledb,pg_cron,pg_stat_statements'/" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     /etc/init.d/postgresql stop
 
 # Expose ports

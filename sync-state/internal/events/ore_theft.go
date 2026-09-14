@@ -34,10 +34,9 @@ func (oreTheftHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 		return fmt.Errorf("ore_theft: missing address (thief=%q victim=%q)", p.ThiefPrimaryAddress, p.VictimPrimaryAddress)
 	}
 	amt := p.Amount.String()
-	t := bctx.BlockTime.UTC()
-	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
-		buffers.LedgerRow{Address: p.ThiefPrimaryAddress, Counterparty: p.VictimPrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "seized", Direction: "credit", Denom: "ore"},
-		buffers.LedgerRow{Address: p.VictimPrimaryAddress, Counterparty: p.ThiefPrimaryAddress, AmountP: amt, BlockHeight: bctx.Height, Time: t, Action: "forfeited", Direction: "debit", Denom: "ore"},
+	appendLedger(bctx,
+		buffers.LedgerRow{Address: p.ThiefPrimaryAddress, Counterparty: p.VictimPrimaryAddress, AmountP: amt, Action: "seized", Direction: "credit", Denom: "ore"},
+		buffers.LedgerRow{Address: p.VictimPrimaryAddress, Counterparty: p.ThiefPrimaryAddress, AmountP: amt, Action: "forfeited", Direction: "debit", Denom: "ore"},
 	)
 	_ = tx
 	return nil

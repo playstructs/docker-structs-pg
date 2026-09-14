@@ -75,6 +75,21 @@ func TestJSONBoolFlexInputs(t *testing.T) {
 	}
 }
 
+func TestUnwrapJSONStringPeelsQuotedIDs(t *testing.T) {
+	cases := map[string]string{
+		`"5-262312"`:                 `"5-262312"`,
+		`"\"5-262312\""`:             `"5-262312"`,
+		`{"objectId":"11-42"}`:       `{"objectId":"11-42"}`,
+		`"{\"objectId\":\"11-42\"}"`: `{"objectId":"11-42"}`,
+	}
+	for in, want := range cases {
+		got := string(UnwrapJSONString(json.RawMessage(in)))
+		if got != want {
+			t.Errorf("%s: got %s want %s", in, got, want)
+		}
+	}
+}
+
 func TestDecodeUnwrapsStringWrappedJSON(t *testing.T) {
 	// Cosmos chain attribute "value" sometimes arrives as a JSON-encoded
 	// string. Decode should unwrap that.

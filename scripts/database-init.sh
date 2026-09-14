@@ -62,6 +62,7 @@ if ! postgres_acquire_datadir_lock; then
 fi
 
 postgres_apply_memory_settings
+postgres_apply_preload_libraries
 
 echo "Starting postgres for init..."
 postgres_start

@@ -567,6 +567,11 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stderr, "API projection backfill: height=%d rows=%v elapsed=%s\n",
 			report.Height, report.Rows, report.Elapsed.Round(time.Millisecond))
+	} else if n, derr := readmodel.ConsumeDriftOn(ctx, pool.Pool); derr != nil {
+		fmt.Fprintf(stderr, "ingest: consume api_inventory_drift: %v\n", derr)
+		return 1
+	} else if n > 0 {
+		fmt.Fprintf(stderr, "api_inventory_drift: repaired %d key(s) from latest reconciler batch\n", n)
 	}
 
 	// Player guild_rank reconciliation. Runs here — after the writer lock

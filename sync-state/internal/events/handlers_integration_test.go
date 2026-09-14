@@ -125,7 +125,7 @@ func flushBuf(t *testing.T, ctx context.Context, tx pgx.Tx, bc BlockContext) {
 	if bc.Buf == nil {
 		return
 	}
-	if err := bc.Buf.Flush(ctx, tx); err != nil {
+	if _, err := bc.Buf.Flush(ctx, tx); err != nil {
 		t.Fatalf("flush buffer: %v", err)
 	}
 }
@@ -144,7 +144,7 @@ func handle(t *testing.T, ctx context.Context, tx pgx.Tx, h Handler, bc BlockCon
 	if err := h.Handle(ctx, tx, bc, raw); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
-	if err := bc.Buf.Flush(ctx, tx); err != nil {
+	if _, err := bc.Buf.Flush(ctx, tx); err != nil {
 		t.Fatalf("flush buffer: %v", err)
 	}
 }
@@ -627,6 +627,57 @@ func TestHandler_Reactor(t *testing.T) {
 		_ = tx.QueryRow(ctx, `SELECT validator, default_commission FROM structs.reactor WHERE id=$1`, "test-r-1").Scan(&v, &comm)
 		if v != "structsvaloper1abc" || comm != 5 {
 			t.Errorf("reactor: validator=%q commission=%d", v, comm)
+		}
+	})
+}
+
+func TestHandler_DeleteStructKeepsTombstone(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		const structID = "5-990044"
+		if err := (structHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, map[string]any{
+			"id":             structID,
+			"index":          990044,
+			"type":           1,
+			"creator":        "creator",
+			"owner":          "1-1",
+			"locationType":   "planet",
+			"locationId":     "2-1",
+			"operatingAmbit": "LAND",
+			"slot":           1,
+		})); err != nil {
+			t.Fatalf("struct: %v", err)
+		}
+		bc := bctx()
+		bc.Height = 250
+		if err := (deleteHandler{}).Handle(ctx, tx, bc, mustJSON(t, map[string]any{"objectId": structID})); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		var n int
+		var destroyed bool
+		var destroyedBlock *int64
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*), bool_or(is_destroyed), max(destroyed_block)
+			   FROM structs.struct WHERE id=$1`, structID,
+		).Scan(&n, &destroyed, &destroyedBlock); err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("struct row count=%d want 1 (tombstone, not delete)", n)
+		}
+		if !destroyed {
+			t.Fatal("is_destroyed = false, want true")
+		}
+		if destroyedBlock == nil || *destroyedBlock != 250 {
+			t.Fatalf("destroyed_block=%v want 250", destroyedBlock)
+		}
+		_ = tx.QueryRow(ctx, `SELECT COUNT(*) FROM structs.player_object WHERE object_id=$1`, structID).Scan(&n)
+		if n != 1 {
+			t.Fatalf("player_object count=%d want 1", n)
+		}
+		if _, ok := bc.Dirty.Structs[structID]; !ok {
+			t.Fatalf("struct %s not marked dirty", structID)
 		}
 	})
 }

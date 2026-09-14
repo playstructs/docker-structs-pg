@@ -52,10 +52,9 @@ func (alphaRefineHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockConte
 		return fmt.Errorf("alpha_refine: amount %q is not a numeric for addr=%s", amtRaw, p.PrimaryAddress)
 	}
 	microAlpha := new(big.Int).Mul(amt, alphaRefineMicroFactor).String()
-	t := bctx.BlockTime.UTC()
-	bctx.Buf.Ledger = append(bctx.Buf.Ledger,
-		buffers.LedgerRow{Address: p.PrimaryAddress, AmountP: amtRaw, BlockHeight: bctx.Height, Time: t, Action: "refined", Direction: "debit", Denom: "ore"},
-		buffers.LedgerRow{Address: p.PrimaryAddress, AmountP: microAlpha, BlockHeight: bctx.Height, Time: t, Action: "refined", Direction: "credit", Denom: "ualpha"},
+	appendLedger(bctx,
+		buffers.LedgerRow{Address: p.PrimaryAddress, AmountP: amtRaw, Action: "refined", Direction: "debit", Denom: "ore"},
+		buffers.LedgerRow{Address: p.PrimaryAddress, AmountP: microAlpha, Action: "refined", Direction: "credit", Denom: "ualpha"},
 	)
 	_ = tx
 	return nil

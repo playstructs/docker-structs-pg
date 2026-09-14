@@ -14,6 +14,10 @@ type Dirty struct {
 	Providers   map[string]struct{}
 	Substations map[string]struct{}
 	GridObjects map[string]struct{}
+	Structs     map[string]struct{}
+	Planets     map[string]struct{}
+	StructTypes map[int64]struct{}
+	PlayerOre   map[string]struct{}
 }
 
 func NewDirty() *Dirty {
@@ -25,6 +29,10 @@ func NewDirty() *Dirty {
 		Providers:   map[string]struct{}{},
 		Substations: map[string]struct{}{},
 		GridObjects: map[string]struct{}{},
+		Structs:     map[string]struct{}{},
+		Planets:     map[string]struct{}{},
+		StructTypes: map[int64]struct{}{},
+		PlayerOre:   map[string]struct{}{},
 	}
 }
 
@@ -69,6 +77,26 @@ func (d *Dirty) GridObject(id string) {
 		add(d.GridObjects, id)
 	}
 }
+func (d *Dirty) Struct(id string) {
+	if d != nil {
+		add(d.Structs, id)
+	}
+}
+func (d *Dirty) Planet(id string) {
+	if d != nil {
+		add(d.Planets, id)
+	}
+}
+func (d *Dirty) StructType(id int64) {
+	if d != nil && id != 0 {
+		d.StructTypes[id] = struct{}{}
+	}
+}
+func (d *Dirty) PlayerOreID(id string) {
+	if d != nil {
+		add(d.PlayerOre, id)
+	}
+}
 
 // Ledger marks every address touched by buffered ledger rows and guilds whose
 // token supply changed. Call before Buffer.Flush resets the ledger slice.
@@ -96,6 +124,14 @@ func cloneSet(src map[string]struct{}) map[string]struct{} {
 	return dst
 }
 
+func cloneIntSet(src map[int64]struct{}) map[int64]struct{} {
+	dst := make(map[int64]struct{}, len(src))
+	for k := range src {
+		dst[k] = struct{}{}
+	}
+	return dst
+}
+
 func (d *Dirty) Snapshot() Snapshot {
 	if d == nil {
 		return Snapshot{}
@@ -105,6 +141,8 @@ func (d *Dirty) Snapshot() Snapshot {
 		Guilds: cloneSet(d.Guilds), Reactors: cloneSet(d.Reactors),
 		Providers: cloneSet(d.Providers), Substations: cloneSet(d.Substations),
 		GridObjects: cloneSet(d.GridObjects),
+		Structs:     cloneSet(d.Structs), Planets: cloneSet(d.Planets),
+		StructTypes: cloneIntSet(d.StructTypes), PlayerOre: cloneSet(d.PlayerOre),
 	}}
 }
 
@@ -130,3 +168,14 @@ func (d *Dirty) ReactorIDs() []string    { return keys(d.Reactors) }
 func (d *Dirty) ProviderIDs() []string   { return keys(d.Providers) }
 func (d *Dirty) SubstationIDs() []string { return keys(d.Substations) }
 func (d *Dirty) GridObjectIDs() []string { return keys(d.GridObjects) }
+func (d *Dirty) StructIDs() []string     { return keys(d.Structs) }
+func (d *Dirty) PlanetIDs() []string     { return keys(d.Planets) }
+func (d *Dirty) PlayerOreIDs() []string  { return keys(d.PlayerOre) }
+
+func (d *Dirty) StructTypeIDs() []int64 {
+	out := make([]int64, 0, len(d.StructTypes))
+	for k := range d.StructTypes {
+		out = append(out, k)
+	}
+	return out
+}

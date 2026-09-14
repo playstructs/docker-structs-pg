@@ -25,6 +25,7 @@ if ! postgres_acquire_datadir_lock; then
 fi
 
 postgres_apply_memory_settings
+postgres_apply_preload_libraries
 postgres_start
 
 pid="$(postgres_postmaster_pid)"

@@ -40,24 +40,35 @@ func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime 
 	if err := loadAllDirty(ctx, tx, d); err != nil {
 		return report, err
 	}
-	// Clearing first guarantees deletion of projections whose authoritative
-	// entities disappeared before this deployment.
 	for _, table := range []string{
 		"api_leaderboard_player", "api_leaderboard_guild",
 		"api_leaderboard_reactor", "api_leaderboard_provider",
-		"api_leaderboard_substation", "api_inventory", "api_guild_bank",
+		"api_leaderboard_substation", "api_guild_bank",
 	} {
 		if _, err := tx.Exec(ctx, "DELETE FROM structs."+table); err != nil {
 			return report, fmt.Errorf("clear %s: %w", table, err)
 		}
 	}
-	if err := Recompute(ctx, tx, d, height, sourceTime); err != nil {
+	if err := backfillInventory(ctx, tx); err != nil {
+		return report, err
+	}
+	if err := backfillWork(ctx, tx, height); err != nil {
+		return report, err
+	}
+	if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
+		return report, fmt.Errorf("inventory refresh_state: %w", err)
+	}
+	if err := refresh(ctx, tx, "work", height, sourceTime); err != nil {
+		return report, fmt.Errorf("work refresh_state: %w", err)
+	}
+	if err := Recompute(ctx, tx, d, height, sourceTime, InventoryAlreadyWritten()); err != nil {
 		return report, err
 	}
 	for _, table := range []string{
 		"api_inventory", "api_guild_bank", "api_leaderboard_player",
 		"api_leaderboard_guild", "api_leaderboard_reactor",
 		"api_leaderboard_provider", "api_leaderboard_substation",
+		"api_work",
 	} {
 		var n int64
 		if err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM structs."+table).Scan(&n); err != nil {
@@ -65,11 +76,56 @@ func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime 
 		}
 		report.Rows[table] = n
 	}
+	if n, err := ConsumeDrift(ctx, tx); err != nil {
+		return report, fmt.Errorf("consume inventory drift: %w", err)
+	} else {
+		report.Rows["api_inventory_drift_consumed"] = int64(n)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return report, fmt.Errorf("commit: %w", err)
 	}
 	report.Elapsed = time.Since(started)
 	return report, nil
+}
+
+func backfillInventory(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_inventory`); err != nil {
+		return fmt.Errorf("clear api_inventory: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
+SELECT 'address'::structs.object_type, address, denom,
+       SUM(CASE direction WHEN 'credit' THEN amount_p ELSE -amount_p END)
+  FROM structs.ledger
+ WHERE address IS NOT NULL AND denom IS NOT NULL
+ GROUP BY address, denom`); err != nil {
+		return fmt.Errorf("backfill address inventory: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
+SELECT 'player'::structs.object_type, pa.player_id, i.denom, SUM(i.balance)
+  FROM structs.api_inventory i
+  JOIN structs.player_address pa ON pa.address = i.owner_id
+ WHERE i.owner_type = 'address'
+ GROUP BY pa.player_id, i.denom`); err != nil {
+		return fmt.Errorf("backfill player inventory: %w", err)
+	}
+	return nil
+}
+
+func backfillWork(ctx context.Context, tx pgx.Tx, height int64) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_work`); err != nil {
+		return fmt.Errorf("clear api_work: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO structs.api_work (object_id, player_id, target_id, category,
+    block_start, difficulty_target, location_type, location_id, planet_id, source_height)
+SELECT object_id, player_id, target_id, category,
+       block_start, difficulty_target, location_type, location_id, planet_id, $1
+  FROM view.work`, height); err != nil {
+		return fmt.Errorf("backfill api_work: %w", err)
+	}
+	return nil
 }
 
 func loadAllDirty(ctx context.Context, tx pgx.Tx, d *Dirty) error {
