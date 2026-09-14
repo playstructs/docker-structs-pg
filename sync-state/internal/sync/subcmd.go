@@ -86,6 +86,9 @@ func Dispatch(ctx context.Context, cmd Subcommand, cfg Config, stdout, stderr io
 
 	case CmdReplay, CmdRewind, CmdInspect:
 		fmt.Fprintf(stderr, "subcommand %q is planned for a later phase; not implemented in this build\n", cmd)
+		if cmd == CmdRewind {
+			fmt.Fprintln(stderr, "when implemented, truncate structs.planet_activity_player in the same transaction as planet_activity (db.DeletePlanetActivityAfter); there is no FK between the hypertables")
+		}
 		return 2
 
 	default:

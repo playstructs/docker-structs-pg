@@ -420,6 +420,8 @@ func flushDefusion(ctx context.Context, tx pgx.Tx, rows []DefusionRow) error {
 	return err
 }
 
+// COPY FROM fires row triggers, including planet_activity_attribute
+// which writes structs.planet_activity_player in this same transaction.
 func flushPlanetActivity(ctx context.Context, tx pgx.Tx, rows []PlanetActivityRow) error {
 	cols := []string{"time", "seq", "planet_id", "category", "detail", "block_height"}
 	src := pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {

@@ -313,6 +313,18 @@ func Run(ctx context.Context, in Inputs) (*Report, error) {
 				r.Fatal = true
 			}
 		}
+		if c := probePlanetActivityAttribute(ctx, in.Pool); c != nil {
+			r.Checks = append(r.Checks, *c)
+			if c.Severity == FATAL {
+				r.Fatal = true
+			}
+		}
+		if c := probePlanetActivityPlayerLag(ctx, in.Pool); c != nil {
+			r.Checks = append(r.Checks, *c)
+			if c.Severity == FATAL {
+				r.Fatal = true
+			}
+		}
 
 		// 12. concurrent update-cache heuristic
 		if !in.SkipCacheConcurrent {
@@ -769,6 +781,106 @@ func probeAPIProjectionSchema(ctx context.Context, pool *pgxpool.Pool) *Check {
 		Name:     "api projection schema",
 		Severity: FATAL,
 		Detail:   fmt.Sprintf("missing %s — apply table-structs-api-read-20260820-current-state before ingest", strings.Join(missing, ", ")),
+	}
+}
+
+const planetActivityPlayerLagWarn = 5 * time.Minute
+
+// probePlanetActivityAttribute requires the 20260915 attribution trigger
+// to be present and enabled. Disabled (tgenabled='D') silently stops
+// planet_activity_player; COPY FROM still succeeds.
+func probePlanetActivityAttribute(ctx context.Context, pool *pgxpool.Pool) *Check {
+	var tableExists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'structs' AND tablename = 'planet_activity')`,
+	).Scan(&tableExists); err != nil || !tableExists {
+		return nil
+	}
+	var enabled string
+	err := pool.QueryRow(ctx, `
+		SELECT t.tgenabled::text
+		  FROM pg_trigger t
+		  JOIN pg_class  c ON c.oid = t.tgrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'structs'
+		   AND c.relname = 'planet_activity'
+		   AND t.tgname ILIKE 'planet_activity_attribute'
+		   AND NOT t.tgisinternal
+		 LIMIT 1`,
+	).Scan(&enabled)
+	if err != nil {
+		return &Check{
+			Name:     "planet_activity_attribute",
+			Severity: WARN,
+			Detail:   "trigger missing; apply the 20260915 activity-attribution sqitch changes (nightly reconciler logs missing rows until then)",
+		}
+	}
+	if enabled == "D" {
+		return &Check{
+			Name:     "planet_activity_attribute",
+			Severity: WARN,
+			Detail:   "trigger disabled (tgenabled=D); planet_activity_player will lag until ALTER TRIGGER planet_activity_attribute ENABLE",
+		}
+	}
+	return &Check{
+		Name:     "planet_activity_attribute",
+		Severity: OK,
+		Detail:   "enabled (COPY FROM attributes planet_activity_player in the same transaction)",
+	}
+}
+
+// probePlanetActivityPlayerLag compares max(time) on the parent log vs
+// the player side table. Same-transaction attribution keeps them in
+// lockstep; a gap of more than a few minutes means the trigger stopped
+// or a bulk load bypassed it.
+func probePlanetActivityPlayerLag(ctx context.Context, pool *pgxpool.Pool) *Check {
+	var sideExists bool
+	if err := pool.QueryRow(ctx,
+		`SELECT to_regclass('structs.planet_activity_player') IS NOT NULL`,
+	).Scan(&sideExists); err != nil || !sideExists {
+		return &Check{
+			Name:     "planet_activity_player lag",
+			Severity: WARN,
+			Detail:   "structs.planet_activity_player is missing; apply the 20260915 activity-attribution sqitch changes",
+		}
+	}
+	var parent, side *time.Time
+	if err := pool.QueryRow(ctx, `
+SELECT (SELECT max(time) FROM structs.planet_activity),
+       (SELECT max(time) FROM structs.planet_activity_player)`,
+	).Scan(&parent, &side); err != nil {
+		return &Check{
+			Name:     "planet_activity_player lag",
+			Severity: WARN,
+			Detail:   fmt.Sprintf("could not read max(time): %v", err),
+		}
+	}
+	if parent == nil {
+		return &Check{
+			Name:     "planet_activity_player lag",
+			Severity: OK,
+			Detail:   "planet_activity is empty",
+		}
+	}
+	if side == nil {
+		return &Check{
+			Name:     "planet_activity_player lag",
+			Severity: WARN,
+			Detail:   fmt.Sprintf("parent max(time)=%s but side table is empty — backfill with structs.planet_activity_player_backfill", parent.UTC().Format(time.RFC3339)),
+		}
+	}
+	lag := parent.Sub(*side)
+	if lag > planetActivityPlayerLagWarn {
+		return &Check{
+			Name:     "planet_activity_player lag",
+			Severity: WARN,
+			Detail:   fmt.Sprintf("side table is %s behind parent (parent=%s side=%s); trigger disabled or bulk load bypassed it", lag.Truncate(time.Second), parent.UTC().Format(time.RFC3339), side.UTC().Format(time.RFC3339)),
+		}
+	}
+	return &Check{
+		Name:     "planet_activity_player lag",
+		Severity: OK,
+		Detail:   fmt.Sprintf("side max(time) within %s of parent", planetActivityPlayerLagWarn),
 	}
 }
 

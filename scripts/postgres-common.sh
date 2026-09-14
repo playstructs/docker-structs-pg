@@ -149,3 +149,20 @@ EOF
   chown postgres:postgres "${dropin}"
   echo "preload libraries: timescaledb,pg_cron,pg_stat_statements (${dropin})"
 }
+
+# track_functions=pl so api_work_refresh, planet_activity_attribute,
+# stat_rollup_snapshot and the reconcilers show up in pg_stat_user_functions.
+# Reload-only GUC; a conf.d drop-in overrides an existing pgetc volume.
+postgres_apply_stats_settings() {
+  local confdir dropin
+  confdir="$(pg_conf_dir)"
+  dropin="${confdir}/conf.d/structs-stats.conf"
+  mkdir -p "${confdir}/conf.d"
+
+  cat >"${dropin}" <<EOF
+# Generated at container start. Procedural-language function stats only.
+track_functions = pl
+EOF
+  chown postgres:postgres "${dropin}"
+  echo "function tracking: pl (${dropin})"
+}

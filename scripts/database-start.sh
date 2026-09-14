@@ -26,6 +26,7 @@ fi
 
 postgres_apply_memory_settings
 postgres_apply_preload_libraries
+postgres_apply_stats_settings
 postgres_start
 
 pid="$(postgres_postmaster_pid)"

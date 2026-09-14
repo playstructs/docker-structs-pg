@@ -108,6 +108,7 @@ RUN sed -i "s/^#listen_addresses.*\=.*'localhost/listen_addresses = '\*/g" /etc/
     su - postgres -c 'createuser -s structs_webapp' && \
     timescaledb-tune --quiet --yes && \
     sed -i "s/^#\?shared_preload_libraries.*/shared_preload_libraries = 'timescaledb,pg_cron,pg_stat_statements'/" /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
+    echo "track_functions = pl" >> /etc/postgresql/$(ls /etc/postgresql/ | sort -r |head -1)/main/postgresql.conf && \
     /etc/init.d/postgresql stop
 
 # Expose ports

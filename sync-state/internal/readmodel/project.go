@@ -89,6 +89,13 @@ SELECT COUNT(*) FROM information_schema.columns
 	if identCols != 4 {
 		return fmt.Errorf("structs-pg ledger source-event identity is incomplete; apply table-ledger-20260914-source-event-identity")
 	}
+	var activityPlayer bool
+	if err := q.QueryRow(ctx, `SELECT to_regclass('structs.planet_activity_player') IS NOT NULL`).Scan(&activityPlayer); err != nil {
+		return fmt.Errorf("validate planet_activity_player: %w", err)
+	}
+	if !activityPlayer {
+		return fmt.Errorf("structs-pg planet_activity_player is missing; apply the 20260915 activity-attribution sqitch changes")
+	}
 	return nil
 }
 

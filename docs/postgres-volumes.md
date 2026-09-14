@@ -28,6 +28,6 @@ Until you migrate, keep both volumes paired.
 
 ## Memory tuning
 
-Set `POSTGRES_MEMORY_MB` (or `POSTGRES_SHARED_BUFFERS`) on `structs-pg` and `structs-pg-init` to match `deploy.resources.limits.memory`. The entrypoint writes `conf.d/structs-memory.conf` at start (~25% of `POSTGRES_MEMORY_MB` for `shared_buffers`) and `conf.d/structs-preload.conf` (`shared_preload_libraries = 'timescaledb,pg_cron,pg_stat_statements'`). Replacing the image is enough for an existing `pgetc` volume; the drop-in overrides the volume's `postgresql.conf` on the next start.
+Set `POSTGRES_MEMORY_MB` (or `POSTGRES_SHARED_BUFFERS`) on `structs-pg` and `structs-pg-init` to match `deploy.resources.limits.memory`. The entrypoint writes `conf.d/structs-memory.conf` at start (~25% of `POSTGRES_MEMORY_MB` for `shared_buffers`), `conf.d/structs-preload.conf` (`shared_preload_libraries = 'timescaledb,pg_cron,pg_stat_statements'`), and `conf.d/structs-stats.conf` (`track_functions = pl`). Replacing the image is enough for an existing `pgetc` volume; the drop-ins override the volume's `postgresql.conf` on the next start.
 
 Do not set `shared_buffers` far above the container memory limit; OOM kills during checkpoint are a common cause of invalid checkpoint records.
