@@ -125,11 +125,6 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	); err != nil {
 		return fmt.Errorf("planet_attribute upsert id=%s: %w", p.AttributeID, err)
 	}
-	switch attrType {
-	case planetAttrTypePlanetaryShield, planetAttrTypeBlockStartRaid,
-		planetAttrTypeBlockStartOreMine, planetAttrTypeBlockStartOreRefine:
-		bctx.Dirty.Planet(rawObjectID)
-	}
 
 	if err := emitPlanetAttributeActivity(ctx, tx, bctx, attrType, objTypeID, objIndex, oldVal, newVal); err != nil {
 		return fmt.Errorf("planet_attribute: emit planet_activity id=%s: %w", p.AttributeID, err)

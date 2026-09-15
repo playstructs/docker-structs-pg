@@ -49,7 +49,7 @@ UPDATE structs.planet
  WHERE id = $1
    AND name IS DISTINCT FROM $2`
 
-func (planetHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
+func (planetHandler) Handle(ctx context.Context, tx pgx.Tx, _ BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Planet](raw)
 	if err != nil {
 		return err
@@ -77,7 +77,6 @@ func (planetHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
 		return err
 	}
-	bctx.Dirty.Planet(p.ID)
 
 	if p.Name != "" {
 		if _, err := tx.Exec(ctx, planetNameUpdateSQL, p.ID, p.Name); err != nil {

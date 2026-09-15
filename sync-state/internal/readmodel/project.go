@@ -96,6 +96,18 @@ SELECT COUNT(*) FROM information_schema.columns
 	if !activityPlayer {
 		return fmt.Errorf("structs-pg planet_activity_player is missing; apply the 20260915 activity-attribution sqitch changes")
 	}
+	var workRefresh bool
+	if err := q.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'structs' AND p.proname = 'api_work_refresh'
+)`).Scan(&workRefresh); err != nil {
+		return fmt.Errorf("validate api_work_refresh: %w", err)
+	}
+	if !workRefresh {
+		return fmt.Errorf("structs.api_work_refresh is missing; apply the 20260914 api_work_refresh sqitch change")
+	}
 	return nil
 }
 
@@ -124,9 +136,6 @@ func Expand(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 		return err
 	}
 	if err := expandGuildTokenHolders(ctx, tx, d); err != nil {
-		return err
-	}
-	if err := expandWorkDeps(ctx, tx, d); err != nil {
 		return err
 	}
 	return nil
@@ -219,50 +228,11 @@ WHERE owner_type = 'player'
 	return rows.Err()
 }
 
-func expandWorkDeps(ctx context.Context, tx pgx.Tx, d *Dirty) error {
-	if len(d.StructTypes) > 0 {
-		rows, err := tx.Query(ctx, `SELECT id FROM structs.struct WHERE type = ANY($1::bigint[])`, d.StructTypeIDs())
-		if err != nil {
-			return fmt.Errorf("expand dirty struct types: %w", err)
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			d.Struct(id)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-	}
-	if len(d.PlayerOre) > 0 {
-		rows, err := tx.Query(ctx, `SELECT id FROM structs.struct WHERE owner = ANY($1::varchar[])`, d.PlayerOreIDs())
-		if err != nil {
-			return fmt.Errorf("expand dirty player ore: %w", err)
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			d.Struct(id)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Recompute applies every model in dependency order and advances each model's
-// refresh state only after its write succeeds.
+// Recompute applies every dirty-tracked model in dependency order and
+// advances each model's refresh state only after its write succeeds.
+// Work is not dirty-tracked: structs.api_work_refresh diffs against
+// view.work_live once per block and writes api_refresh_state for
+// model='work' itself.
 func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTime any, inv InventoryPlan) error {
 	if err := Expand(ctx, tx, d); err != nil {
 		return err
@@ -295,9 +265,6 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 		{"leaderboard_reactor", recomputeReactors},
 		{"leaderboard_provider", recomputeProviders},
 		{"leaderboard_substation", recomputeSubstations},
-		{"work", func(ctx context.Context, tx pgx.Tx, d *Dirty) error {
-			return recomputeWork(ctx, tx, d, height)
-		}},
 	}
 	for _, step := range steps {
 		if err := step.fn(ctx, tx, d); err != nil {
@@ -306,6 +273,9 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 		if err := refresh(ctx, tx, step.model, height, sourceTime); err != nil {
 			return fmt.Errorf("%s refresh_state: %w", step.model, err)
 		}
+	}
+	if err := refreshWork(ctx, tx, height, sourceTime); err != nil {
+		return err
 	}
 	return nil
 }
@@ -319,6 +289,17 @@ SET source_height = EXCLUDED.source_height,
     source_time = EXCLUDED.source_time,
     refreshed_at = EXCLUDED.refreshed_at`, model, height, sourceTime)
 	return err
+}
+
+func refreshWork(ctx context.Context, tx pgx.Tx, height int64, sourceTime any) error {
+	var inserted, updated, deleted int64
+	if err := tx.QueryRow(ctx, `
+SELECT inserted, updated, deleted
+  FROM structs.api_work_refresh($1::bigint, $2::timestamptz)`,
+		height, sourceTime).Scan(&inserted, &updated, &deleted); err != nil {
+		return fmt.Errorf("work: api_work_refresh: %w", err)
+	}
+	return nil
 }
 
 func recomputeInventory(ctx context.Context, tx pgx.Tx, d *Dirty) error {
@@ -392,28 +373,6 @@ JOIN structs.api_inventory i
   ON i.owner_type = 'address' AND i.owner_id = pa.address
 WHERE pa.player_id = ANY($1::varchar[])
 GROUP BY pa.player_id, i.denom`, players)
-	return err
-}
-
-func recomputeWork(ctx context.Context, tx pgx.Tx, d *Dirty, height int64) error {
-	structs, planets := d.StructIDs(), d.PlanetIDs()
-	if len(structs) == 0 && len(planets) == 0 {
-		return nil
-	}
-	if _, err := tx.Exec(ctx, `
-DELETE FROM structs.api_work
- WHERE object_id = ANY($1::varchar[]) OR planet_id = ANY($2::varchar[])
-    OR target_id = ANY($2::varchar[])`, structs, planets); err != nil {
-		return err
-	}
-	_, err := tx.Exec(ctx, `
-INSERT INTO structs.api_work (object_id, player_id, target_id, category,
-    block_start, difficulty_target, location_type, location_id, planet_id, source_height)
-SELECT w.object_id, w.player_id, w.target_id, w.category,
-       w.block_start, w.difficulty_target, w.location_type, w.location_id, w.planet_id, $3
-  FROM view.work w
- WHERE w.object_id = ANY($1::varchar[]) OR w.planet_id = ANY($2::varchar[])
-    OR w.target_id = ANY($2::varchar[])`, structs, planets, height)
 	return err
 }
 

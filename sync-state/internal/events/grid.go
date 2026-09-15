@@ -111,7 +111,6 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 				return fmt.Errorf("grid stat (delete branch) id=%s: %w", p.AttributeID, err)
 			}
 			bctx.Dirty.GridObject(strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex))
-			dirtyGridWork(bctx, subIdx, objTypeID, objIndex)
 		}
 		return nil
 	}
@@ -147,21 +146,8 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 			return fmt.Errorf("grid stat (upsert branch) id=%s: %w", p.AttributeID, err)
 		}
 		bctx.Dirty.GridObject(rawObjectID)
-		dirtyGridWork(bctx, subIdx, objTypeID, objIndex)
 	}
 	return nil
-}
-
-func dirtyGridWork(bctx BlockContext, subIdx, objTypeID, objIndex int) {
-	if subIdx != 0 {
-		return
-	}
-	switch objTypeID {
-	case int(objecttype.Planet):
-		bctx.Dirty.Planet(objecttype.Format(objecttype.Planet, objIndex))
-	case int(objecttype.Player):
-		bctx.Dirty.PlayerOreID(objecttype.Format(objecttype.Player, objIndex))
-	}
 }
 
 // errGridAttrMissingParts indicates the attributeId has one or more empty

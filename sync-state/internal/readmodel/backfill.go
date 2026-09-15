@@ -52,14 +52,8 @@ func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime 
 	if err := backfillInventory(ctx, tx); err != nil {
 		return report, err
 	}
-	if err := backfillWork(ctx, tx, height); err != nil {
-		return report, err
-	}
 	if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
 		return report, fmt.Errorf("inventory refresh_state: %w", err)
-	}
-	if err := refresh(ctx, tx, "work", height, sourceTime); err != nil {
-		return report, fmt.Errorf("work refresh_state: %w", err)
 	}
 	if err := Recompute(ctx, tx, d, height, sourceTime, InventoryAlreadyWritten()); err != nil {
 		return report, err
@@ -109,21 +103,6 @@ SELECT 'player'::structs.object_type, pa.player_id, i.denom, SUM(i.balance)
  WHERE i.owner_type = 'address'
  GROUP BY pa.player_id, i.denom`); err != nil {
 		return fmt.Errorf("backfill player inventory: %w", err)
-	}
-	return nil
-}
-
-func backfillWork(ctx context.Context, tx pgx.Tx, height int64) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_work`); err != nil {
-		return fmt.Errorf("clear api_work: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO structs.api_work (object_id, player_id, target_id, category,
-    block_start, difficulty_target, location_type, location_id, planet_id, source_height)
-SELECT object_id, player_id, target_id, category,
-       block_start, difficulty_target, location_type, location_id, planet_id, $1
-  FROM view.work`, height); err != nil {
-		return fmt.Errorf("backfill api_work: %w", err)
 	}
 	return nil
 }

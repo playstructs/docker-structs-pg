@@ -96,13 +96,6 @@ func (structHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
 		return err
 	}
-	bctx.Dirty.Struct(p.ID)
-	if p.LocationType == "planet" {
-		bctx.Dirty.Planet(p.LocationID)
-	}
-	if prevExists && prevLocType != nil && *prevLocType == "planet" && prevLocID != nil {
-		bctx.Dirty.Planet(*prevLocID)
-	}
 
 	if prevExists {
 		moved := strDiffer(prevLocID, p.LocationID) ||

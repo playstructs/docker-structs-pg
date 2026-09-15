@@ -676,9 +676,6 @@ func TestHandler_DeleteStructKeepsTombstone(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("player_object count=%d want 1", n)
 		}
-		if _, ok := bc.Dirty.Structs[structID]; !ok {
-			t.Fatalf("struct %s not marked dirty", structID)
-		}
 	})
 }
 

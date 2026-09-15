@@ -110,10 +110,6 @@ func (fleetHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, ra
 	if err := upsertPlayerObject(ctx, tx, p.ID, p.Owner); err != nil {
 		return err
 	}
-	bctx.Dirty.Planet(p.LocationID)
-	if prevExists {
-		bctx.Dirty.Planet(derefStr(prevLocID))
-	}
 
 	if prevExists {
 		prevLoc := derefStr(prevLocID)

@@ -116,23 +116,14 @@ func (deleteHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 		if _, err := tx.Exec(ctx, `DELETE FROM structs.planet WHERE id = $1`, id); err != nil {
 			return fmt.Errorf("delete planet %s: %w", id, err)
 		}
-		bctx.Dirty.Planet(id)
 	case objecttype.Struct:
 		if _, err := tx.Exec(ctx, structDeleteTombstoneSQL, id, bctx.Height); err != nil {
 			return fmt.Errorf("tombstone struct %s: %w", id, err)
 		}
-		bctx.Dirty.Struct(id)
 		keepPlayerObject = true
 	case objecttype.Fleet:
-		var loc *string
-		if err := tx.QueryRow(ctx, `SELECT location_id FROM structs.fleet WHERE id = $1`, id).Scan(&loc); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("delete fleet location %s: %w", id, err)
-		}
 		if _, err := tx.Exec(ctx, `DELETE FROM structs.fleet WHERE id = $1`, id); err != nil {
 			return fmt.Errorf("delete fleet %s: %w", id, err)
-		}
-		if loc != nil {
-			bctx.Dirty.Planet(*loc)
 		}
 	default:
 		return fmt.Errorf("%w: delete: unsupported object type %s for %s", ErrSkipWithWarn, kind, id)
