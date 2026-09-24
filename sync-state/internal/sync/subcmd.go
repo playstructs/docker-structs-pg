@@ -132,10 +132,10 @@ func runBootstrap(ctx context.Context, cfg Config, stderr io.Writer) int {
 	return 0
 }
 
-// runVerify wires the verify subcommand. Opens a pool (acquires the
-// writer lock so two verifiers don't fight an ingester on the same chain
-// — important for the planet_activity_seq queries which lock pages), then
-// hands off to verify.Run.
+// runVerify wires the verify subcommand. Verify only reads (plus its own
+// sync_state.verification_report rows), so it takes a verify-scoped
+// advisory lock rather than the ingest writer lock: two verifiers exclude
+// each other, but verify runs alongside a live ingester.
 func runVerify(ctx context.Context, cfg Config, stdout, stderr io.Writer) int {
 	client := rpc.NewClient(cfg.RPCURLs(), cfg.HTTPTimeout, cfg.HTTPMaxRetries)
 	if dep := cfg.RPCDeprecationNotice; dep != "" {
@@ -152,10 +152,10 @@ func runVerify(ctx context.Context, cfg Config, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "verify: rpc /status unavailable, falling back to cursor chain_id: %v\n", err)
 	}
 
-	pool, err := db.New(ctx, cfg.DatabaseURL, cfg.DBMaxConns, lockChainID(chainID, "verify"))
+	pool, err := db.New(ctx, cfg.DatabaseURL, cfg.DBMaxConns, "verify:"+lockChainID(chainID, "verify"))
 	if err != nil {
 		if errors.Is(err, db.ErrWriterLocked) {
-			fmt.Fprintf(stderr, "verify: %v (another sync-state owns the writer lock)\n", err)
+			fmt.Fprintf(stderr, "verify: %v (another verify is running)\n", err)
 		} else {
 			fmt.Fprintf(stderr, "verify: db connect: %v\n", err)
 		}
@@ -562,7 +562,12 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "ingest: inspect API projection backfill state: %v\n", berr)
 		return 1
 	}
-	if needed {
+	deferBackfill := needed && cfg.BulkEnabled && cfg.BulkDeferProjections &&
+		tip-indexedHeight >= int64(cfg.BulkLagThreshold)
+	if deferBackfill {
+		fmt.Fprintf(stderr, "API projection backfill deferred: %d blocks behind tip; api_* rebuilds once bulk catch-up completes.\n",
+			tip-indexedHeight)
+	} else if needed {
 		report, berr := readmodel.Backfill(ctx, pool.Pool, indexedHeight, indexedTime)
 		if berr != nil {
 			fmt.Fprintf(stderr, "ingest: API projection backfill: %v\n", berr)
@@ -651,6 +656,9 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		router.Count())
 
 	syncer := NewSyncer(cfg, client, pool, router, chainID)
+	if deferBackfill {
+		syncer.WithStaleProjections()
+	}
 
 	// Optional NewBlock WebSocket push. Reduces tip-detection latency
 	// from ~PollInterval to ~RTT. The notifier auto-reconnects and

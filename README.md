@@ -64,6 +64,10 @@ Environment variables (optional):
 |----------|---------|---------|
 | `POSTGRES_MEMORY_MB` | `8192` | Sets `shared_buffers` ≈ 25% via `conf.d/structs-memory.conf` |
 | `POSTGRES_SHARED_BUFFERS` | — | Overrides computed `shared_buffers` (e.g. `2048MB`) |
+| `POSTGRES_MAX_WAL_SIZE` | `8GB` | `max_wal_size` via `conf.d/structs-wal.conf`; pg_wal can grow to about this size on disk |
+| `POSTGRES_MIN_WAL_SIZE` | `1GB` | `min_wal_size` |
+| `POSTGRES_CHECKPOINT_TIMEOUT` | `15min` | `checkpoint_timeout` |
+| `POSTGRES_WAL_COMPRESSION` | `lz4` | `wal_compression` (`off`, `pglz`, `lz4`, `zstd`) |
 | `POSTGRES_SHUTDOWN_MODE` | `fast` | `pg_ctl stop -m` mode on shutdown |
 | `POSTGRES_SHUTDOWN_TIMEOUT` | `115` | Seconds to wait for stop before Docker SIGKILL |
 | `RUN_MIGRATIONS` | `0` | Set to `1` on init container to force `sqitch deploy` |

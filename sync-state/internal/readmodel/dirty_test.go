@@ -54,6 +54,48 @@ func TestDirtyNilSafe(t *testing.T) {
 	}
 }
 
+func TestDirtyMergeUnionsEverySet(t *testing.T) {
+	a := NewDirty()
+	a.Player("1-1")
+	a.Guild("0-1")
+	b := NewDirty()
+	b.Player("1-2")
+	b.Address("addr")
+	b.Reactor("3-1")
+	b.Provider("10-1")
+	b.Substation("4-1")
+	b.GridObject("1-2")
+	a.Merge(b)
+	a.Merge(nil)
+
+	for name, got := range map[string]int{
+		"players": len(a.Players), "guilds": len(a.Guilds), "addresses": len(a.Addresses),
+		"reactors": len(a.Reactors), "providers": len(a.Providers),
+		"substations": len(a.Substations), "grid": len(a.GridObjects),
+	} {
+		want := 1
+		if name == "players" {
+			want = 2
+		}
+		if got != want {
+			t.Fatalf("%s=%d want %d", name, got, want)
+		}
+	}
+}
+
+func TestInventoryPlayersDefaultsToPlayersBeforeExpand(t *testing.T) {
+	d := NewDirty()
+	d.Player("1-1")
+	if got := d.InventoryPlayerIDs(); len(got) != 1 || got[0] != "1-1" {
+		t.Fatalf("InventoryPlayerIDs=%v want [1-1]", got)
+	}
+	d.inventoryPlayers = map[string]struct{}{}
+	d.Player("1-2")
+	if got := d.InventoryPlayerIDs(); len(got) != 0 {
+		t.Fatalf("expanded InventoryPlayerIDs=%v want []", got)
+	}
+}
+
 func TestDirtyLedgerMarksAddressesAndGuildSupply(t *testing.T) {
 	d := NewDirty()
 	d.Ledger([]buffers.LedgerRow{

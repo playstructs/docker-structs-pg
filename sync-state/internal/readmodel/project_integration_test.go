@@ -3,6 +3,7 @@ package readmodel
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,8 +71,13 @@ func TestInventoryRecomputeIsReplaySafeAndCombinesAddresses(t *testing.T) {
 	integrationTx(t, func(ctx context.Context, tx pgx.Tx) {
 		var player string
 		err := tx.QueryRow(ctx, `
-SELECT player_id FROM structs.player_address
-GROUP BY player_id HAVING COUNT(*) > 1 LIMIT 1`).Scan(&player)
+SELECT pa.player_id FROM structs.player_address pa
+WHERE EXISTS (
+  SELECT 1 FROM structs.player_address o
+  JOIN structs.ledger l ON l.address = o.address AND l.denom = 'ualpha'
+  WHERE o.player_id = pa.player_id
+)
+GROUP BY pa.player_id HAVING COUNT(*) > 1 LIMIT 1`).Scan(&player)
 		if err == pgx.ErrNoRows {
 			t.Skip("fixture has no player with multiple addresses")
 		}
@@ -263,13 +269,13 @@ WHERE guild_id=$1 AND denom='uguild.' || $1`, guild).Scan(&supply, &ratio); err 
 func seedIsolatedPlayer(t *testing.T, ctx context.Context, tx pgx.Tx, id, username, guildID, substationID string) {
 	t.Helper()
 	if _, err := tx.Exec(ctx, `
-INSERT INTO structs.player (id, index, username, guild_id, substation_id, created_at, updated_at)
-VALUES ($1, $2, $3, NULLIF($4,''), NULLIF($5,''), NOW(), NOW())
+INSERT INTO structs.player (id, index, username, guild_id, substation_id, primary_address, created_at, updated_at)
+VALUES ($1, $2, $3, NULLIF($4,''), NULLIF($5,''), $6, NOW(), NOW())
 ON CONFLICT (id) DO UPDATE
 SET username = EXCLUDED.username,
     guild_id = EXCLUDED.guild_id,
     substation_id = EXCLUDED.substation_id`,
-		id, 0, username, guildID, substationID); err != nil {
+		id, 0, username, guildID, substationID, "structs1isoprimary"+strings.ReplaceAll(id, "-", "")); err != nil {
 		t.Fatalf("seed player %s: %v", id, err)
 	}
 }

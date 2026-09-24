@@ -113,10 +113,16 @@ SELECT EXISTS (
 
 // Expand resolves transitive read-model dependencies after all authoritative
 // handlers have run. It deliberately over-dirties rather than risk stale rows.
+//
+// Only players marked directly by handlers or owning a dirty address can have
+// different api_inventory rows; players reached through grid objects, guild
+// membership or guild-token holdings only need their leaderboard rows
+// recomputed. Expand records the former set for InventoryPlayerIDs.
 func Expand(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	if d == nil {
 		return nil
 	}
+	d.inventoryPlayers = cloneSet(d.Players)
 	if err := expandAddresses(ctx, tx, d); err != nil {
 		return err
 	}
@@ -166,6 +172,7 @@ LEFT JOIN structs.address_tag gt
 		}
 		if player != nil {
 			d.Player(*player)
+			add(d.inventoryPlayers, *player)
 		}
 		if guild != nil {
 			d.Guild(*guild)
@@ -175,6 +182,9 @@ LEFT JOIN structs.address_tag gt
 }
 
 func expandPlayers(ctx context.Context, tx pgx.Tx, d *Dirty) error {
+	if len(d.Players) == 0 && len(d.Guilds) == 0 && len(d.Substations) == 0 {
+		return nil
+	}
 	rows, err := tx.Query(ctx, `
 SELECT id, guild_id, substation_id
 FROM structs.player
@@ -237,6 +247,7 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 	if err := Expand(ctx, tx, d); err != nil {
 		return err
 	}
+	refreshed := make([]string, 0, len(modelNames))
 	switch inv.mode {
 	case inventorySkip:
 		// Caller already wrote api_inventory (one-shot backfill).
@@ -244,16 +255,12 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 		if err := applyInventoryDeltas(ctx, tx, d, inv.deltas); err != nil {
 			return fmt.Errorf("inventory: %w", err)
 		}
-		if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
-			return fmt.Errorf("inventory refresh_state: %w", err)
-		}
+		refreshed = append(refreshed, "inventory")
 	default:
 		if err := recomputeInventory(ctx, tx, d); err != nil {
 			return fmt.Errorf("inventory: %w", err)
 		}
-		if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
-			return fmt.Errorf("inventory refresh_state: %w", err)
-		}
+		refreshed = append(refreshed, "inventory")
 	}
 	steps := []struct {
 		model string
@@ -270,9 +277,12 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 		if err := step.fn(ctx, tx, d); err != nil {
 			return fmt.Errorf("%s: %w", step.model, err)
 		}
-		if err := refresh(ctx, tx, step.model, height, sourceTime); err != nil {
-			return fmt.Errorf("%s refresh_state: %w", step.model, err)
-		}
+		refreshed = append(refreshed, step.model)
+	}
+	// Every write above shares this transaction, so one stamp after the
+	// last step is equivalent to stamping each model as it finishes.
+	if err := refreshModels(ctx, tx, refreshed, height, sourceTime); err != nil {
+		return fmt.Errorf("refresh_state: %w", err)
 	}
 	if err := refreshWork(ctx, tx, height, sourceTime); err != nil {
 		return err
@@ -281,13 +291,20 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 }
 
 func refresh(ctx context.Context, tx pgx.Tx, model string, height int64, sourceTime any) error {
+	return refreshModels(ctx, tx, []string{model}, height, sourceTime)
+}
+
+func refreshModels(ctx context.Context, tx pgx.Tx, models []string, height int64, sourceTime any) error {
+	if len(models) == 0 {
+		return nil
+	}
 	_, err := tx.Exec(ctx, `
 INSERT INTO structs.api_refresh_state(model, source_height, source_time, refreshed_at)
-VALUES ($1, $2, $3, NOW())
+SELECT m, $2::bigint, $3::timestamptz, NOW() FROM unnest($1::text[]) AS m
 ON CONFLICT (model) DO UPDATE
 SET source_height = EXCLUDED.source_height,
     source_time = EXCLUDED.source_time,
-    refreshed_at = EXCLUDED.refreshed_at`, model, height, sourceTime)
+    refreshed_at = EXCLUDED.refreshed_at`, models, height, sourceTime)
 	return err
 }
 
@@ -303,7 +320,10 @@ SELECT inserted, updated, deleted
 }
 
 func recomputeInventory(ctx context.Context, tx pgx.Tx, d *Dirty) error {
-	addresses, players := d.AddressIDs(), d.PlayerIDs()
+	addresses, players := d.AddressIDs(), d.InventoryPlayerIDs()
+	if len(addresses) == 0 && len(players) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `
 DELETE FROM structs.api_inventory
 WHERE (owner_type = 'address' AND owner_id = ANY($1::varchar[]))
@@ -353,31 +373,44 @@ DO UPDATE SET balance = structs.api_inventory.balance + EXCLUDED.balance`,
 			return err
 		}
 	}
-	return rebuildPlayerInventory(ctx, tx, d.PlayerIDs())
+	return rebuildPlayerInventory(ctx, tx, d.InventoryPlayerIDs())
 }
 
+// rebuildPlayerInventory rewrites only the player rows whose balance actually
+// changed, so unchanged rows produce no dead tuples or WAL. The DELETE and the
+// upsert touch disjoint rows (denoms absent vs present in fresh).
 func rebuildPlayerInventory(ctx context.Context, tx pgx.Tx, players []string) error {
 	if len(players) == 0 {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `
-DELETE FROM structs.api_inventory
-WHERE owner_type = 'player' AND owner_id = ANY($1::varchar[])`, players); err != nil {
-		return err
-	}
 	_, err := tx.Exec(ctx, `
+WITH fresh AS (
+  SELECT pa.player_id, i.denom, SUM(i.balance) AS balance
+  FROM structs.player_address pa
+  JOIN structs.api_inventory i
+    ON i.owner_type = 'address' AND i.owner_id = pa.address
+  WHERE pa.player_id = ANY($1::varchar[])
+  GROUP BY pa.player_id, i.denom
+), stale AS (
+  DELETE FROM structs.api_inventory a
+  WHERE a.owner_type = 'player' AND a.owner_id = ANY($1::varchar[])
+    AND NOT EXISTS (
+      SELECT 1 FROM fresh f WHERE f.player_id = a.owner_id AND f.denom = a.denom
+    )
+)
 INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
-SELECT 'player'::structs.object_type, pa.player_id, i.denom, SUM(i.balance)
-FROM structs.player_address pa
-JOIN structs.api_inventory i
-  ON i.owner_type = 'address' AND i.owner_id = pa.address
-WHERE pa.player_id = ANY($1::varchar[])
-GROUP BY pa.player_id, i.denom`, players)
+SELECT 'player'::structs.object_type, player_id, denom, balance FROM fresh
+ON CONFLICT (owner_type, owner_id, denom) DO UPDATE
+SET balance = EXCLUDED.balance
+WHERE structs.api_inventory.balance IS DISTINCT FROM EXCLUDED.balance`, players)
 	return err
 }
 
 func recomputeGuildBank(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	ids := d.GuildIDs()
+	if len(ids) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_guild_bank WHERE guild_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
@@ -402,13 +435,22 @@ WHERE g.id = ANY($1::varchar[])`, ids)
 	return err
 }
 
+// recomputePlayers upserts only changed rows (guild-token fan-out dirties
+// many players whose values did not move) and deletes rows for dirty ids
+// that no longer exist in structs.player.
 func recomputePlayers(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	ids := d.PlayerIDs()
-	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_player WHERE player_id = ANY($1::varchar[])`, ids); err != nil {
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+DELETE FROM structs.api_leaderboard_player a
+WHERE a.player_id = ANY($1::varchar[])
+  AND NOT EXISTS (SELECT 1 FROM structs.player p WHERE p.id = a.player_id)`, ids); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `
-INSERT INTO structs.api_leaderboard_player(player_id, username, guild_id, alpha_balance, alpha_value)
+INSERT INTO structs.api_leaderboard_player AS a (player_id, username, guild_id, alpha_balance, alpha_value)
 SELECT p.id, p.username, p.guild_id,
        COALESCE(SUM(i.balance) FILTER (WHERE i.denom = 'ualpha'), 0),
        CASE
@@ -427,7 +469,15 @@ LEFT JOIN structs.api_inventory i
   ON i.owner_type = 'player' AND i.owner_id = p.id
 LEFT JOIN structs.api_guild_bank gb ON gb.denom = i.denom
 WHERE p.id = ANY($1::varchar[])
-GROUP BY p.id, p.username, p.guild_id`, ids)
+GROUP BY p.id, p.username, p.guild_id
+ON CONFLICT (player_id) DO UPDATE
+SET username = EXCLUDED.username,
+    guild_id = EXCLUDED.guild_id,
+    alpha_balance = EXCLUDED.alpha_balance,
+    alpha_value = EXCLUDED.alpha_value
+WHERE (a.username, a.guild_id, a.alpha_balance, a.alpha_value)
+      IS DISTINCT FROM
+      (EXCLUDED.username, EXCLUDED.guild_id, EXCLUDED.alpha_balance, EXCLUDED.alpha_value)`, ids)
 	return err
 }
 
@@ -452,6 +502,9 @@ substation_metric AS (
 
 func recomputeGuilds(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	ids := d.GuildIDs()
+	if len(ids) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_guild WHERE guild_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
@@ -481,6 +534,9 @@ GROUP BY g.id, gm.name, g.name, gb.collateral, gb.supply`, ids)
 
 func recomputeReactors(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	ids := d.ReactorIDs()
+	if len(ids) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_reactor WHERE reactor_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
@@ -497,6 +553,9 @@ GROUP BY r.id`, ids)
 
 func recomputeProviders(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	ids := d.ProviderIDs()
+	if len(ids) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_provider WHERE provider_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
@@ -512,6 +571,9 @@ GROUP BY p.id, p.owner, p.rate_amount, p.rate_denom`, ids)
 
 func recomputeSubstations(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	ids := d.SubstationIDs()
+	if len(ids) == 0 {
+		return nil
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_substation WHERE substation_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}

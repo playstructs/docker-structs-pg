@@ -128,6 +128,14 @@ type Config struct {
 	BulkWindow           int
 	BulkLagThreshold     int
 	BulkStatementTimeout time.Duration
+	// BulkAsyncCommit sets synchronous_commit=off on bulk window
+	// transactions. Safe because the cursor commits with the window.
+	BulkAsyncCommit bool
+	// BulkDeferProjections skips the api_* projection recompute in bulk
+	// windows and rebuilds every projection once when ingest leaves bulk
+	// mode. The projections are current-state only, so nothing historical
+	// depends on them being refreshed mid-catch-up.
+	BulkDeferProjections bool
 }
 
 // LoadConfig parses CLI flags and env vars. Flag defaults are pulled from env
@@ -225,6 +233,14 @@ func LoadConfig(args []string) Config {
 		"ingest: switch to bulk mode when tip - cursor >= this many blocks")
 	fs.DurationVar(&cfg.BulkStatementTimeout, "bulk-statement-timeout", envOrDuration("SYNC_STATE_BULK_STATEMENT_TIMEOUT", 5*time.Minute),
 		"ingest: SET LOCAL statement_timeout for bulk outer transactions (default 5m)")
+	fs.BoolVar(&cfg.BulkAsyncCommit, "bulk-async-commit", envOrBool("SYNC_STATE_BULK_ASYNC_COMMIT", true),
+		"ingest: SET LOCAL synchronous_commit=off for bulk outer transactions. A crash "+
+			"loses at most the last few windows, which replay from sync_cursor (it commits "+
+			"in the same transaction). Streaming mode at tip is unaffected.")
+	fs.BoolVar(&cfg.BulkDeferProjections, "bulk-defer-projections", envOrBool("SYNC_STATE_BULK_DEFER_PROJECTIONS", true),
+		"ingest: skip api_* projection recompute during bulk catch-up and rebuild them all "+
+			"once before streaming resumes. api_* tables (leaderboards, inventory, guild bank, "+
+			"work) stay frozen until catch-up completes. false = recompute once per bulk window.")
 
 	// reprocess-errors
 	fs.StringVar(&cfg.ReprocessCompositeKey, "composite-key", "",

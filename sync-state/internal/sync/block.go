@@ -131,12 +131,18 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		})
 	}
 
+	// The buffer still flushes per block: the planet_activity COPY trigger
+	// attributes rows using object ownership at flush time.
 	dirty.Ledger(buf.Ledger)
 	deltas, err := buf.Flush(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
 	}
-	if err := readmodel.Recompute(ctx, tx, dirty, bundle.Height, bundle.BlockTime, readmodel.InventoryFromDeltas(deltas)); err != nil {
+	res := &blockApplyResult{}
+	if opts.DeferProjections {
+		res.Dirty = dirty
+		res.LedgerDeltas = deltas
+	} else if err := readmodel.Recompute(ctx, tx, dirty, bundle.Height, bundle.BlockTime, readmodel.InventoryFromDeltas(deltas)); err != nil {
 		return nil, fmt.Errorf("api projections h=%d: %w", bundle.Height, err)
 	}
 
@@ -197,7 +203,8 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		}
 	}
 
-	return &blockApplyResult{PendingErrors: pendingErrs}, nil
+	res.PendingErrors = pendingErrs
+	return res, nil
 }
 
 // dispatchEvents walks finalize_block + per-tx events in deterministic order

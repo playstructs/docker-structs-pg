@@ -64,6 +64,7 @@ fi
 postgres_apply_memory_settings
 postgres_apply_preload_libraries
 postgres_apply_stats_settings
+postgres_apply_wal_settings
 
 echo "Starting postgres for init..."
 postgres_start

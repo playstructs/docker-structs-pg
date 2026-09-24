@@ -32,6 +32,8 @@ Bulk mode is **automatic** during catch-up:
 | `-bulk-window` | `SYNC_STATE_BULK_WINDOW` | `100` | Blocks per outer tx |
 | `-bulk-lag-threshold` | `SYNC_STATE_BULK_LAG_THRESHOLD` | `50` | Min lag to enter bulk |
 | `-bulk-statement-timeout` | `SYNC_STATE_BULK_STATEMENT_TIMEOUT` | `5m` | Outer tx statement timeout |
+| `-bulk-async-commit` | `SYNC_STATE_BULK_ASYNC_COMMIT` | `true` | `synchronous_commit=off` on bulk windows |
+| `-bulk-defer-projections` | `SYNC_STATE_BULK_DEFER_PROJECTIONS` | `true` | Skip `api_*` recompute during catch-up; rebuild all once before streaming resumes (`false` = once per window) |
 
 `-batch` still controls RPC fetch parallelism. When bulk is active, the apply
 window is capped at `-bulk-window`.

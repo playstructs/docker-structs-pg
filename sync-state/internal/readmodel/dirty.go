@@ -16,6 +16,12 @@ type Dirty struct {
 	Providers   map[string]struct{}
 	Substations map[string]struct{}
 	GridObjects map[string]struct{}
+
+	// inventoryPlayers is the subset of Players whose api_inventory rows
+	// can have changed: players marked directly by handlers plus owners of
+	// dirty addresses. Expand fills it; nil means "not expanded yet", and
+	// InventoryPlayerIDs falls back to Players.
+	inventoryPlayers map[string]struct{}
 }
 
 func NewDirty() *Dirty {
@@ -117,6 +123,24 @@ func (d *Dirty) Restore(s Snapshot) {
 	*d = *s.value
 }
 
+// Merge unions other's handler-marked entities into d. Only valid before
+// Expand: the expansion-derived inventory set is not carried over.
+func (d *Dirty) Merge(other *Dirty) {
+	if d == nil || other == nil {
+		return
+	}
+	for _, pair := range [][2]map[string]struct{}{
+		{d.Addresses, other.Addresses}, {d.Players, other.Players},
+		{d.Guilds, other.Guilds}, {d.Reactors, other.Reactors},
+		{d.Providers, other.Providers}, {d.Substations, other.Substations},
+		{d.GridObjects, other.GridObjects},
+	} {
+		for k := range pair[1] {
+			pair[0][k] = struct{}{}
+		}
+	}
+}
+
 func keys(m map[string]struct{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -132,3 +156,10 @@ func (d *Dirty) ReactorIDs() []string    { return keys(d.Reactors) }
 func (d *Dirty) ProviderIDs() []string   { return keys(d.Providers) }
 func (d *Dirty) SubstationIDs() []string { return keys(d.Substations) }
 func (d *Dirty) GridObjectIDs() []string { return keys(d.GridObjects) }
+
+func (d *Dirty) InventoryPlayerIDs() []string {
+	if d.inventoryPlayers == nil {
+		return keys(d.Players)
+	}
+	return keys(d.inventoryPlayers)
+}

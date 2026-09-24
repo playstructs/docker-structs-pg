@@ -150,6 +150,29 @@ EOF
   echo "preload libraries: timescaledb,pg_cron,pg_stat_statements (${dropin})"
 }
 
+# WAL / checkpoint sizing for sync-state catch-up. A from-zero replay of
+# structstestnet-111 (2.77M blocks, 4.3 GB database) wrote 143 GB of WAL and
+# 224 of 341 checkpoints were forced by the 1 GB default max_wal_size; every
+# forced checkpoint restarts full-page writes. pg_wal can grow to roughly
+# max_wal_size on disk. Reload-only GUCs.
+postgres_apply_wal_settings() {
+  local confdir dropin
+  confdir="$(pg_conf_dir)"
+  dropin="${confdir}/conf.d/structs-wal.conf"
+  mkdir -p "${confdir}/conf.d"
+
+  cat >"${dropin}" <<EOF
+# Generated at container start from POSTGRES_MAX_WAL_SIZE / POSTGRES_WAL_COMPRESSION
+# / POSTGRES_CHECKPOINT_TIMEOUT.
+max_wal_size = ${POSTGRES_MAX_WAL_SIZE:-8GB}
+min_wal_size = ${POSTGRES_MIN_WAL_SIZE:-1GB}
+checkpoint_timeout = ${POSTGRES_CHECKPOINT_TIMEOUT:-15min}
+wal_compression = ${POSTGRES_WAL_COMPRESSION:-lz4}
+EOF
+  chown postgres:postgres "${dropin}"
+  echo "wal settings: max_wal_size=${POSTGRES_MAX_WAL_SIZE:-8GB} checkpoint_timeout=${POSTGRES_CHECKPOINT_TIMEOUT:-15min} wal_compression=${POSTGRES_WAL_COMPRESSION:-lz4} (${dropin})"
+}
+
 # track_functions=pl so api_work_refresh, planet_activity_attribute,
 # stat_rollup_snapshot and the reconcilers show up in pg_stat_user_functions.
 # Reload-only GUC; a conf.d drop-in overrides an existing pgetc volume.

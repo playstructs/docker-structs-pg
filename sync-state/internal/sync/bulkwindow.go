@@ -9,6 +9,7 @@ import (
 	"sync-state/internal/buffers"
 	"sync-state/internal/db"
 	"sync-state/internal/events"
+	"sync-state/internal/readmodel"
 )
 
 // applyOpts tweaks per-block writes when running inside a bulk outer tx.
@@ -23,12 +24,19 @@ type applyOpts struct {
 	// SkipStatementTimeout skips SET LOCAL statement_timeout inside
 	// applyBlockInTx. The bulk outer tx sets BulkStatementTimeout once.
 	SkipStatementTimeout bool
+	// DeferProjections skips readmodel.Recompute and returns the block's
+	// dirty set and ledger deltas instead, so the bulk window can recompute
+	// the api_* projections once for all of its blocks.
+	DeferProjections bool
 }
 
 // blockApplyResult carries side effects that applyBlockInTx deliberately
-// does not persist (handler_error_log is written post-commit).
+// does not persist (handler_error_log is written post-commit). Dirty and
+// LedgerDeltas are set only under DeferProjections.
 type blockApplyResult struct {
 	PendingErrors []events.HandlerError
+	Dirty         *readmodel.Dirty
+	LedgerDeltas  []buffers.LedgerDelta
 }
 
 // applyBulkWindow runs blocks in ascending order inside one outer PG
@@ -61,23 +69,38 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 			return fmt.Errorf("bulk set statement_timeout h=%d: %w", blocks[0].Height, err)
 		}
 	}
+	// The cursor commits in this same transaction, so a crash can only lose
+	// whole windows, which the next start replays from the cursor.
+	if s.cfg.BulkAsyncCommit {
+		if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit = off"); err != nil {
+			return fmt.Errorf("bulk set synchronous_commit h=%d: %w", blocks[0].Height, err)
+		}
+	}
 
 	opts := applyOpts{
 		SkipCurrentBlockHeartbeat: true,
 		SkipCursorUpsert:          true,
 		SkipStatementTimeout:      true,
+		DeferProjections:          true,
 	}
 
-	// Reuse one buffer, but applyBlockInTx flushes it after every block so
-	// that block's current-state projections can see its authoritative rows.
-	// The outer transaction still commits the complete window atomically.
+	// Reuse one buffer; applyBlockInTx flushes it after every block. The
+	// api_* projections are pure functions of authoritative state (address
+	// inventory deltas are additive), so recomputing the union of the
+	// window's dirty sets once gives the same rows as recomputing per block.
 	buf := buffers.New()
+	windowDirty := readmodel.NewDirty()
+	var windowDeltas []buffers.LedgerDelta
 
 	var allPending []pendingHandlerError
 	for _, bundle := range blocks {
 		res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, opts)
 		if err != nil {
 			return fmt.Errorf("bulk apply h=%d: %w", bundle.Height, err)
+		}
+		if !s.cfg.BulkDeferProjections {
+			windowDirty.Merge(res.Dirty)
+			windowDeltas = append(windowDeltas, res.LedgerDeltas...)
 		}
 		for _, he := range res.PendingErrors {
 			allPending = append(allPending, pendingHandlerError{
@@ -88,6 +111,11 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	}
 
 	last := blocks[len(blocks)-1]
+	if !s.cfg.BulkDeferProjections {
+		if err := readmodel.Recompute(ctx, tx, windowDirty, last.Height, last.BlockTime, readmodel.InventoryFromDeltas(windowDeltas)); err != nil {
+			return fmt.Errorf("bulk api projections h=%d..%d: %w", blocks[0].Height, last.Height, err)
+		}
+	}
 	status := db.ComputeStatus(last.Height, tipHeight)
 	lag := tipHeight - last.Height
 	if lag < 0 {
@@ -122,6 +150,9 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		return fmt.Errorf("bulk commit h=%d..%d: %w", blocks[0].Height, last.Height, err)
 	}
 	committed = true
+	if s.cfg.BulkDeferProjections {
+		s.projectionsStale = true
+	}
 
 	s.writePendingHandlerErrors(ctx, last.ChainID, allPending)
 	return nil

@@ -11,6 +11,7 @@ import (
 
 	"sync-state/internal/db"
 	"sync-state/internal/events"
+	"sync-state/internal/readmodel"
 	"sync-state/internal/rpc"
 )
 
@@ -31,6 +32,12 @@ type Syncer struct {
 	// poll tick. nil = no push notifier (falls back to pure polling,
 	// e.g. tests, or when the node doesn't expose /websocket).
 	tipWake <-chan int64
+
+	// projectionsStale is set when api_* projections lag the cursor
+	// (deferred bulk windows, or a startup backfill skipped because a
+	// catch-up is about to run). Run rebuilds them before any streaming
+	// block applies, since streaming updates api_inventory incrementally.
+	projectionsStale bool
 }
 
 // NewSyncer wires the dependencies. chainID has already been validated by
@@ -55,6 +62,32 @@ func (s *Syncer) WithTipNotifier(ch <-chan int64) *Syncer {
 	return s
 }
 
+// WithStaleProjections tells Run the api_* projections need a full
+// rebuild before streaming resumes.
+func (s *Syncer) WithStaleProjections() *Syncer {
+	s.projectionsStale = true
+	return s
+}
+
+// rebuildProjections rebuilds every api_* projection at the committed
+// cursor height in one transaction.
+func (s *Syncer) rebuildProjections(ctx context.Context) error {
+	c, err := db.ReadCursor(ctx, s.pool.Pool, s.chainID)
+	if err != nil {
+		return fmt.Errorf("read cursor: %w", err)
+	}
+	s.logger.Printf("catch-up done at h=%d: rebuilding api_* projections", c.LastHeight)
+	t := c.LastBlockTime
+	report, err := readmodel.Backfill(ctx, s.pool.Pool, c.LastHeight, &t)
+	if err != nil {
+		return err
+	}
+	s.logger.Printf("api_* projections rebuilt: height=%d rows=%v elapsed=%s",
+		report.Height, report.Rows, report.Elapsed.Round(time.Millisecond))
+	s.projectionsStale = false
+	return nil
+}
+
 // fetchResult carries one prefetched bundle.
 type fetchResult struct {
 	height int64
@@ -72,6 +105,9 @@ type fetchedWindow struct {
 	useBulk    bool
 	bundles    []*BlockBundle
 	err        error
+	// startedAt is when fetchWindow began. Streaming mode applies blocks
+	// inside fetchWindow, so its window duration is measured from here.
+	startedAt time.Time
 }
 
 // Run starts ingesting from `start`. Blocks until ctx is cancelled or
@@ -138,6 +174,24 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 		}
 		return true
 	}
+	// ensureProjections returns (retry, err): retry=true means a transient
+	// failure was handled and the caller should restart the loop.
+	ensureProjections := func() (bool, error) {
+		if !s.projectionsStale {
+			return false, nil
+		}
+		err := s.rebuildProjections(ctx)
+		if err == nil {
+			return false, nil
+		}
+		if isTransientInfraErr(err) {
+			if !recoverFromTransient("api projection rebuild", err) {
+				return false, ctx.Err()
+			}
+			return true, nil
+		}
+		return false, fmt.Errorf("api projection rebuild: %w", err)
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -173,6 +227,11 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 				prefetched = nil
 				prefetchCancel = func() {}
 			}
+			if retry, err := ensureProjections(); err != nil {
+				return err
+			} else if retry {
+				continue
+			}
 			if s.cfg.OneShot || (s.cfg.StopHeight > 0 && next > s.cfg.StopHeight) {
 				return nil
 			}
@@ -197,6 +256,13 @@ func (s *Syncer) Run(ctx context.Context, start int64) error {
 
 		lag := end - next + 1
 		useBulk := s.cfg.BulkEnabled && lag >= int64(s.cfg.BulkLagThreshold)
+		if !useBulk {
+			if retry, err := ensureProjections(); err != nil {
+				return err
+			} else if retry {
+				continue
+			}
+		}
 		windowSize := s.effectiveWindowSize(useBulk)
 		windowEnd := next + int64(windowSize) - 1
 		if windowEnd > end {
@@ -300,7 +366,7 @@ func (s *Syncer) effectiveWindowSize(useBulk bool) int {
 // Splitting fetch/apply this way is what lets Run() prefetch window N+1
 // while window N's bulk commit is in flight.
 func (s *Syncer) fetchWindow(ctx context.Context, start, end, tip int64, useBulk bool) fetchedWindow {
-	fw := fetchedWindow{start: start, end: end, tip: tip, useBulk: useBulk}
+	fw := fetchedWindow{start: start, end: end, tip: tip, useBulk: useBulk, startedAt: time.Now()}
 
 	wCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -396,8 +462,9 @@ func (s *Syncer) fetchWindow(ctx context.Context, start, end, tip int64, useBulk
 // per-block applies already happened inside fetchWindow; this just logs
 // the window summary and flushes the unknown-key deltas.
 func (s *Syncer) applyFetched(ctx context.Context, fw fetchedWindow) error {
-	startedAt := time.Now()
+	startedAt := fw.startedAt
 	if fw.useBulk {
+		startedAt = time.Now()
 		if err := s.applyBulkWindow(ctx, fw.bundles, fw.tip); err != nil {
 			return fmt.Errorf("bulk apply [%d..%d]: %w", fw.start, fw.end, err)
 		}
