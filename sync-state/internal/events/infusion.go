@@ -66,6 +66,66 @@ ON CONFLICT (destination_id, address) DO UPDATE
 // into big.Int without losing precision.
 const infusionPrevFuelSelectSQL = `SELECT fuel_p::text FROM structs.infusion WHERE destination_id = $1 AND address = $2`
 
+// EventInfusion is a snapshot (fuel, not the amount infused), so the
+// ledger delta is only correct against the row state immediately before
+// this event. sync_state.infusion_event_position records the last event
+// applied to each row; anything at or before it (a replay over existing
+// state, or reprocess-errors retrying an old event after newer ones
+// landed) is skipped, because diffing it against newer state writes a
+// wrong, often negative, delta.
+const infusionPositionSelectSQL = `
+SELECT height, tx_index, event_index
+  FROM sync_state.infusion_event_position
+ WHERE destination_id = $1 AND address = $2`
+
+// Rows written before infusion_event_position existed have no position.
+// The last 'infused' ledger pair for the row bounds its state to that
+// block; the intra-block position is unknown, so the whole block counts
+// as applied. NULL when there is no infusion row at all.
+const infusionLegacyHeightSelectSQL = `
+SELECT CASE WHEN i.destination_id IS NULL THEN NULL ELSE COALESCE((
+         SELECT max(l.block_height)
+           FROM structs.ledger l
+          WHERE l.address = $1 AND l.counterparty = $2 AND l.action = 'infused'), 0)
+       END
+  FROM (SELECT 1) one
+  LEFT JOIN structs.infusion i ON i.destination_id = $2 AND i.address = $1`
+
+const infusionPositionUpsertSQL = `
+INSERT INTO sync_state.infusion_event_position (destination_id, address, height, tx_index, event_index)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (destination_id, address) DO UPDATE
+   SET height      = EXCLUDED.height,
+       tx_index    = EXCLUDED.tx_index,
+       event_index = EXCLUDED.event_index`
+
+// infusionEventApplied reports whether the row already reflects an event
+// at or after bctx's position. Positions follow dispatch order: height,
+// then tx_index (-1 for finalize_block events), then event_index.
+func infusionEventApplied(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Infusion) (bool, error) {
+	var h int64
+	var txIdx, evIdx int
+	err := tx.QueryRow(ctx, infusionPositionSelectSQL, p.DestinationID, p.Address).Scan(&h, &txIdx, &evIdx)
+	switch {
+	case err == nil:
+		if bctx.Height != h {
+			return bctx.Height < h, nil
+		}
+		if bctx.TxIndex != txIdx {
+			return bctx.TxIndex < txIdx, nil
+		}
+		return bctx.EventIndex <= evIdx, nil
+	case !errors.Is(err, pgx.ErrNoRows):
+		return false, fmt.Errorf("infusion position (%s,%s): %w", p.DestinationID, p.Address, err)
+	}
+
+	var legacy *int64
+	if err := tx.QueryRow(ctx, infusionLegacyHeightSelectSQL, p.Address, p.DestinationID).Scan(&legacy); err != nil {
+		return false, fmt.Errorf("infusion legacy height (%s,%s): %w", p.DestinationID, p.Address, err)
+	}
+	return legacy != nil && bctx.Height <= *legacy, nil
+}
+
 func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Infusion](raw)
 	if err != nil {
@@ -73,6 +133,19 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 	}
 	if p.DestinationID == "" || p.Address == "" {
 		return fmt.Errorf("infusion: empty destination_id or address (dest=%q addr=%q)", p.DestinationID, p.Address)
+	}
+
+	applied, err := infusionEventApplied(ctx, tx, bctx, p)
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, infusionPositionUpsertSQL,
+		p.DestinationID, p.Address, bctx.Height, bctx.TxIndex, bctx.EventIndex,
+	); err != nil {
+		return fmt.Errorf("infusion position upsert (%s,%s): %w", p.DestinationID, p.Address, err)
 	}
 
 	// Capture pre-upsert state for the ledger derivation. Only the

@@ -13,8 +13,11 @@ package events
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"sync-state/internal/buffers"
 )
 
 // infusionBctx returns a BlockContext for infusion-ledger tests. Kept
@@ -250,6 +253,7 @@ func TestPhase7_Infusion_UpdateWritesDelta(t *testing.T) {
 
 		// Bump fuel — delta = 700000-500000 = 200000.
 		base["fuel"] = "700000"
+		bc.EventIndex++
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, mustJSON(t, base)); err != nil {
 			t.Fatalf("second infusion: %v", err)
 		}
@@ -297,6 +301,7 @@ func TestPhase7_Infusion_DefuseWritesNegativeDelta(t *testing.T) {
 
 		// Defuse half.
 		base["fuel"] = "400000"
+		bc.EventIndex++
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, mustJSON(t, base)); err != nil {
 			t.Fatalf("defuse: %v", err)
 		}
@@ -342,6 +347,7 @@ func TestPhase7_Infusion_NoOpUpdateSkipsLedger(t *testing.T) {
 			t.Fatalf("first: %v", err)
 		}
 			flushBuf(t, ctx, tx, bc)
+		bc.EventIndex++
 		if err := (infusionHandler{}).Handle(ctx, tx, bc, base); err != nil {
 			t.Fatalf("repeat: %v", err)
 		}
@@ -410,6 +416,155 @@ func TestPhase7_Infusion_NonStruct_NoLedger(t *testing.T) {
 			`SELECT count(*) FROM structs.ledger WHERE address=$1`, "structs1infuser6").Scan(&n)
 		if n != 0 {
 			t.Errorf("ledger rows for non-struct destination = %d; want 0", n)
+		}
+	})
+}
+
+// heightBctx is fixedBctx with a block time derived from the height, so
+// ledger rows from different heights don't collide on the source-event key.
+func heightBctx(height int64) BlockContext {
+	bc := fixedBctx(height)
+	bc.BlockTime = bc.BlockTime.Add(time.Duration(height) * time.Second)
+	return bc
+}
+
+func handleInfusionFuel(t *testing.T, ctx context.Context, tx pgx.Tx, bc BlockContext, dest, addr, fuel string) {
+	t.Helper()
+	raw := mustJSON(t, map[string]any{
+		"destinationId":   dest,
+		"address":         addr,
+		"destinationType": "struct",
+		"playerId":        "1-1",
+		"fuel":            fuel,
+	})
+	if err := (infusionHandler{}).Handle(ctx, tx, bc, raw); err != nil {
+		t.Fatalf("infusion h=%d tx=%d ev=%d fuel=%s: %v", bc.Height, bc.TxIndex, bc.EventIndex, fuel, err)
+	}
+	flushBuf(t, ctx, tx, bc)
+}
+
+// infusionDebits returns the infused ualpha debit amounts for addr in
+// source-event order, plus the stored fuel_p for (dest, addr).
+func infusionDebits(t *testing.T, ctx context.Context, tx pgx.Tx, dest, addr string) ([]int64, int64) {
+	t.Helper()
+	rows, err := tx.Query(ctx,
+		`SELECT amount_p::bigint FROM structs.ledger
+		 WHERE address=$1 AND counterparty=$2 AND action='infused' AND direction='debit'
+		 ORDER BY block_height, tx_index, event_index`, addr, dest)
+	if err != nil {
+		t.Fatalf("debits query: %v", err)
+	}
+	var out []int64
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("debits scan: %v", err)
+		}
+		out = append(out, v)
+	}
+	rows.Close()
+	var fuel int64
+	if err := tx.QueryRow(ctx,
+		`SELECT fuel_p::bigint FROM structs.infusion WHERE destination_id=$1 AND address=$2`,
+		dest, addr).Scan(&fuel); err != nil {
+		t.Fatalf("fuel query: %v", err)
+	}
+	return out, fuel
+}
+
+// Replaying an old EventInfusion over a row that already reflects later
+// events must not diff the old snapshot against the newer fuel (the
+// 2026-06-15 crew replay wrote -2 alpha this way for 1-228 / 5-1916).
+func TestInfusion_ReplayOfOlderEventIsSkipped(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		const dest, addr = "5-990701", "structs1replayguard1"
+
+		handleInfusionFuel(t, ctx, tx, heightBctx(977521), dest, addr, "1000000")
+		handleInfusionFuel(t, ctx, tx, heightBctx(977545), dest, addr, "2000000")
+		handleInfusionFuel(t, ctx, tx, heightBctx(977586), dest, addr, "3000000")
+
+		handleInfusionFuel(t, ctx, tx, heightBctx(977521), dest, addr, "1000000")
+		handleInfusionFuel(t, ctx, tx, heightBctx(977545), dest, addr, "2000000")
+		handleInfusionFuel(t, ctx, tx, heightBctx(977586), dest, addr, "3000000")
+
+		debits, fuel := infusionDebits(t, ctx, tx, dest, addr)
+		if len(debits) != 3 || debits[0] != 1000000 || debits[1] != 1000000 || debits[2] != 1000000 {
+			t.Errorf("debits = %v; want [1000000 1000000 1000000] (replay adds nothing)", debits)
+		}
+		if fuel != 3000000 {
+			t.Errorf("fuel_p = %d; want 3000000 (replay must not regress the row)", fuel)
+		}
+
+		handleInfusionFuel(t, ctx, tx, heightBctx(1619962), dest, addr, "4000000")
+		debits, _ = infusionDebits(t, ctx, tx, dest, addr)
+		if len(debits) != 4 || debits[3] != 1000000 {
+			t.Errorf("debits after new event = %v; want trailing 1000000", debits)
+		}
+	})
+}
+
+// Rows indexed before infusion_event_position existed fall back to the
+// last 'infused' ledger height for the row.
+func TestInfusion_LegacyRowUsesLedgerHeight(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		const dest, addr = "5-990702", "structs1replayguard2"
+
+		if _, err := tx.Exec(ctx, infusionUpsertSQL,
+			dest, addr, "struct", "1-1", "3000000", nil, nil, nil, nil); err != nil {
+			t.Fatalf("seed infusion: %v", err)
+		}
+		seed := heightBctx(977586)
+		appendLedger(seed,
+			buffers.LedgerRow{Address: addr, Counterparty: dest, AmountP: "3000000", Action: "infused", Direction: "debit", Denom: "ualpha"},
+			buffers.LedgerRow{Address: addr, Counterparty: dest, AmountP: "3000000", Action: "infused", Direction: "credit", Denom: "ualpha.infused"},
+		)
+		flushBuf(t, ctx, tx, seed)
+
+		handleInfusionFuel(t, ctx, tx, heightBctx(977521), dest, addr, "1000000")
+		handleInfusionFuel(t, ctx, tx, heightBctx(977586), dest, addr, "3000000")
+		debits, fuel := infusionDebits(t, ctx, tx, dest, addr)
+		if len(debits) != 1 || fuel != 3000000 {
+			t.Errorf("after replay: debits=%v fuel_p=%d; want [3000000] and 3000000", debits, fuel)
+		}
+
+		handleInfusionFuel(t, ctx, tx, heightBctx(1619962), dest, addr, "4000000")
+		debits, fuel = infusionDebits(t, ctx, tx, dest, addr)
+		if len(debits) != 2 || debits[1] != 1000000 || fuel != 4000000 {
+			t.Errorf("after new event: debits=%v fuel_p=%d; want [3000000 1000000] and 4000000", debits, fuel)
+		}
+	})
+}
+
+// Within a block, finalize_block events (tx_index -1) dispatch before tx
+// events; an earlier position re-dispatched after a later one is skipped.
+func TestInfusion_SameBlockOrdering(t *testing.T) {
+	conn := connect(t)
+	inTx(t, conn, func(tx pgx.Tx) {
+		ctx := context.Background()
+		suppressTriggers(t, tx)
+		const dest, addr = "5-990703", "structs1replayguard3"
+
+		finalize := heightBctx(990000)
+		inTx0 := heightBctx(990000)
+		inTx0.TxIndex, inTx0.EventIndex = 0, 0
+		inTx0ev3 := inTx0
+		inTx0ev3.EventIndex = 3
+
+		handleInfusionFuel(t, ctx, tx, finalize, dest, addr, "1000000")
+		handleInfusionFuel(t, ctx, tx, inTx0, dest, addr, "2000000")
+		handleInfusionFuel(t, ctx, tx, finalize, dest, addr, "1000000")
+		handleInfusionFuel(t, ctx, tx, inTx0ev3, dest, addr, "5000000")
+		handleInfusionFuel(t, ctx, tx, inTx0, dest, addr, "2000000")
+
+		debits, fuel := infusionDebits(t, ctx, tx, dest, addr)
+		if len(debits) != 3 || debits[0] != 1000000 || debits[1] != 1000000 || debits[2] != 3000000 || fuel != 5000000 {
+			t.Errorf("debits=%v fuel_p=%d; want [1000000 1000000 3000000] and 5000000", debits, fuel)
 		}
 	})
 }

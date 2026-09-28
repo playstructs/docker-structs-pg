@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"sync-state/internal/db"
 	"sync-state/internal/events"
 	"sync-state/internal/readmodel"
@@ -676,6 +678,62 @@ func ResolveStart(ctx context.Context, pool *db.Pool, chainID string, override i
 		return earliest, nil
 	}
 	return 1, nil
+}
+
+// GuardReplay refuses to ingest heights this database has already indexed.
+// Legacy ledger rows have no source-event identity and some handlers derive
+// rows from current state, so re-ingesting over existing state duplicates or
+// corrupts derived tables. It returns the height to start at and an optional
+// warning for the operator.
+//
+// A start override at or below the cursor is ignored in favour of resuming,
+// so a SYNC_START_HEIGHT left in the environment cannot replay on every
+// restart. A cursor that is missing or behind block_log, or a cursor for a
+// different chain_id, is refused: the real resume point is unknown.
+func GuardReplay(ctx context.Context, q db.Querier, chainID string, start int64, allowReplay bool) (int64, string, error) {
+	c, err := db.ReadCursor(ctx, q, chainID)
+	if err != nil {
+		return 0, "", err
+	}
+	var logged int64
+	if err := q.QueryRow(ctx,
+		`SELECT COALESCE(max(height), 0) FROM sync_state.block_log WHERE chain_id = $1`,
+		chainID).Scan(&logged); err != nil {
+		return 0, "", fmt.Errorf("read block_log max height: %w", err)
+	}
+	var otherChain string
+	var otherHeight int64
+	err = q.QueryRow(ctx,
+		`SELECT chain_id, last_height FROM sync_state.sync_cursor
+		  WHERE chain_id <> $1 AND last_height > 0
+		  ORDER BY last_height DESC LIMIT 1`,
+		chainID).Scan(&otherChain, &otherHeight)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", fmt.Errorf("read other sync_cursor rows: %w", err)
+	}
+
+	indexed := max(c.LastHeight, logged, otherHeight)
+	if start > indexed {
+		return start, "", nil
+	}
+	if allowReplay {
+		return start, fmt.Sprintf("WARN: SYNC_ALLOW_REPLAY is set: re-ingesting from height %d over state indexed up to %d.",
+			start, indexed), nil
+	}
+	switch {
+	case otherChain != "":
+		return 0, "", fmt.Errorf("sync_cursor holds chain_id=%s at height %d but the node reports chain_id=%s; "+
+			"refusing to index a second chain over existing state (set SYNC_ALLOW_REPLAY=true to override)",
+			otherChain, otherHeight, chainID)
+	case logged > c.LastHeight:
+		return 0, "", fmt.Errorf("sync_cursor for %s is at height %d but block_log reaches %d; the cursor was lost "+
+			"or reset and resuming at %d would re-ingest indexed blocks. Restore the cursor to %d, or set "+
+			"SYNC_ALLOW_REPLAY=true against a database whose derived tables were cleared first",
+			chainID, c.LastHeight, logged, start, logged)
+	}
+	return c.LastHeight + 1, fmt.Sprintf("WARN: start height %d is at or below sync_cursor height %d; ignoring it and "+
+		"resuming at %d. Unset SYNC_START_HEIGHT, or set SYNC_ALLOW_REPLAY=true to re-ingest indexed blocks.",
+		start, c.LastHeight, c.LastHeight+1), nil
 }
 
 // CheckReorg compares the last committed block_hash to what the RPC node

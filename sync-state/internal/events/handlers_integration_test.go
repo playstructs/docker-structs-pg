@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/buffers"
+	"sync-state/internal/db"
 	"sync-state/internal/readmodel"
 )
 
@@ -52,6 +53,10 @@ func inTx(t *testing.T, conn *pgx.Conn, body func(tx pgx.Tx)) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The DB may predate this binary's bootstrap; handlers read this table.
+	if _, err := tx.Exec(ctx, db.InfusionEventPositionDDL); err != nil {
+		t.Fatalf("infusion_event_position: %v", err)
+	}
 	body(tx)
 }
 
@@ -393,7 +398,9 @@ func TestHandler_Infusion(t *testing.T) {
 		}
 		// v0.21 re-homes infusion.playerId on the same (destination, address).
 		payload["playerId"] = "1-2"
-		if err := (infusionHandler{}).Handle(ctx, tx, bctx(), mustJSON(t, payload)); err != nil {
+		later := bctx()
+		later.EventIndex = 1
+		if err := (infusionHandler{}).Handle(ctx, tx, later, mustJSON(t, payload)); err != nil {
 			t.Fatalf("owner update: %v", err)
 		}
 		_ = tx.QueryRow(ctx,

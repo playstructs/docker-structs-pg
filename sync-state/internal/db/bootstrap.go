@@ -19,6 +19,7 @@ import (
 //   - sync_state.handler_error_log    (per-event handler failures)
 //   - sync_state.block_log            (per-block audit row, FK-free)
 //   - sync_state.verification_report  (verify subcommand output)
+//   - sync_state.infusion_event_position (infusion replay guard)
 //   - sync_state.raw_blocks           (optional raw mirror, same shape as cache.blocks)
 //   - sync_state.raw_tx_results       (optional raw mirror)
 //   - sync_state.raw_events           (optional raw mirror)
@@ -86,6 +87,21 @@ func StatTables() []string {
 	copy(out, statKnownTables)
 	return out
 }
+
+// InfusionEventPositionDDL records the last event applied to each
+// structs.infusion row, in dispatch order (height, tx_index with -1 for
+// finalize_block, event_index). The infusion handler derives ledger deltas
+// from the row's prior fuel, so it must skip events the row already
+// reflects; see internal/events/infusion.go. Kept in sync_state rather than
+// on structs.infusion because structs.* schema belongs to structs-pg.
+const InfusionEventPositionDDL = `CREATE TABLE IF NOT EXISTS sync_state.infusion_event_position (
+		destination_id  VARCHAR NOT NULL,
+		address         VARCHAR NOT NULL,
+		height          BIGINT  NOT NULL,
+		tx_index        INT     NOT NULL,
+		event_index     INT     NOT NULL,
+		PRIMARY KEY (destination_id, address)
+	)`
 
 // bootstrapStatements is the full idempotent setup. Order matters for
 // pg_dump-like readability; PG itself doesn't require an order beyond
@@ -268,6 +284,8 @@ var bootstrapStatements = []string{
 		rows_per_section   JSONB NOT NULL,
 		total_rows         BIGINT NOT NULL
 	)`,
+
+	InfusionEventPositionDDL,
 
 	// The pre-cutover bootstrap also added structs.current_block.{status,
 	// lag_blocks,tip_height}, structs.planet_activity.block_height, and

@@ -498,6 +498,14 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "resolve start: %v\n", err)
 		return 1
 	}
+	start, notice, err := GuardReplay(ctx, pool.Pool, chainID, start, cfg.AllowReplay)
+	if err != nil {
+		fmt.Fprintf(stderr, "refusing to start ingest: %v\n", err)
+		return 1
+	}
+	if notice != "" {
+		fmt.Fprintln(stderr, notice)
+	}
 	fmt.Fprintf(stderr, "Starting sync at height %d (chain=%s, node has [%d..%d])\n",
 		start, chainID, earliest, tip)
 

@@ -31,7 +31,12 @@
 #
 #   --- ingest knobs ---
 #   SYNC_START_HEIGHT         default 0 (resume from sync_state.sync_cursor,
-#                              clamped to node's earliest_block_height)
+#                              clamped to node's earliest_block_height).
+#                              Ignored (with a warning) when at or below the
+#                              cursor unless SYNC_ALLOW_REPLAY=true.
+#   SYNC_ALLOW_REPLAY         default false (true => allow re-ingesting heights
+#                              already indexed; duplicates legacy ledger rows
+#                              unless derived tables were cleared first)
 #   SYNC_STOP_HEIGHT          default 0 (follow tip forever)
 #   SYNC_BATCH_SIZE           default 200
 #   SYNC_PARALLELISM          default 8

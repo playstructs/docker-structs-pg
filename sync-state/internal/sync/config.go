@@ -43,6 +43,7 @@ type Config struct {
 
 	// Ingest knobs
 	StartHeight    int64 // 0 = resume from sync_cursor; clamped to node's earliest
+	AllowReplay    bool  // permit ingesting heights at or below what the DB already indexed
 	StopHeight     int64 // 0 = follow tip forever
 	BatchSize      int
 	Parallelism    int
@@ -164,6 +165,10 @@ func LoadConfig(args []string) Config {
 
 	fs.Int64Var(&cfg.StartHeight, "start", envOrInt64("SYNC_START_HEIGHT", 0),
 		"Start height (0 = resume from sync_state.sync_cursor or node's earliest)")
+	fs.BoolVar(&cfg.AllowReplay, "allow-replay", envOrBool("SYNC_ALLOW_REPLAY", false),
+		"ingest: allow starting at or below heights this database has already indexed. "+
+			"Replaying over existing state duplicates ledger rows that predate source-event "+
+			"identity; only use against a database whose derived tables were cleared first.")
 	fs.Int64Var(&cfg.StopHeight, "stop", envOrInt64("SYNC_STOP_HEIGHT", 0),
 		"Stop after this height (0 = follow tip)")
 	fs.IntVar(&cfg.BatchSize, "batch", envOrInt("SYNC_BATCH_SIZE", 200),
