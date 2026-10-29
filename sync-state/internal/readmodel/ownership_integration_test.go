@@ -192,3 +192,31 @@ VALUES ('5-992199','5-992199','MINE',99)`); err != nil {
 		}
 	})
 }
+
+func TestMaintenanceFunctionsAsIndexer(t *testing.T) {
+	integrationTx(t, func(ctx context.Context, tx pgx.Tx) {
+		projectionBoundary(t, ctx, tx, 100)
+		if _, err := tx.Exec(ctx, `INSERT INTO structs.api_work_dirty(kind,id) VALUES('player','1-995199') ON CONFLICT DO NOTHING`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `SET LOCAL ROLE structs_indexer`); err != nil {
+			t.Fatal(err)
+		}
+		var superuser bool
+		if err := tx.QueryRow(ctx, `SELECT rolsuper FROM pg_roles WHERE rolname=current_user`).Scan(&superuser); err != nil || superuser {
+			t.Fatalf("maintenance fixture requires a non-superuser indexer: superuser=%v err=%v", superuser, err)
+		}
+		for _, query := range []string{
+			`SELECT count(*) FROM structs.api_projection_boundary()`,
+			`SELECT count(*) FROM structs.api_work_refresh(100,TIMESTAMPTZ '2026-01-01 00:00:00Z')`,
+			`SELECT count(*) FROM structs.api_work_refresh_scheduled()`,
+			`SELECT count(*) FROM structs.api_work_reconcile(TRUE)`,
+			`SELECT count(*) FROM structs.api_inventory_reconcile(TRUE)`,
+		} {
+			var n int
+			if err := tx.QueryRow(ctx, query).Scan(&n); err != nil {
+				t.Fatalf("non-superuser maintenance failed: %s: %v", query, err)
+			}
+		}
+	})
+}

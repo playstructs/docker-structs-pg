@@ -760,7 +760,7 @@ WITH expected AS (
          (
            SELECT SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)
            FROM structs.ledger l
-           WHERE l.action IN ('minted', 'burned') AND l.denom = 'uguild.' || g.id
+           WHERE l.action IN ('genesis', 'minted', 'burned') AND l.denom = 'uguild.' || g.id
          ) AS supply
   FROM structs.guild g
 ), actual AS (

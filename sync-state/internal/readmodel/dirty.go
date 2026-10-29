@@ -88,7 +88,7 @@ func (d *Dirty) Ledger(rows []buffers.LedgerRow) {
 		d.Address(row.Address)
 		const prefix = "uguild."
 		if len(row.Denom) > len(prefix) && row.Denom[:len(prefix)] == prefix &&
-			(row.Action == "minted" || row.Action == "burned") {
+			(row.Action == "genesis" || row.Action == "minted" || row.Action == "burned") {
 			d.Guild(row.Denom[len(prefix):])
 		}
 	}

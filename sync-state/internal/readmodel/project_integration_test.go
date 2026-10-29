@@ -239,7 +239,7 @@ FROM structs.address_tag typ
 JOIN structs.address_tag gid
   ON gid.address=typ.address AND gid.label='GuildId' AND gid.entry=$1
 JOIN structs.ledger l ON l.address=typ.address
-WHERE typ.label='Type' AND typ.entry='Bank Collateral Pool'`, guild).Scan(&want); err != nil {
+WHERE typ.label='Type' AND typ.entry='Bank Collateral Pool' AND l.denom='ualpha'`, guild).Scan(&want); err != nil {
 			t.Fatal(err)
 		}
 		if got == nil || want == nil || *got != *want {
@@ -248,7 +248,7 @@ WHERE typ.label='Type' AND typ.entry='Bank Collateral Pool'`, guild).Scan(&want)
 
 		if _, err := tx.Exec(ctx, `
 DELETE FROM structs.ledger
-WHERE denom='uguild.' || $1 AND action IN ('minted','burned')`, guild); err != nil {
+WHERE denom='uguild.' || $1 AND action IN ('genesis','minted','burned')`, guild); err != nil {
 			t.Fatal(err)
 		}
 		if err := recomputeGuildBank(ctx, tx, d); err != nil {

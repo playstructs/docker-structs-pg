@@ -438,7 +438,7 @@ SELECT g.id, 'uguild.' || g.id,
        (
          SELECT SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)
          FROM structs.ledger l
-         WHERE l.action IN ('minted', 'burned') AND l.denom = 'uguild.' || g.id
+         WHERE l.action IN ('genesis', 'minted', 'burned') AND l.denom = 'uguild.' || g.id
        )
 FROM structs.guild g
 WHERE g.id = ANY($1::varchar[])`, ids)

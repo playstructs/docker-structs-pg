@@ -15,7 +15,7 @@ type schemaQuerier interface {
 // repairs canonical schema. It is mandatory even when optional doctor probes
 // are disabled. Catalog errors are failures, not evidence of compatibility.
 func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
-	for _, schema := range []string{"structs", "sync_state"} {
+	for _, schema := range []string{"structs", "sync_state", "view"} {
 		var allowed bool
 		if err := q.QueryRow(ctx, `SELECT has_schema_privilege(current_user,$1,'USAGE')`, schema).Scan(&allowed); err != nil {
 			return err
@@ -123,6 +123,15 @@ to_regprocedure('structs.api_projection_boundary()'),'EXECUTE'),FALSE)`).Scan(&b
 	}
 	if !boundaryReady {
 		return fmt.Errorf("v0.22 schema missing executable structs.api_projection_boundary(); deploy the ownership maintenance migration")
+	}
+	for _, source := range []string{"sync_state.sync_cursor", "structs.current_block", "structs.struct", "structs.planet", "view.work_live"} {
+		var readable bool
+		if err := q.QueryRow(ctx, `SELECT has_table_privilege(current_user,$1,'SELECT')`, source).Scan(&readable); err != nil {
+			return err
+		}
+		if !readable {
+			return fmt.Errorf("v0.22 maintenance missing SELECT on %s", source)
+		}
 	}
 	var legacyLedgerKey bool
 	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_index i
