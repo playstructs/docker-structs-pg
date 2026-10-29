@@ -163,21 +163,26 @@ func pushLedgerNoCp(buf *buffers.Buffer, id eventIdent, leg int, address, amount
 
 // pushDefusion appends a structs.defusion row. completion is the raw
 // chain "completion_time" attribute (RFC3339 with sub-second precision);
-// we parse it once here so the buffered CopyFrom emits a real
+// we parse it once here so the buffered insert binds a real
 // timestamptz value.
-func pushDefusion(buf *buffers.Buffer, validatorAddr, delegatorAddr, defusionType, amount, denom, completion string, created time.Time) error {
+func pushDefusion(buf *buffers.Buffer, id eventIdent, height int64, sourceValidator, validatorAddr, delegatorAddr, defusionType, amount, denom, completion string, created time.Time) error {
 	completed, err := parseChainTime(completion)
 	if err != nil {
 		return fmt.Errorf("defusion completed_at %q: %w", completion, err)
 	}
 	buf.Defusion = append(buf.Defusion, buffers.DefusionRow{
-		ValidatorAddress: validatorAddr,
-		DelegatorAddress: delegatorAddr,
-		DefusionType:     defusionType,
-		AmountP:          amount,
-		Denom:            denom,
-		CompletedAt:      completed,
-		CreatedAt:        created,
+		ChainID:                id.ChainID,
+		BlockHeight:            height,
+		TxIndex:                id.TxIndex,
+		EventIndex:             id.EventIndex,
+		SourceValidatorAddress: sourceValidator,
+		ValidatorAddress:       validatorAddr,
+		DelegatorAddress:       delegatorAddr,
+		DefusionType:           defusionType,
+		AmountP:                amount,
+		Denom:                  denom,
+		CompletedAt:            completed,
+		CreatedAt:              created,
 	})
 	return nil
 }
@@ -331,7 +336,7 @@ func handleRedelegate(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, 
 	pushLedger(buf, id, 2, dst, delegator, amt, h, t, "diversion_started", "credit", denom+".defusing")
 	pushLedger(buf, id, 3, delegator, dst, amt, h, t, "diversion_started", "credit", denom+".defusing")
 	if completion != "" {
-		if err := pushDefusion(buf, dst, delegator, "r", amt, denom, completion, t); err != nil {
+		if err := pushDefusion(buf, id, h, src, dst, delegator, "r", amt, denom, completion, t); err != nil {
 			return err
 		}
 	}
@@ -379,7 +384,7 @@ func handleUnbond(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev r
 	pushLedger(buf, id, 2, val, deleg, amt, h, t, "defusion_started", "credit", denom+".defusing")
 	pushLedger(buf, id, 3, deleg, val, amt, h, t, "defusion_started", "credit", denom+".defusing")
 	if completion != "" {
-		if err := pushDefusion(buf, val, deleg, "u", amt, denom, completion, t); err != nil {
+		if err := pushDefusion(buf, id, h, "", val, deleg, "u", amt, denom, completion, t); err != nil {
 			return err
 		}
 	}

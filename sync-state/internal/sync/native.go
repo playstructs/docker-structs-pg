@@ -78,6 +78,9 @@ WHERE address ~ '^structs1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{1,121}$'
 ON CONFLICT (chain_id,address) DO NOTHING`, s.chainID, height); err != nil {
 		return false, err
 	}
+	if err := staking.SeedReceipts(ctx, tx, s.chainID, height); err != nil {
+		return false, err
+	}
 	return true, tx.Commit(ctx)
 }
 

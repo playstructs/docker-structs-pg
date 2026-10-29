@@ -122,6 +122,7 @@ var allChecks = []checkEntry{
 	{"ordered_timeseries_monotonic", checkOrderedTimeseriesMonotonic},
 	{"ledger_balance_sanity", checkLedgerBalanceSanity},
 	{"api_read_models", checkAPIReadModels},
+	{"pending_receipts", checkPendingReceipts},
 }
 
 func selectChecks(opts Options) []checkEntry {

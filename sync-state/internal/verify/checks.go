@@ -533,10 +533,8 @@ var orderedTimeseriesSpecs = []orderedTimeseriesSpec{
 	// 42703 from the check itself, which masks real inversions.
 	{table: "ledger", partitionSQL: "address, denom", orderSQL: "time, block_height"},
 	{table: "planet_activity", partitionSQL: "planet_id", orderSQL: "time, seq"},
-	// structs.defusion has no block_height column (only completed_at +
-	// created_at), so block_height inversion analysis is structurally
-	// impossible here. checkOrderedTimeseriesMonotonic relies on a
-	// non-empty block_height column; defusion is intentionally excluded.
+	// Defusion contains unidentified legacy receipts; its lifecycle/replay
+	// contract is checked separately, not inferred from time ordering.
 	{table: "stat_ore", partitionSQL: "object_type, object_index", orderSQL: "time, block_height"},
 	{table: "stat_fuel", partitionSQL: "object_type, object_index", orderSQL: "time, block_height"},
 	{table: "stat_capacity", partitionSQL: "object_type, object_index", orderSQL: "time, block_height"},
@@ -587,7 +585,7 @@ func checkOrderedTimeseriesMonotonic(ctx context.Context, in Inputs) CheckResult
 		r.Detail = fmt.Sprintf("block_height went backwards in %d ordered row(s) across append-only tables", totalInversions)
 	} else {
 		r.Status = StatusPass
-		r.Detail = "no block_height inversions in ledger, planet_activity, defusion, or stat_* streams"
+		r.Detail = "no block_height inversions in ledger, planet_activity, or stat_* streams; defusion receipt lifecycle is separate"
 	}
 	return r
 }

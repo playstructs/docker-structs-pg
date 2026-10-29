@@ -25,6 +25,10 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		}
 	}
 	columns := []struct{ table, column, typ string }{
+		{"structs.defusion", "block_height", "bigint"},
+		{"structs.defusion", "retired_height", "bigint"},
+		{"structs.defusion_current", "pending_state", "text"},
+		{"sync_state.native_staking_snapshot", "receipts_pending", "boolean"},
 		{"structs.api_refresh_state", "inventory_authority", "text"},
 		{"structs.vault", "owner_id", "character varying"},
 		{"structs.vault", "address", "character varying"},
@@ -81,6 +85,7 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		table   string
 		columns []string
 	}{
+		{"structs.defusion", []string{"chain_id", "block_height", "tx_index", "event_index", "denom"}},
 		{"structs.vault", []string{"owner_id"}},
 		{"structs.vault", []string{"address"}},
 		{"structs.owner_reactor_diversity", []string{"owner_id"}},
@@ -107,6 +112,9 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 			return fmt.Errorf("v0.22 schema missing usable unique key %s(%v)", key.table, key.columns)
 		}
 		privileges := []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
+		if key.table == "structs.defusion" {
+			privileges = []string{"SELECT", "INSERT", "UPDATE"}
+		}
 		if key.table == "structs.ledger" {
 			privileges = []string{"SELECT", "INSERT"}
 		}
@@ -156,6 +164,13 @@ AND NOT (SELECT attnotnull FROM pg_attribute
 	}
 	if !claimsReady {
 		return fmt.Errorf("v0.22 current-claim inventory contract missing; deploy the Sqitch current-claims migration")
+	}
+	var ledgerSequence bool
+	if err := q.QueryRow(ctx, `SELECT has_sequence_privilege(current_user,'structs.ledger_id_seq','USAGE')`).Scan(&ledgerSequence); err != nil {
+		return err
+	}
+	if !ledgerSequence {
+		return fmt.Errorf("v0.22 writer missing USAGE on structs.ledger_id_seq")
 	}
 	var legacyLedgerKey bool
 	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_index i

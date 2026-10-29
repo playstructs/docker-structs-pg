@@ -116,3 +116,17 @@ exposure, source-validator redelegation exposure, exact large totals, empty nati
 completion, retry isolation and worker shutdown. The release-height chain upgrade,
 representative deployment timings, pending-receipt cleanup and unchanged-UI
 adapter validation remain separate acceptance work.
+
+## Pending operation receipts
+
+Deploy Sqitch `table-defusion-20261029-receipts` before this writer. It follows current-claim inventory and precedes the gated ledger switch. The ledger migration also grants indexer USAGE on `structs.ledger_id_seq`; schema validation checks it, and a real restricted-role bank insert exercises it.
+
+`structs.defusion` retains original operation receipts, including retired replay tombstones. New identities are `(chain_id, block_height, tx_index, event_index, denom)` using original RPC coordinates. A native entry ID cannot be derived from this identity. Batches insert idempotently and queue receipt reconciliation only for newly inserted rows. Historical recovery can request another query at the cached height without invalidating otherwise valid balance evidence.
+
+Startup, under the single writer's maintenance lock and sole-chain cursor, records `legacy_observed_height` as an upper source bound on unidentified old rows. It preserves duplicates and leaves their original source coordinates NULL. Never run an old writer alongside this adoption. Native HTTP pagination remains outside the SQL lock; accepted publication reconciles that address's active receipts, current claims and notifications together. Failed/stale/future/partial queries do not retire receipts.
+
+A receipt retires only after the complete native query contains no compatible operation group. Preserve held and zero-balance entries regardless of scheduled completion. SDK unbonds can merge at the same creation height and time; redelegation creation height can instead be the source validator's earlier unbonding height. Events truncate completion times to seconds, while LCD preserves fractional seconds. Matching respects all three distinctions and does not allocate current group balances back to individual receipts.
+
+The old wall-clock `defusion_cleaner` job is removed by Sqitch; its procedure becomes harmless for callers that still invoke it. The replacement is transactionally reconciled retirement, not deletion. Use `structs.defusion_current` for catalog reads; it excludes retired tombstones and reports `pending_state` (`pending`, `unknown`, or `unidentified`). `amount_p` is still the original event amount. Use native current claims for pending balance, never the sum of receipt amounts. Missing or unidentified history is not a complete queue mirror.
+
+`sync-state verify` includes `pending_receipts`: impossible indexed boundaries or missing reconciliation requests fail, unresolved/unidentified coverage is INFO, and matched/retired coverage passes. The ordinary time-ordering check does not claim receipt-lifecycle coverage. Rollback refuses identified/adopted receipts or outstanding receipt work; use a verified checkpoint if that contract must be removed. Do not manually delete tombstones to make rollback pass.

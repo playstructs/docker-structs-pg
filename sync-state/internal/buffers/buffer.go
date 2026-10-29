@@ -72,13 +72,18 @@ type LedgerRow struct {
 
 // DefusionRow mirrors structs.defusion.
 type DefusionRow struct {
-	ValidatorAddress string
-	DelegatorAddress string
-	DefusionType     string
-	AmountP          string
-	Denom            string
-	CompletedAt      time.Time
-	CreatedAt        time.Time
+	ChainID                string
+	BlockHeight            int64
+	TxIndex                int
+	EventIndex             int
+	SourceValidatorAddress string
+	ValidatorAddress       string
+	DelegatorAddress       string
+	DefusionType           string
+	AmountP                string
+	Denom                  string
+	CompletedAt            time.Time
+	CreatedAt              time.Time
 }
 
 // PlanetActivityRow mirrors structs.planet_activity. Seq is assigned by
@@ -402,22 +407,45 @@ RETURNING address, denom,
 	return deltas, qrows.Err()
 }
 
+// Receipt tombstones are retained, so replay cannot resurrect completed work.
+// Only newly inserted receipts request reconciliation, even when their source
+// precedes an already cached native snapshot (historical event recovery).
 func flushDefusion(ctx context.Context, tx pgx.Tx, rows []DefusionRow) error {
-	cols := []string{"validator_address", "delegator_address", "defusion_type", "amount_p", "denom", "completed_at", "created_at"}
-	src := pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {
-		r := rows[i]
-		return []any{
-			r.ValidatorAddress,
-			r.DelegatorAddress,
-			r.DefusionType,
-			nullable(r.AmountP),
-			r.Denom,
-			r.CompletedAt,
-			r.CreatedAt,
-		}, nil
-	})
-	_, err := tx.CopyFrom(ctx, pgx.Identifier{"structs", "defusion"}, cols, src)
-	return err
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('structs.api_work_refresh'))`); err != nil {
+		return err
+	}
+	const batchSize = 500
+	for start := 0; start < len(rows); start += batchSize {
+		end := start + batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		placeholders := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*12)
+		for _, r := range rows[start:end] {
+			base := len(args)
+			placeholders = append(placeholders, fmt.Sprintf(
+				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12))
+			args = append(args, r.ValidatorAddress, r.DelegatorAddress, r.DefusionType, r.AmountP, r.Denom,
+				r.CompletedAt, r.CreatedAt, r.ChainID, r.BlockHeight, r.TxIndex, r.EventIndex, nullable(r.SourceValidatorAddress))
+		}
+		_, err := tx.Exec(ctx, `WITH inserted AS (
+INSERT INTO structs.defusion(validator_address,delegator_address,defusion_type,amount_p,denom,completed_at,created_at,
+    chain_id,block_height,tx_index,event_index,source_validator_address)
+VALUES `+strings.Join(placeholders, ",")+`
+ON CONFLICT (chain_id,block_height,tx_index,event_index,denom) DO NOTHING
+RETURNING chain_id,delegator_address,block_height
+)
+INSERT INTO sync_state.native_staking_snapshot(chain_id,address,required_height,receipts_pending)
+SELECT chain_id,delegator_address,MAX(block_height),TRUE FROM inserted GROUP BY chain_id,delegator_address
+ON CONFLICT (chain_id,address) DO UPDATE SET receipts_pending=TRUE,retry_after='-infinity',
+    required_height=GREATEST(sync_state.native_staking_snapshot.required_height,EXCLUDED.required_height)`, args...)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // COPY FROM fires row triggers, including planet_activity_attribute
