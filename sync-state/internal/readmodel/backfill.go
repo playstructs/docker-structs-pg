@@ -72,7 +72,7 @@ SELECT 1 FROM sync_state.sync_cursor WHERE last_height <> $1
 	if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
 		return report, fmt.Errorf("inventory refresh_state: %w", err)
 	}
-	if err := Recompute(ctx, tx, d, height, sourceTime, InventoryAlreadyWritten()); err != nil {
+	if err := recompute(ctx, tx, d, height, sourceTime, InventoryAlreadyWritten(), true); err != nil {
 		return report, err
 	}
 	for _, table := range []string{

@@ -573,37 +573,6 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "ingest: %v\n", err)
 		return 1
 	}
-	var indexedHeight int64
-	var indexedTime *time.Time
-	if cursor, cerr := db.ReadCursor(ctx, pool.Pool, chainID); cerr == nil {
-		indexedHeight = cursor.LastHeight
-		t := cursor.LastBlockTime
-		indexedTime = &t
-	}
-	needed, berr := readmodel.NeedsBackfill(ctx, pool.Pool, indexedHeight)
-	if berr != nil {
-		fmt.Fprintf(stderr, "ingest: inspect API projection backfill state: %v\n", berr)
-		return 1
-	}
-	deferBackfill := needed && cfg.BulkEnabled && cfg.BulkDeferProjections &&
-		tip-indexedHeight >= int64(cfg.BulkLagThreshold)
-	if deferBackfill {
-		fmt.Fprintf(stderr, "API projection backfill deferred: %d blocks behind tip; api_* rebuilds once bulk catch-up completes.\n",
-			tip-indexedHeight)
-	} else if needed {
-		report, berr := readmodel.Backfill(ctx, pool.Pool, indexedHeight, indexedTime)
-		if berr != nil {
-			fmt.Fprintf(stderr, "ingest: API projection backfill: %v\n", berr)
-			return 1
-		}
-		fmt.Fprintf(stderr, "API projection backfill: height=%d rows=%v elapsed=%s\n",
-			report.Height, report.Rows, report.Elapsed.Round(time.Millisecond))
-	} else if n, derr := readmodel.ConsumeDriftOn(ctx, pool.Pool); derr != nil {
-		fmt.Fprintf(stderr, "ingest: consume api_inventory_drift: %v\n", derr)
-		return 1
-	} else if n > 0 {
-		fmt.Fprintf(stderr, "api_inventory_drift: repaired %d key(s) from latest reconciler batch\n", n)
-	}
 
 	// Player guild_rank reconciliation. Runs here — after the writer lock
 	// is held and before any handler executes — so a full refresh from
@@ -673,6 +642,45 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 			backfill.PrintDefenderPlanetaryReport(stderr, report)
 		}
 	}
+
+	// Canonical sweeps invalidate projection readiness when they change input
+	// state. Inspect/rebuild only after every sweep, even if no next block is
+	// available to trigger an ordinary per-block refresh.
+	var indexedHeight int64
+	var indexedTime *time.Time
+	cursor, cerr := db.ReadCursor(ctx, pool.Pool, chainID)
+	if cerr != nil {
+		fmt.Fprintf(stderr, "ingest: read projection boundary: %v\n", cerr)
+		return 1
+	}
+	indexedHeight = cursor.LastHeight
+	t := cursor.LastBlockTime
+	indexedTime = &t
+	needed, berr := readmodel.NeedsBackfill(ctx, pool.Pool, indexedHeight)
+	if berr != nil {
+		fmt.Fprintf(stderr, "ingest: inspect API projection backfill state: %v\n", berr)
+		return 1
+	}
+	deferBackfill := needed && cfg.BulkEnabled && cfg.BulkDeferProjections &&
+		tip-indexedHeight >= int64(cfg.BulkLagThreshold)
+	if deferBackfill {
+		fmt.Fprintf(stderr, "API projection backfill deferred: %d blocks behind tip; api_* rebuilds once bulk catch-up completes.\n",
+			tip-indexedHeight)
+	} else if needed {
+		report, berr := readmodel.Backfill(ctx, pool.Pool, indexedHeight, indexedTime)
+		if berr != nil {
+			fmt.Fprintf(stderr, "ingest: API projection backfill: %v\n", berr)
+			return 1
+		}
+		fmt.Fprintf(stderr, "API projection backfill: height=%d rows=%v elapsed=%s\n",
+			report.Height, report.Rows, report.Elapsed.Round(time.Millisecond))
+	} else if n, derr := readmodel.ConsumeDriftOn(ctx, pool.Pool); derr != nil {
+		fmt.Fprintf(stderr, "ingest: consume api_inventory_drift: %v\n", derr)
+		return 1
+	} else if n > 0 {
+		fmt.Fprintf(stderr, "api_inventory_drift: repaired %d key(s) from outstanding reconciler batches\n", n)
+	}
+
 
 	router := events.NewRouter(cfg.StrictUnknownEvents)
 	fmt.Fprintf(stderr, "Event registry: %d handlers (use `sync-state list-handlers` to inspect)\n",

@@ -248,6 +248,10 @@ WHERE owner_type = 'player'
 // view.work_live once per block and writes api_refresh_state for
 // model='work' itself.
 func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTime any, inv InventoryPlan) error {
+	return recompute(ctx, tx, d, height, sourceTime, inv, false)
+}
+
+func recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTime any, inv InventoryPlan, fullWork bool) error {
 	if err := Expand(ctx, tx, d); err != nil {
 		return err
 	}
@@ -288,7 +292,7 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 	if err := refreshModels(ctx, tx, refreshed, height, sourceTime); err != nil {
 		return fmt.Errorf("refresh_state: %w", err)
 	}
-	if err := refreshWork(ctx, tx, height, sourceTime); err != nil {
+	if err := refreshWork(ctx, tx, height, sourceTime, fullWork); err != nil {
 		return err
 	}
 	return nil
@@ -312,11 +316,16 @@ SET source_height = EXCLUDED.source_height,
 	return err
 }
 
-func refreshWork(ctx context.Context, tx pgx.Tx, height int64, sourceTime any) error {
+func refreshWork(ctx context.Context, tx pgx.Tx, height int64, sourceTime any, full bool) error {
 	var inserted, updated, deleted int64
-	if err := tx.QueryRow(ctx, `
+	query := `
 SELECT inserted, updated, deleted
-  FROM structs.api_work_refresh($1::bigint, $2::timestamptz)`,
+  FROM structs.api_work_refresh($1::bigint, $2::timestamptz)`
+	if full {
+		query = `SELECT inserted, updated, deleted
+  FROM structs.api_work_refresh_full($1::bigint, $2::timestamptz, FALSE)`
+	}
+	if err := tx.QueryRow(ctx, query,
 		height, sourceTime).Scan(&inserted, &updated, &deleted); err != nil {
 		return fmt.Errorf("work: api_work_refresh: %w", err)
 	}

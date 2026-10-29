@@ -169,3 +169,26 @@ func TestProjectionMaintenanceSkipsDeferredBoundary(t *testing.T) {
 		}
 	})
 }
+
+func TestFullProjectionRefreshRepairsUnqueuedWork(t *testing.T) {
+	integrationTx(t, func(ctx context.Context, tx pgx.Tx) {
+		if _, err := tx.Exec(ctx, `INSERT INTO structs.api_work(object_id,target_id,category,source_height)
+VALUES ('5-992199','5-992199','MINE',99)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := Invalidate(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+		if err := recompute(ctx, tx, NewDirty(), 101, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), InventoryFromLedger(), true); err != nil {
+			t.Fatal(err)
+		}
+		var stale int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM structs.api_work WHERE object_id='5-992199'`).Scan(&stale); err != nil || stale != 0 {
+			t.Fatalf("full refresh retained unqueued orphan work: count=%d err=%v", stale, err)
+		}
+		var ready int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM structs.api_refresh_state WHERE source_height=101`).Scan(&ready); err != nil || ready != len(modelNames) {
+			t.Fatalf("full refresh incomplete: models=%d err=%v", ready, err)
+		}
+	})
+}
