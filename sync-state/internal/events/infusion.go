@@ -216,6 +216,7 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 	}
 	if p.DestinationType == "reactor" {
 		bctx.Dirty.Reactor(p.DestinationID)
+		bctx.Dirty.NativeAddress(p.Address)
 	}
 	if previousOwner != nil {
 		dirtyOwner(bctx, *previousOwner)

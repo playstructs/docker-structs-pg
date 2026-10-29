@@ -172,6 +172,7 @@ func deleteInfusion(ctx context.Context, tx pgx.Tx, bctx BlockContext, id string
 	bctx.Dirty.Address(p.Address)
 	if parts[0] == "3" {
 		bctx.Dirty.Reactor(destination)
+		bctx.Dirty.NativeAddress(p.Address)
 	}
 	// Removing a position never refunds burned fuel or creates a bank credit.
 	return nil

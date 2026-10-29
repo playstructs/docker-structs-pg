@@ -107,6 +107,7 @@ type Config struct {
 	LCDPageLimit         int
 	PlayerRankSweep      bool
 	PlanetAttributeSweep bool
+	NativeStakingRefresh bool
 
 	// `sync-state init-genesis` knobs.
 	//
@@ -263,6 +264,8 @@ func LoadConfig(args []string) Config {
 
 	fs.StringVar(&cfg.LCDURL, "lcd", envOr("STRUCTS_API_URL", "http://structsd:1317"),
 		"ingest: Cosmos LCD base URL for startup sweeps (guild_rank, planet_attribute; same env as update-cache)")
+	fs.BoolVar(&cfg.NativeStakingRefresh, "native-staking-refresh", envOrBool("SYNC_NATIVE_STAKING_REFRESH", true),
+		"ingest: refresh complete native staking claims asynchronously; disabling leaves invalidated claims unknown")
 	fs.IntVar(&cfg.LCDPageLimit, "lcd-page-limit", envOrInt("PAGE_LIMIT", 10000),
 		"ingest: pagination.limit sent to the LCD per page during startup sweeps")
 	fs.BoolVar(&cfg.PlayerRankSweep, "player-rank-sweep", envOrBool("SYNC_STATE_PLAYER_RANK_SWEEP", true),

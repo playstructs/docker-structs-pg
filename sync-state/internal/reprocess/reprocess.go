@@ -33,6 +33,7 @@ import (
 	"sync-state/internal/events"
 	"sync-state/internal/readmodel"
 	"sync-state/internal/rpc"
+	"sync-state/internal/staking"
 )
 
 // CmdInputs is the dependency bundle the subcommand wrapper hands the
@@ -257,6 +258,9 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 	}
 
 	dirty.Ledger(buf.Ledger)
+	if err := staking.Invalidate(ctx, tx, in.ChainID, bctx.Height, dirty, staking.Changes{}); err != nil {
+		return nil, fmt.Errorf("invalidate repaired native claims: %w", err)
+	}
 	deltas, err := buf.Flush(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("flush buffer: %w", err)

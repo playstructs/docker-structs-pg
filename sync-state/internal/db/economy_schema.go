@@ -57,6 +57,12 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		{"sync_state.economy_event_position", "height", "bigint"},
 		{"sync_state.economy_event_position", "tx_index", "integer"},
 		{"sync_state.economy_event_position", "event_index", "integer"},
+		{"sync_state.native_staking_snapshot", "required_height", "bigint"},
+		{"sync_state.native_staking_snapshot", "source_height", "bigint"},
+		{"sync_state.native_staking_snapshot", "bonded", "numeric"},
+		{"sync_state.native_staking_snapshot", "unbonding", "numeric"},
+		{"sync_state.native_staking_snapshot", "pending", "boolean"},
+		{"sync_state.native_staking_claim", "complete", "boolean"},
 	}
 	for _, c := range columns {
 		var typ string
@@ -81,6 +87,9 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		{"structs.reactor_stake_cap", []string{"singleton"}},
 		{"sync_state.infusion_event_position", []string{"destination_id", "address"}},
 		{"sync_state.economy_event_position", []string{"family", "entity_id"}},
+		{"sync_state.native_staking_snapshot", []string{"chain_id", "address"}},
+		{"sync_state.native_staking_exposure", []string{"chain_id", "validator", "address"}},
+		{"sync_state.native_staking_invalidation", []string{"chain_id", "validator"}},
 		{"structs.ledger", []string{"time", "chain_id", "tx_index", "msg_index", "event_index", "denom"}},
 	} {
 		var valid bool
@@ -124,7 +133,7 @@ to_regprocedure('structs.api_projection_boundary()'),'EXECUTE'),FALSE)`).Scan(&b
 	if !boundaryReady {
 		return fmt.Errorf("v0.22 schema missing executable structs.api_projection_boundary(); deploy the ownership maintenance migration")
 	}
-	for _, source := range []string{"sync_state.sync_cursor", "structs.current_block", "structs.struct", "structs.planet", "view.work_live"} {
+	for _, source := range []string{"sync_state.sync_cursor", "sync_state.native_staking_claim", "structs.current_block", "structs.struct", "structs.planet", "view.work_live"} {
 		var readable bool
 		if err := q.QueryRow(ctx, `SELECT has_table_privilege(current_user,$1,'SELECT')`, source).Scan(&readable); err != nil {
 			return err

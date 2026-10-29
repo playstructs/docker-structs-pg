@@ -109,6 +109,7 @@ func (reactorCommissionRevisionHandler) Handle(ctx context.Context, tx pgx.Tx, b
 		return err
 	}
 	b.Dirty.Reactor(p.ReactorID)
+	b.Dirty.NativeReactor(p.ReactorID)
 	return recordEconomyPosition(ctx, tx, b, "commission", p.ReactorID)
 }
 

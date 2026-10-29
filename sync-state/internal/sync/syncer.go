@@ -128,6 +128,8 @@ type fetchedWindow struct {
 // then apply". Streaming mode skips prefetch (its inner select already
 // overlaps fetch + apply per block).
 func (s *Syncer) Run(ctx context.Context, start int64) error {
+	stopNativeRefresh := s.startNativeRefresh(ctx)
+	defer stopNativeRefresh()
 	next := start
 	var lastTipLog time.Time
 	// At most one pre-fetched window in flight. nil = nothing prefetched.

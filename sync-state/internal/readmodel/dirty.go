@@ -16,6 +16,10 @@ type Dirty struct {
 	Providers   map[string]struct{}
 	Substations map[string]struct{}
 	GridObjects map[string]struct{}
+	// Native claims need an exact query after staking or reactor changes;
+	// merely dirtying a liquid balance does not invalidate existing evidence.
+	NativeAddresses map[string]struct{}
+	NativeReactors  map[string]struct{}
 
 	// inventoryPlayers is the subset of Players whose api_inventory rows
 	// can have changed: players marked directly by handlers plus owners of
@@ -26,13 +30,15 @@ type Dirty struct {
 
 func NewDirty() *Dirty {
 	return &Dirty{
-		Addresses:   map[string]struct{}{},
-		Players:     map[string]struct{}{},
-		Guilds:      map[string]struct{}{},
-		Reactors:    map[string]struct{}{},
-		Providers:   map[string]struct{}{},
-		Substations: map[string]struct{}{},
-		GridObjects: map[string]struct{}{},
+		Addresses:       map[string]struct{}{},
+		Players:         map[string]struct{}{},
+		Guilds:          map[string]struct{}{},
+		Reactors:        map[string]struct{}{},
+		Providers:       map[string]struct{}{},
+		Substations:     map[string]struct{}{},
+		GridObjects:     map[string]struct{}{},
+		NativeAddresses: map[string]struct{}{},
+		NativeReactors:  map[string]struct{}{},
 	}
 }
 
@@ -78,6 +84,19 @@ func (d *Dirty) GridObject(id string) {
 	}
 }
 
+func (d *Dirty) NativeAddress(id string) {
+	if d != nil {
+		add(d.NativeAddresses, id)
+		d.Address(id)
+	}
+}
+
+func (d *Dirty) NativeReactor(id string) {
+	if d != nil {
+		add(d.NativeReactors, id)
+	}
+}
+
 // Ledger marks every address touched by buffered ledger rows and guilds whose
 // token supply changed. Call before Buffer.Flush resets the ledger slice.
 func (d *Dirty) Ledger(rows []buffers.LedgerRow) {
@@ -112,7 +131,8 @@ func (d *Dirty) Snapshot() Snapshot {
 		Addresses: cloneSet(d.Addresses), Players: cloneSet(d.Players),
 		Guilds: cloneSet(d.Guilds), Reactors: cloneSet(d.Reactors),
 		Providers: cloneSet(d.Providers), Substations: cloneSet(d.Substations),
-		GridObjects: cloneSet(d.GridObjects),
+		GridObjects:     cloneSet(d.GridObjects),
+		NativeAddresses: cloneSet(d.NativeAddresses), NativeReactors: cloneSet(d.NativeReactors),
 	}}
 }
 
@@ -134,6 +154,7 @@ func (d *Dirty) Merge(other *Dirty) {
 		{d.Guilds, other.Guilds}, {d.Reactors, other.Reactors},
 		{d.Providers, other.Providers}, {d.Substations, other.Substations},
 		{d.GridObjects, other.GridObjects},
+		{d.NativeAddresses, other.NativeAddresses}, {d.NativeReactors, other.NativeReactors},
 	} {
 		for k := range pair[1] {
 			pair[0][k] = struct{}{}

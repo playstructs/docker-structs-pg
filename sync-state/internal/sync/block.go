@@ -16,6 +16,7 @@ import (
 	"sync-state/internal/events"
 	"sync-state/internal/readmodel"
 	"sync-state/internal/rpc"
+	"sync-state/internal/staking"
 )
 
 // BlockBundle is everything we need to ingest one block: the /block and
@@ -145,6 +146,16 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 	// The buffer still flushes per block: the planet_activity COPY trigger
 	// attributes rows using object ownership at flush time.
 	dirty.Ledger(buf.Ledger)
+	nativeChanges, err := bank.NativeChanges(bundle.FinalizeBlockEvents, bundle.TxResults)
+	if err == nil {
+		err = staking.Invalidate(ctx, tx, bundle.ChainID, bundle.Height, dirty, nativeChanges)
+	}
+	if err != nil {
+		pendingErrs = append(pendingErrs, events.HandlerError{
+			CompositeKey: "bank.native_claims", Error: err.Error(), Severity: events.SeverityError,
+		})
+		return nil, fmt.Errorf("native claims h=%d: %w", bundle.Height, err)
+	}
 	deltas, err := buf.Flush(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
