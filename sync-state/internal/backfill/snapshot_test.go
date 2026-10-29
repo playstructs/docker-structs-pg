@@ -110,9 +110,8 @@ VALUES('12-2-994199','2-994199','planet','blockStartOreMine',25)`); err != nil {
 	if exact != "3353000" || cleared != "0" {
 		t.Fatalf("snapshot precision/clear: exact=%s cleared=%s", exact, cleared)
 	}
-	var ready int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM structs.api_refresh_state`).Scan(&ready); err != nil || ready != 0 {
-		t.Fatalf("changed snapshot left readiness published: rows=%d err=%v", ready, err)
+	if needed, err := readmodel.NeedsBackfill(ctx, tx, 101); err != nil || !needed {
+		t.Fatalf("changed snapshot left readiness published: needs_backfill=%v err=%v", needed, err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO structs.player(id,index,primary_address) VALUES('1-994199',994199,'snapshot-rank-address')`); err != nil {
 		t.Fatal(err)

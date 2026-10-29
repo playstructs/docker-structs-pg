@@ -17,11 +17,14 @@ type BackfillReport struct {
 
 // NeedsBackfill returns true until every model has a refresh row at the
 // current indexed height. A partial prior attempt is always rebuilt.
-func NeedsBackfill(ctx context.Context, pool *pgxpool.Pool, height int64) (bool, error) {
+func NeedsBackfill(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, height int64) (bool, error) {
 	var count int
-	if err := pool.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 SELECT COUNT(*) FROM structs.api_refresh_state
-WHERE model = ANY($1::text[]) AND source_height = $2`, modelNames, height).Scan(&count); err != nil {
+WHERE model = ANY($1::text[]) AND source_height = $2
+  AND (model <> 'inventory' OR inventory_authority='current-claims-v1')`, modelNames, height).Scan(&count); err != nil {
 		return false, err
 	}
 	return count != len(modelNames), nil
@@ -99,22 +102,9 @@ func backfillInventory(ctx context.Context, tx pgx.Tx) error {
 		return fmt.Errorf("clear api_inventory: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
-SELECT 'address'::structs.object_type, address, denom,
-       SUM(CASE direction WHEN 'credit' THEN amount_p ELSE -amount_p END)
-  FROM structs.ledger
- WHERE address IS NOT NULL AND denom IS NOT NULL
- GROUP BY address, denom`); err != nil {
-		return fmt.Errorf("backfill address inventory: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
-SELECT ao.owner_type, ao.owner_id, i.denom, SUM(i.balance)
-  FROM structs.api_inventory i
-  JOIN structs.asset_owner ao ON ao.address = i.owner_id
- WHERE i.owner_type = 'address'
- GROUP BY ao.owner_type, ao.owner_id, i.denom`); err != nil {
-		return fmt.Errorf("backfill owner inventory: %w", err)
+INSERT INTO structs.api_inventory(owner_type,owner_id,denom,balance)
+SELECT owner_type,owner_id,denom,balance FROM structs.api_inventory_expected(TRUE)`); err != nil {
+		return fmt.Errorf("backfill current inventory: %w", err)
 	}
 	return nil
 }

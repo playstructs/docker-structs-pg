@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"sync-state/internal/buffers"
@@ -41,6 +42,7 @@ func nativeWorkerFixture(t *testing.T) (*Syncer, context.Context) {
 	t.Cleanup(pool.Close)
 	chain := "native-worker-" + t.Name()
 	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM structs.api_inventory WHERE owner_type='address' AND owner_id=ANY($1::varchar[])`, []string{nativeWorkerAddress, nativeWorkerOther})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sync_state.native_staking_snapshot WHERE chain_id=$1`, chain)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sync_state.native_staking_invalidation WHERE chain_id=$1`, chain)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sync_state.sync_cursor WHERE chain_id=$1`, chain)
@@ -261,5 +263,135 @@ func TestNativeWorker_StopCancelsActiveHTTP(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not join after cancellation")
+	}
+}
+
+func TestNativeWorker_PublishesClaimsAndNotificationsAtomically(t *testing.T) {
+	if os.Getenv("INTEGRATION_MAINTENANCE_TESTS") != "1" {
+		t.Skip("INTEGRATION_MAINTENANCE_TESTS=1 requires a disposable database")
+	}
+	s, ctx := nativeWorkerFixture(t)
+	const player = "1-996301"
+	var prior string
+	if err := s.pool.Pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(r),'[]')::text FROM structs.api_refresh_state r`).Scan(&prior); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup := context.Background()
+		tx, err := s.pool.Pool.Begin(cleanup)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer tx.Rollback(cleanup)
+		for _, sql := range []string{
+			`DELETE FROM structs.api_inventory WHERE owner_id IN ('1-996301','` + nativeWorkerAddress + `')`,
+			`DELETE FROM structs.api_leaderboard_player WHERE player_id='1-996301'`,
+			`DELETE FROM structs.player_address WHERE player_id='1-996301'`,
+			`DELETE FROM structs.grid WHERE object_id='1-996301'`,
+			`DELETE FROM structs.player WHERE id='1-996301'`,
+			`DELETE FROM structs.api_work_dirty WHERE id='1-996301'`,
+			`DELETE FROM structs.api_refresh_state`,
+		} {
+			if _, err := tx.Exec(cleanup, sql); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		if _, err := tx.Exec(cleanup, `INSERT INTO structs.api_refresh_state SELECT * FROM jsonb_populate_recordset(NULL::structs.api_refresh_state,$1::jsonb)`, prior); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := tx.Commit(cleanup); err != nil {
+			t.Error(err)
+		}
+	})
+	seed, err := s.pool.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seed.Rollback(ctx)
+	if _, err := seed.Exec(ctx, `INSERT INTO structs.player(id,primary_address) VALUES($1,$2)`, player, nativeWorkerAddress); err != nil {
+		t.Fatal(err)
+	}
+	dirty := readmodel.NewDirty()
+	dirty.Address(nativeWorkerAddress)
+	if err := readmodel.Recompute(ctx, seed, dirty, 77, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), readmodel.InventoryFromLedger()); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	nativeRequest(t, s, ctx, 100, nativeWorkerAddress)
+	var before string
+	if err := s.pool.Pool.QueryRow(ctx, `SELECT jsonb_agg(r ORDER BY model)::text FROM structs.api_refresh_state r`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := pgx.Connect(ctx, os.Getenv("INTEGRATION_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close(context.Background())
+	if _, err := listener.Exec(ctx, `LISTEN grass`); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		emptyNativeResponse(w, r, s.chainID)
+	}))
+	defer server.Close()
+	s.cfg.LCDURL = server.URL
+	if n, err := s.refreshNativeBatch(ctx); err != nil || n != 1 {
+		t.Fatalf("publication count=%d err=%v", n, err)
+	}
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		n, err := listener.WaitForNotification(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]string
+		if err := json.Unmarshal([]byte(n.Payload), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["subject"] != "structs.grid.player."+player || payload["invalidates"] != "inventory" {
+			t.Fatalf("unexpected claim notification: %s", n.Payload)
+		}
+		seen[payload["denom"]] = true
+		var ready bool
+		if err := s.pool.Pool.QueryRow(ctx, `SELECT alpha_value=0 AND alpha_balance=0 FROM structs.api_leaderboard_player WHERE player_id=$1`, player).Scan(&ready); err != nil || !ready {
+			t.Fatalf("notification preceded committed projection: ready=%v err=%v", ready, err)
+		}
+	}
+	if !seen["ualpha.infused"] || !seen["ualpha.defusing"] {
+		t.Fatalf("missing claim invalidation: %v", seen)
+	}
+	var after string
+	if err := s.pool.Pool.QueryRow(ctx, `SELECT jsonb_agg(r ORDER BY model)::text FROM structs.api_refresh_state r`).Scan(&after); err != nil || after != before {
+		t.Fatalf("worker advanced incomplete projection boundary: %s != %s err=%v", after, before, err)
+	}
+	// A failed publication transaction must expose neither changed totals
+	// nor a notification that claims they were committed.
+	tx, err := s.pool.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE sync_state.native_staking_snapshot SET bonded=9 WHERE chain_id=$1`, s.chainID); err != nil {
+		t.Fatal(err)
+	}
+	if err := readmodel.RefreshNativeClaims(ctx, tx, nativeWorkerAddress); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if n, err := listener.WaitForNotification(waitCtx); err == nil || n != nil {
+		t.Fatalf("rolled-back claim notified: %v %v", n, err)
+	}
+	var unchanged bool
+	if err := s.pool.Pool.QueryRow(ctx, `SELECT alpha_value=0 FROM structs.api_leaderboard_player WHERE player_id=$1`, player).Scan(&unchanged); err != nil || !unchanged {
+		t.Fatalf("rolled-back value escaped: unchanged=%v err=%v", unchanged, err)
 	}
 }

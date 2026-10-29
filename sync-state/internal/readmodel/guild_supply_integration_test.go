@@ -30,6 +30,12 @@ func TestGuildSupplyIncludesGenesisEscrowAndOnlyAlphaCollateral(t *testing.T) {
 		seedIsolatedLedger(t, ctx, tx, pool, "100", "received", "credit", "ualpha", 4)
 		seedIsolatedLedger(t, ctx, tx, pool2, "100", "received", "credit", "ualpha", 4)
 		seedIsolatedLedger(t, ctx, tx, pool, "9999", "received", "credit", "ibc/OTHER", 4)
+		projectionBoundary(t, ctx, tx, 4)
+		if _, err := tx.Exec(ctx, `INSERT INTO sync_state.native_staking_snapshot
+(chain_id,address,required_height,source_height,bonded,unbonding,fetched_at)
+SELECT 'ownership-test',address,4,4,0,0,NOW() FROM structs.asset_owner WHERE owner_id=$1`, player); err != nil {
+			t.Fatal(err)
+		}
 		d := NewDirty()
 		d.Guild(guild)
 		d.Player(player)

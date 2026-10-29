@@ -37,7 +37,7 @@ type InventoryPlan struct {
 }
 
 // InventoryFromLedger rebuilds dirty address/player rows from a full
-// ledger aggregate. Used by tests and as a repair path.
+// bank ledger aggregate and current synthetic claims. Used as a repair path.
 func InventoryFromLedger() InventoryPlan {
 	return InventoryPlan{mode: inventoryFromLedger}
 }
@@ -307,12 +307,15 @@ func refreshModels(ctx context.Context, tx pgx.Tx, models []string, height int64
 		return nil
 	}
 	_, err := tx.Exec(ctx, `
-INSERT INTO structs.api_refresh_state(model, source_height, source_time, refreshed_at)
-SELECT m, $2::bigint, $3::timestamptz, NOW() FROM unnest($1::text[]) AS m
+INSERT INTO structs.api_refresh_state(model, source_height, source_time, refreshed_at, inventory_authority)
+SELECT m, $2::bigint, $3::timestamptz, NOW(),
+       CASE WHEN m='inventory' THEN 'current-claims-v1' ELSE 'ledger' END
+FROM unnest($1::text[]) AS m
 ON CONFLICT (model) DO UPDATE
 SET source_height = EXCLUDED.source_height,
     source_time = EXCLUDED.source_time,
-    refreshed_at = EXCLUDED.refreshed_at`, models, height, sourceTime)
+    refreshed_at = EXCLUDED.refreshed_at,
+    inventory_authority = EXCLUDED.inventory_authority`, models, height, sourceTime)
 	return err
 }
 
@@ -333,35 +336,87 @@ SELECT inserted, updated, deleted
 }
 
 func recomputeInventory(ctx context.Context, tx pgx.Tx, d *Dirty) error {
-	addresses, owners := d.AddressIDs(), d.InventoryOwnerIDs()
-	if len(addresses) == 0 && len(owners) == 0 {
-		return nil
-	}
-	if _, err := tx.Exec(ctx, `
-DELETE FROM structs.api_inventory
-WHERE (owner_type = 'address' AND owner_id = ANY($1::varchar[]))
-   OR (owner_type IN ('player','guild') AND owner_id = ANY($2::varchar[]))`,
-		addresses, owners); err != nil {
+	addresses, err := inventoryAddresses(ctx, tx, d)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO structs.api_inventory(owner_type, owner_id, denom, balance)
-SELECT 'address'::structs.object_type, l.address, l.denom,
-       SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)
-FROM structs.ledger l
-WHERE l.address = ANY($1::varchar[])
-GROUP BY l.address, l.denom`, addresses); err != nil {
+	if len(addresses) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM structs.api_inventory
+WHERE owner_type='address' AND owner_id=ANY($1::varchar[])`, addresses); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO structs.api_inventory(owner_type,owner_id,denom,balance)
+SELECT 'address'::structs.object_type,address,denom,balance
+FROM structs.api_inventory_address_expected($1::varchar[],TRUE)`, addresses); err != nil {
+			return err
+		}
+	}
+	return rebuildOwnerInventory(ctx, tx, d.InventoryOwnerIDs())
+}
+
+// Include current owner addresses even when only an ownership/player event
+// dirtied the owner. A missing native snapshot must materialize as unknown.
+func inventoryAddresses(ctx context.Context, tx pgx.Tx, d *Dirty) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT address FROM unnest($1::varchar[]) a(address)
+UNION SELECT address FROM structs.asset_owner WHERE owner_id=ANY($2::varchar[])`,
+		d.AddressIDs(), d.InventoryOwnerIDs())
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+func refreshInventoryClaims(ctx context.Context, tx pgx.Tx, d *Dirty) error {
+	addresses, err := inventoryAddresses(ctx, tx, d)
+	if err != nil || len(addresses) == 0 {
 		return err
 	}
-	_, err := tx.Exec(ctx, `
-INSERT INTO structs.api_inventory(owner_type, owner_id, denom, balance)
-SELECT ao.owner_type, ao.owner_id, l.denom,
-       SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)
-FROM structs.asset_owner ao
-JOIN structs.ledger l ON l.address = ao.address
-WHERE ao.owner_id = ANY($1::varchar[])
-GROUP BY ao.owner_type, ao.owner_id, l.denom`, owners)
+	_, err = tx.Exec(ctx, `
+WITH candidates AS (
+  SELECT address FROM unnest($1::varchar[]) a(address)
+  WHERE EXISTS (SELECT 1 FROM structs.asset_owner o WHERE o.address=a.address)
+     OR EXISTS (SELECT 1 FROM sync_state.native_staking_snapshot s
+                JOIN sync_state.sync_cursor c ON c.chain_id=s.chain_id WHERE s.address=a.address)
+     OR EXISTS (SELECT 1 FROM structs.infusion i WHERE i.address=a.address)
+     OR EXISTS (SELECT 1 FROM structs.api_inventory i WHERE i.owner_type='address'
+                AND i.owner_id=a.address AND i.denom IN ('ualpha.infused','ualpha.defusing'))
+), fresh AS MATERIALIZED (
+  SELECT * FROM structs.api_inventory_current_claims(ARRAY(SELECT address FROM candidates))
+), stale AS (
+  DELETE FROM structs.api_inventory i
+  WHERE i.owner_type='address' AND i.owner_id=ANY($1::varchar[])
+    AND i.denom IN ('ualpha.infused','ualpha.defusing')
+    AND NOT EXISTS (SELECT 1 FROM fresh f WHERE f.address=i.owner_id AND f.denom=i.denom)
+)
+INSERT INTO structs.api_inventory(owner_type,owner_id,denom,balance)
+SELECT 'address'::structs.object_type,address,denom,balance FROM fresh
+ON CONFLICT (owner_type,owner_id,denom) DO UPDATE SET balance=EXCLUDED.balance
+WHERE structs.api_inventory.balance IS DISTINCT FROM EXCLUDED.balance`, addresses)
 	return err
+}
+
+// RefreshNativeClaims publishes dependent inventory/value in the same locked
+// transaction as native evidence. It never advances a projection watermark:
+// deferred or incomplete models still require the normal canonical rebuild.
+func RefreshNativeClaims(ctx context.Context, tx pgx.Tx, address string) error {
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM structs.api_refresh_state
+WHERE model='inventory' AND inventory_authority='current-claims-v1')`).Scan(&active); err != nil || !active {
+		return err
+	}
+	d := NewDirty()
+	d.Address(address)
+	// No guild bank ratio or game capacity changed. Avoid the general
+	// expansion's guild-member/token-holder fan-out on each LCD result.
+	d.inventoryPlayers = cloneSet(d.Players)
+	if err := expandAddresses(ctx, tx, d); err != nil {
+		return err
+	}
+	if err := applyInventoryDeltas(ctx, tx, d, nil); err != nil {
+		return err
+	}
+	return recomputePlayers(ctx, tx, d)
 }
 
 func applyInventoryDeltas(ctx context.Context, tx pgx.Tx, d *Dirty, deltas []buffers.LedgerDelta) error {
@@ -379,12 +434,16 @@ INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
 SELECT 'address'::structs.object_type, address, denom, SUM(delta)
 FROM unnest($1::varchar[], $2::varchar[], $3::numeric[]) AS t(address, denom, delta)
 WHERE address IS NOT NULL AND denom IS NOT NULL
+  AND denom NOT IN ('ualpha.infused','ualpha.defusing')
 GROUP BY address, denom
 ON CONFLICT (owner_type, owner_id, denom)
 DO UPDATE SET balance = structs.api_inventory.balance + EXCLUDED.balance`,
 			addrs, denoms, amounts); err != nil {
 			return err
 		}
+	}
+	if err := refreshInventoryClaims(ctx, tx, d); err != nil {
+		return err
 	}
 	return rebuildOwnerInventory(ctx, tx, d.InventoryOwnerIDs())
 }
@@ -398,7 +457,7 @@ func rebuildOwnerInventory(ctx context.Context, tx pgx.Tx, owners []string) erro
 	}
 	_, err := tx.Exec(ctx, `
 WITH fresh AS (
-  SELECT ao.owner_type, ao.owner_id, i.denom, SUM(i.balance) AS balance
+  SELECT ao.owner_type, ao.owner_id, i.denom, CASE WHEN count(*)=count(i.balance) THEN SUM(i.balance) END AS balance
   FROM structs.asset_owner ao
   JOIN structs.api_inventory i ON i.owner_type='address' AND i.owner_id=ao.address
   WHERE ao.owner_id=ANY($1::varchar[])
@@ -465,8 +524,9 @@ SELECT p.id, p.username, p.guild_id,
        COALESCE(SUM(i.balance) FILTER (WHERE i.denom = 'ualpha'), 0),
        CASE
          WHEN COUNT(*) FILTER (
-           WHERE i.denom NOT IN ('ualpha','ualpha.infused','ualpha.defusing','ore')
-             AND gb.ratio IS NULL
+           WHERE i.denom IS NOT NULL AND (i.balance IS NULL
+             OR (i.denom NOT IN ('ualpha','ualpha.infused','ualpha.defusing','ore')
+                 AND gb.ratio IS NULL))
          ) > 0 THEN NULL
          ELSE COALESCE(SUM(CASE
            WHEN i.denom IN ('ualpha','ualpha.infused','ualpha.defusing') THEN i.balance

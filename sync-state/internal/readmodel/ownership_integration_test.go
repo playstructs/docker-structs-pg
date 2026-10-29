@@ -126,7 +126,7 @@ FROM structs.api_inventory WHERE owner_id=ANY($1::varchar[])`, append(addresses,
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM structs.api_inventory_reconcile(FALSE)`).Scan(&drift); err != nil || drift != 0 {
 			t.Fatalf("correct projection drift=%d err=%v", drift, err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE structs.api_inventory SET balance=999 WHERE owner_id=ANY($1::varchar[])`, []string{addresses[5], p1, g1}); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE structs.api_inventory SET balance=999 WHERE owner_id=ANY($1::varchar[]) AND denom='ualpha'`, []string{addresses[5], p1, g1}); err != nil {
 			t.Fatal(err)
 		}
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM structs.api_inventory_reconcile(TRUE)`).Scan(&drift); err != nil || drift != 3 {

@@ -22,6 +22,13 @@ func Lock(ctx context.Context, tx pgx.Tx) error {
 // projection inputs. Startup will rebuild before streaming; scheduled jobs must
 // not stamp the older projections as a complete snapshot in the meantime.
 func Invalidate(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `DELETE FROM structs.api_refresh_state`)
+	// Keep the inventory authority across repairs/restarts. Dropping its
+	// marker could re-enable legacy SQL comparisons or unsafe schema rollback.
+	_, err := tx.Exec(ctx, `DELETE FROM structs.api_refresh_state WHERE model <> 'inventory'`)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE structs.api_refresh_state SET source_height=0,source_time=NULL
+WHERE model='inventory'`)
 	return err
 }

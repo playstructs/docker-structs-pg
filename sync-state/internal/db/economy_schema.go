@@ -25,6 +25,7 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		}
 	}
 	columns := []struct{ table, column, typ string }{
+		{"structs.api_refresh_state", "inventory_authority", "text"},
 		{"structs.vault", "owner_id", "character varying"},
 		{"structs.vault", "address", "character varying"},
 		{"structs.vault", "account_number", "numeric"},
@@ -133,7 +134,7 @@ to_regprocedure('structs.api_projection_boundary()'),'EXECUTE'),FALSE)`).Scan(&b
 	if !boundaryReady {
 		return fmt.Errorf("v0.22 schema missing executable structs.api_projection_boundary(); deploy the ownership maintenance migration")
 	}
-	for _, source := range []string{"sync_state.sync_cursor", "sync_state.native_staking_claim", "structs.current_block", "structs.struct", "structs.planet", "view.work_live"} {
+	for _, source := range []string{"sync_state.sync_cursor", "sync_state.native_staking_claim", "structs.infusion", "structs.current_block", "structs.struct", "structs.planet", "view.work_live"} {
 		var readable bool
 		if err := q.QueryRow(ctx, `SELECT has_table_privilege(current_user,$1,'SELECT')`, source).Scan(&readable); err != nil {
 			return err
@@ -141,6 +142,20 @@ to_regprocedure('structs.api_projection_boundary()'),'EXECUTE'),FALSE)`).Scan(&b
 		if !readable {
 			return fmt.Errorf("v0.22 maintenance missing SELECT on %s", source)
 		}
+	}
+	var claimsReady bool
+	if err := q.QueryRow(ctx, `SELECT COALESCE(has_function_privilege(current_user,
+to_regprocedure('structs.api_inventory_expected(boolean)'),'EXECUTE'),FALSE)
+AND COALESCE(has_function_privilege(current_user,
+to_regprocedure('structs.api_inventory_current_claims(character varying[])'),'EXECUTE'),FALSE)
+AND COALESCE(has_function_privilege(current_user,
+to_regprocedure('structs.api_inventory_address_expected(character varying[],boolean)'),'EXECUTE'),FALSE)
+AND NOT (SELECT attnotnull FROM pg_attribute
+         WHERE attrelid='structs.api_inventory'::regclass AND attname='balance')`).Scan(&claimsReady); err != nil {
+		return err
+	}
+	if !claimsReady {
+		return fmt.Errorf("v0.22 current-claim inventory contract missing; deploy the Sqitch current-claims migration")
 	}
 	var legacyLedgerKey bool
 	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_index i

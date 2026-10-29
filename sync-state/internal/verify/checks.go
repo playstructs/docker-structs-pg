@@ -632,6 +632,22 @@ func checkLedgerBalanceSanity(ctx context.Context, in Inputs) CheckResult {
 // intentionally insufficient: this also reconciles inventory aggregates and
 // detects projection rows whose authoritative entity disappeared.
 func checkAPIReadModels(ctx context.Context, in Inputs) CheckResult {
+	// A refresh can commit between individual SELECTs. Compare every source
+	// and projection in one MVCC snapshot without blocking the writer.
+	if pool, ok := in.Pool.(interface {
+		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	}); ok {
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+		if err != nil {
+			return CheckResult{Status: StatusFail, Detail: fmt.Sprintf("begin projection verification: %v", err)}
+		}
+		defer tx.Rollback(ctx)
+		in.Pool = tx
+	}
+	return checkAPIReadModelsSnapshot(ctx, in)
+}
+
+func checkAPIReadModelsSnapshot(ctx context.Context, in Inputs) CheckResult {
 	r := CheckResult{Counts: map[string]any{}}
 	if !tableExists(ctx, in.Pool, "structs", "api_refresh_state") {
 		r.Status = StatusSkip
@@ -646,12 +662,12 @@ func checkAPIReadModels(ctx context.Context, in Inputs) CheckResult {
 	}
 	var models, stale int64
 	if err := in.Pool.QueryRow(ctx, `
-SELECT COUNT(*), COUNT(*) FILTER (WHERE source_height < $1 - 1)
+SELECT COUNT(*), COUNT(*) FILTER (WHERE source_height <> $1 OR source_time IS DISTINCT FROM $2::timestamptz)
 FROM structs.api_refresh_state
 WHERE model = ANY(ARRAY[
   'inventory','guild_bank','leaderboard_player','leaderboard_guild',
   'leaderboard_reactor','leaderboard_provider','leaderboard_substation','work'
-])`, cursor.LastHeight).Scan(&models, &stale); err != nil {
+]) AND (model <> 'inventory' OR inventory_authority='current-claims-v1')`, cursor.LastHeight, cursor.LastBlockTime).Scan(&models, &stale); err != nil {
 		r.Status = StatusFail
 		r.Detail = fmt.Sprintf("refresh state: %v", err)
 		return r
@@ -659,12 +675,22 @@ WHERE model = ANY(ARRAY[
 	r.Counts["refresh_models"] = models
 	r.Counts["stale_models"] = stale
 
+	var unknownAddresses, unknownPlayers int64
+	if err := in.Pool.QueryRow(ctx, `SELECT
+  (SELECT count(DISTINCT owner_id) FROM structs.api_inventory WHERE owner_type='address' AND balance IS NULL),
+  (SELECT count(*) FROM structs.api_leaderboard_player WHERE alpha_value IS NULL)`).Scan(&unknownAddresses, &unknownPlayers); err != nil {
+		r.Status = StatusFail
+		r.Detail = fmt.Sprintf("claim completeness: %v", err)
+		return r
+	}
+	r.Counts["unknown_claim_addresses"] = unknownAddresses
+	r.Counts["unknown_player_values"] = unknownPlayers
+
 	var addressDiff, ownerDiff, totalsDiff int64
 	err = in.Pool.QueryRow(ctx, `
 WITH expected AS (
-  SELECT address AS owner_id, denom,
-         SUM(CASE direction WHEN 'credit' THEN amount_p ELSE -amount_p END) AS balance
-  FROM structs.ledger GROUP BY address, denom
+  SELECT address AS owner_id,denom,balance
+  FROM structs.api_inventory_address_expected(NULL,TRUE)
 ), actual AS (
   SELECT owner_id, denom, balance FROM structs.api_inventory
   WHERE owner_type = 'address'
@@ -681,10 +707,8 @@ SELECT COUNT(*) FROM delta`).Scan(&addressDiff)
 	}
 	err = in.Pool.QueryRow(ctx, `
 WITH expected AS (
-  SELECT ao.owner_type, ao.owner_id, l.denom,
-         SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END) AS balance
-  FROM structs.asset_owner ao JOIN structs.ledger l ON l.address = ao.address
-  GROUP BY ao.owner_type, ao.owner_id, l.denom
+  SELECT owner_type,owner_id,denom,balance FROM structs.api_inventory_expected(TRUE)
+  WHERE owner_type IN ('player','guild')
 ), actual AS (
   SELECT owner_type, owner_id, denom, balance FROM structs.api_inventory
   WHERE owner_type IN ('player','guild')
@@ -701,13 +725,13 @@ SELECT COUNT(*) FROM delta`).Scan(&ownerDiff)
 	}
 	err = in.Pool.QueryRow(ctx, `
 WITH address_total AS (
-  SELECT denom, SUM(balance) balance FROM structs.api_inventory
+  SELECT denom, CASE WHEN count(*)=count(balance) THEN SUM(balance) END balance FROM structs.api_inventory
   WHERE owner_type = 'address' GROUP BY denom
 ), owner_total AS (
-  SELECT denom, SUM(balance) balance FROM structs.api_inventory
+  SELECT denom, CASE WHEN count(*)=count(balance) THEN SUM(balance) END balance FROM structs.api_inventory
   WHERE owner_type IN ('player','guild') GROUP BY denom
 ), unassociated AS (
-  SELECT i.denom, SUM(i.balance) balance
+  SELECT i.denom, CASE WHEN count(*)=count(i.balance) THEN SUM(i.balance) END balance
   FROM structs.api_inventory i
   LEFT JOIN structs.asset_owner ao ON ao.address = i.owner_id
   WHERE i.owner_type = 'address' AND ao.address IS NULL
@@ -716,7 +740,9 @@ WITH address_total AS (
 SELECT COUNT(*) FROM address_total a
 FULL JOIN owner_total p USING (denom)
 FULL JOIN unassociated u USING (denom)
-WHERE COALESCE(a.balance, 0) <> COALESCE(p.balance, 0) + COALESCE(u.balance, 0)`).Scan(&totalsDiff)
+WHERE a.balance IS DISTINCT FROM
+      (CASE WHEN p.denom IS NULL THEN 0 ELSE p.balance END
+       + CASE WHEN u.denom IS NULL THEN 0 ELSE u.balance END)`).Scan(&totalsDiff)
 	if err != nil {
 		r.Status = StatusFail
 		r.Detail = fmt.Sprintf("inventory total accounting: %v", err)
@@ -784,7 +810,15 @@ SELECT
      ON i.owner_type = 'player' AND i.owner_id = a.player_id AND i.denom = 'ualpha'
    WHERE a.username IS DISTINCT FROM p.username
       OR a.guild_id IS DISTINCT FROM p.guild_id
-      OR a.alpha_balance IS DISTINCT FROM COALESCE(i.balance, 0)) +
+      OR a.alpha_balance IS DISTINCT FROM COALESCE(i.balance, 0)
+      OR a.alpha_value IS DISTINCT FROM (
+        SELECT CASE WHEN COUNT(*) FILTER (WHERE x.balance IS NULL
+          OR (x.denom NOT IN ('ualpha','ualpha.infused','ualpha.defusing','ore') AND b.ratio IS NULL)) > 0
+          THEN NULL ELSE COALESCE(SUM(CASE
+            WHEN x.denom IN ('ualpha','ualpha.infused','ualpha.defusing') THEN x.balance
+            WHEN x.denom='ore' THEN 0 ELSE x.balance*b.ratio END),0) END
+        FROM structs.api_inventory x LEFT JOIN structs.api_guild_bank b ON b.denom=x.denom
+        WHERE x.owner_type='player' AND x.owner_id=a.player_id)) +
   (SELECT COUNT(*) FROM structs.api_leaderboard_guild a
    JOIN structs.guild g ON g.id = a.guild_id
    WHERE a.player_count IS DISTINCT FROM
@@ -827,12 +861,12 @@ SELECT
 	r.Counts["guild_bank_differences"] = bankDiff
 	r.Counts["leaderboard_differences"] = leaderboardDiff
 	r.Height = &cursor.LastHeight
-	if models != 7 || stale != 0 || addressDiff != 0 || ownerDiff != 0 || totalsDiff != 0 || orphans != 0 || bankDiff != 0 || leaderboardDiff != 0 {
+	if models != 8 || stale != 0 || addressDiff != 0 || ownerDiff != 0 || totalsDiff != 0 || orphans != 0 || bankDiff != 0 || leaderboardDiff != 0 {
 		r.Status = StatusFail
 		r.Detail = "API projections are not cutover-ready"
 	} else {
 		r.Status = StatusPass
-		r.Detail = "API refresh, inventory, guild-bank, leaderboard, and orphan checks pass"
+		r.Detail = "API projection consistency checks pass; unknown claims and player values are reported separately"
 	}
 	return r
 }

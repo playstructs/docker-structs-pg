@@ -121,6 +121,11 @@ func (s *Syncer) refreshNativeBatch(ctx context.Context) (int, error) {
 				if err != nil {
 					return err
 				}
+				if ok {
+					if err := readmodel.RefreshNativeClaims(writeCtx, tx, item.Address); err != nil {
+						return err
+					}
+				}
 				accepted = ok
 			}
 			return tx.Commit(writeCtx)
