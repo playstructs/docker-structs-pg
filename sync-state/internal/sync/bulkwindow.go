@@ -53,10 +53,12 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		return fmt.Errorf("bulk begin tx h=%d: %w", blocks[0].Height, err)
 	}
 	committed := false
+	var allPending []pendingHandlerError
 	defer func() {
 		if !committed {
 			_ = tx.Rollback(ctx)
 		}
+		s.writePendingHandlerErrors(ctx, blocks[0].ChainID, allPending)
 	}()
 
 	timeout := s.cfg.BulkStatementTimeout
@@ -92,21 +94,17 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	windowDirty := readmodel.NewDirty()
 	var windowDeltas []buffers.LedgerDelta
 
-	var allPending []pendingHandlerError
 	for _, bundle := range blocks {
 		res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, opts)
+		for _, he := range res.PendingErrors {
+			allPending = append(allPending, pendingHandlerError{height: bundle.Height, he: he})
+		}
 		if err != nil {
 			return fmt.Errorf("bulk apply h=%d: %w", bundle.Height, err)
 		}
 		if !s.cfg.BulkDeferProjections {
 			windowDirty.Merge(res.Dirty)
 			windowDeltas = append(windowDeltas, res.LedgerDeltas...)
-		}
-		for _, he := range res.PendingErrors {
-			allPending = append(allPending, pendingHandlerError{
-				height: bundle.Height,
-				he:     he,
-			})
 		}
 	}
 
@@ -154,7 +152,6 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		s.projectionsStale = true
 	}
 
-	s.writePendingHandlerErrors(ctx, last.ChainID, allPending)
 	return nil
 }
 

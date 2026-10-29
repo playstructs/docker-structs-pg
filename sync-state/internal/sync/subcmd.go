@@ -210,6 +210,10 @@ func runReprocessErrors(ctx context.Context, cfg Config, stdout, stderr io.Write
 	}
 	defer pool.Close()
 
+	if err := db.CheckEconomySchema(ctx, pool.Pool); err != nil {
+		fmt.Fprintf(stderr, "reprocess-errors: %v\n", err)
+		return 1
+	}
 	router := events.NewRouter(cfg.StrictUnknownEvents)
 	return reprocess.Run(ctx, reprocess.CmdInputs{
 		Pool:         pool.Pool,
@@ -271,6 +275,10 @@ func runInitGenesis(ctx context.Context, cfg Config, stderr io.Writer) int {
 		return 1
 	}
 
+	if err := db.CheckEconomySchema(ctx, pool.Pool); err != nil {
+		fmt.Fprintf(stderr, "init-genesis: %v\n", err)
+		return 1
+	}
 	loaded, err := loadGenesisDocument(ctx, cfg, client, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "init-genesis: %v\n", err)
@@ -444,6 +452,13 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 	// Bootstrap schema / column additions (idempotent).
 	if err := db.Bootstrap(ctx, pool.Pool); err != nil {
 		fmt.Fprintf(stderr, "bootstrap: %v\n", err)
+		return 1
+	}
+
+	// Canonical schema is owned by structs-pg/Sqitch, not bootstrap or the
+	// optional doctor. Refuse ingestion before any authoritative writes.
+	if err := db.CheckEconomySchema(ctx, pool.Pool); err != nil {
+		fmt.Fprintf(stderr, "schema compatibility: %v\n", err)
 		return 1
 	}
 

@@ -11,5 +11,5 @@ type GuildRankPermission struct {
 	ObjectID    string  `json:"objectId"`
 	GuildID     string  `json:"guildId"`
 	Permissions JSONInt `json:"permissions"`
-	Rank        JSONInt `json:"rank"`
+	Rank        Uint64  `json:"rank"`
 }

@@ -3,9 +3,9 @@ package events
 // THE COMPLETE LIST OF EVENTS sync-state KNOWS HOW TO PROCESS.
 //
 // Add a new event:
-//   1. Add the payload struct to internal/payload/<event_name>.go.
-//   2. Create internal/events/<event_name>.go implementing Handler.
-//   3. Add one line to AllHandlers() below (alphabetical by composite_key).
+//  1. Add the payload struct to internal/payload/<event_name>.go.
+//  2. Create internal/events/<event_name>.go implementing Handler.
+//  3. Add one line to AllHandlers() below (alphabetical by composite_key).
 //
 // Run `sync-state list-handlers` for the runtime view; this slice and the
 // runtime view should always agree.
@@ -16,6 +16,15 @@ package events
 // subsystem.
 func AllHandlers() []Handler {
 	return []Handler{
+		// v0.22 economy snapshots and complete event envelopes.
+		vaultAddressHandler{},
+		ownerReactorDiversityHandler{},
+		economyResetHandler{family: "diversity"},
+		reactorCommissionRevisionHandler{},
+		economyResetHandler{family: "commission"},
+		reactorStakeCapHandler{},
+		guildRankPurchaseHandler{},
+
 		// Phase 2 — entity handlers (13)
 		allocationHandler{},
 		agreementHandler{},
@@ -53,6 +62,7 @@ func AllHandlers() []Handler {
 		oreMigrateHandler{},
 		oreTheftHandler{},
 		alphaRefineHandler{},
+		alphaInfuseHandler{},
 		raidHandler{},
 		providerAddressHandler{},
 		guildBankAddressHandler{},

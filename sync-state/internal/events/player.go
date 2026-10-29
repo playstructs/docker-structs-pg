@@ -117,7 +117,7 @@ func (playerHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 		payload.NullableText(p.SubstationID),
 		payload.NullableText(p.PlanetID),
 		payload.NullableText(p.FleetID),
-		p.GuildRank.Int64(),
+		p.GuildRank.PgValue(),
 		payload.NullableText(p.Name),
 		payload.NullableText(p.PFP),
 		payload.NullableText(p.PFPClientRenderAttributes),

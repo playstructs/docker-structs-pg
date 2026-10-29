@@ -516,7 +516,7 @@ func TestInfusion_LegacyRowUsesLedgerHeight(t *testing.T) {
 		const dest, addr = "5-990702", "structs1replayguard2"
 
 		if _, err := tx.Exec(ctx, infusionUpsertSQL,
-			dest, addr, "struct", "1-1", "3000000", nil, nil, nil, nil); err != nil {
+			dest, addr, "struct", "1-1", "3000000", nil, nil, nil, nil, nil, false); err != nil {
 			t.Fatalf("seed infusion: %v", err)
 		}
 		seed := heightBctx(977586)

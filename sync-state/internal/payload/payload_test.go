@@ -152,10 +152,11 @@ func TestDecodePlayerGuildRank(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
-		want int64
+		want uint64
 	}{
 		{"quoted", `{"id":"1-1","guildRank":"101"}`, 101},
 		{"number", `{"id":"1-1","guildRank":42}`, 42},
+		{"max uint64", `{"id":"1-1","guildRank":"18446744073709551615"}`, ^uint64(0)},
 		{"zero", `{"id":"1-1","guildRank":"0"}`, 0},
 		{"missing", `{"id":"1-1"}`, 0},
 	}
@@ -165,8 +166,8 @@ func TestDecodePlayerGuildRank(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if p.GuildRank.Int64() != tc.want {
-				t.Errorf("GuildRank = %d want %d", p.GuildRank.Int64(), tc.want)
+			if uint64(p.GuildRank) != tc.want {
+				t.Errorf("GuildRank = %d want %d", p.GuildRank, tc.want)
 			}
 		})
 	}

@@ -20,13 +20,13 @@
 //
 // Cross-event correlation (redelegate↔withdraw_rewards.delegator;
 // create_validator↔coin_spent.spender) is resolved within the same event
-// group (one tx, or the finalize_block batch) without any DB lookups.
+// execution phase/message and matched operation without any DB lookups.
 package bank
 
 import "sync-state/internal/rpc"
 
 // bankEventTypes is the canonical IN list from cache.PROCESS_BLOCK_LEDGER.
-// Used by IsBankEventType and by Capture for filtering.
+// Used by IsBankEventType during complete-stream processing.
 var bankEventTypes = map[string]struct{}{
 	"transfer":              {},
 	"coinbase":              {},
@@ -48,36 +48,18 @@ func IsBankEventType(t string) bool {
 	return ok
 }
 
-// Capture is retained for backwards compatibility but is now a thin
-// filter: it returns only the bank-relevant events from the block,
-// preserving the (tx-indexed) grouping the ledger derivations need.
-//
-// New callers should hand the raw bundle directly to ProcessBlock; this
-// is kept so callers that already hold an EventBuffer can keep using
-// it.
+// Capture retains every event: filtering would renumber financial identities
+// and discard message/receipt context needed to correlate accounting legs.
 func Capture(height int64, blockEvents []rpc.Event, txResults []rpc.TxResult) EventBuffer {
-	var finalize []rpc.Event
-	for _, e := range blockEvents {
-		if IsBankEventType(e.Type) {
-			finalize = append(finalize, e)
-		}
-	}
 	txs := make([][]rpc.Event, len(txResults))
 	for i, tr := range txResults {
-		var g []rpc.Event
-		for _, e := range tr.Events {
-			if IsBankEventType(e.Type) {
-				g = append(g, e)
-			}
-		}
-		txs[i] = g
+		txs[i] = tr.Events
 	}
-	return EventBuffer{Height: height, Finalize: finalize, Txs: txs}
+	return EventBuffer{Height: height, Finalize: blockEvents, Txs: txs}
 }
 
-// EventBuffer holds a single block's bank-relevant events, grouped by tx
-// so cross-event correlation (sibling withdraw_rewards / coin_spent) only
-// searches within the same tx.
+// EventBuffer holds a single block's original events and coordinates.
+// ProcessBlock establishes the execution-phase/message correlation scopes.
 type EventBuffer struct {
 	Height   int64
 	Finalize []rpc.Event   // events with tx_id IS NULL in the SQL world

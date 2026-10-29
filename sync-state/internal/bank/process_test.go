@@ -16,12 +16,12 @@ func TestParseAmountDenom(t *testing.T) {
 		ok    bool
 	}{
 		{"100ualpha", "100", "ualpha", true},
-		{"0.5uvert", "0.5", "uvert", true},
+		{"0.5uvert", "", "", false},
 		{"1234567890ualpha", "1234567890", "ualpha", true},
 		{"42ualpha.infused", "42", "ualpha.infused", true},
 		{"7u-test", "7", "u-test", true},
-		// multi-coin: returns only first match (mirrors SQL regexp_matches behavior)
-		{"100ualpha,500uvert", "100", "ualpha", true},
+		// Single-coin helper refuses a set; processEvent expands all coins.
+		{"100ualpha,500uvert", "", "", false},
 		// empty / unparseable
 		{"", "", "", false},
 		{"ualpha", "", "", false},
@@ -94,27 +94,7 @@ func TestFindAttrAndAmount(t *testing.T) {
 	}
 }
 
-func TestFindInGroup(t *testing.T) {
-	group := []rpc.Event{
-		{Type: "redelegate", Attributes: []rpc.Attribute{{Key: "amount", Value: "10ualpha"}}},
-		{Type: "withdraw_rewards", Attributes: []rpc.Attribute{
-			{Key: "delegator", Value: "structs1deleg"},
-			{Key: "validator", Value: "structsvaloper1abc"},
-		}},
-		{Type: "coin_spent", Attributes: []rpc.Attribute{{Key: "spender", Value: "structs1sp"}}},
-	}
-	if got := findInGroup(group, "withdraw_rewards", "delegator"); got != "structs1deleg" {
-		t.Errorf("findInGroup(withdraw_rewards, delegator) = %q", got)
-	}
-	if got := findInGroup(group, "coin_spent", "spender"); got != "structs1sp" {
-		t.Errorf("findInGroup(coin_spent, spender) = %q", got)
-	}
-	if got := findInGroup(group, "missing", "delegator"); got != "" {
-		t.Errorf("findInGroup(missing) = %q want \"\"", got)
-	}
-}
-
-func TestCaptureFiltering(t *testing.T) {
+func TestCapturePreservesSourceCoordinates(t *testing.T) {
 	finalize := []rpc.Event{
 		{Type: "transfer", Attributes: []rpc.Attribute{{Key: "amount", Value: "1ualpha"}}},
 		{Type: "structs.structs.EventTime", Attributes: []rpc.Attribute{{Key: "eventTimeDetail", Value: "{}"}}},
@@ -130,51 +110,14 @@ func TestCaptureFiltering(t *testing.T) {
 	if buf.Height != 42 {
 		t.Errorf("height = %d", buf.Height)
 	}
-	if len(buf.Finalize) != 2 {
-		t.Errorf("finalize: got %d want 2 (transfer+coinbase, skip EventTime)", len(buf.Finalize))
+	if len(buf.Finalize) != 3 {
+		t.Errorf("finalize: got %d want 3 (complete source stream)", len(buf.Finalize))
 	}
 	if len(buf.Txs) != 1 {
 		t.Errorf("txs groups: got %d want 1", len(buf.Txs))
 	}
-	if len(buf.Txs[0]) != 1 {
-		t.Errorf("tx[0]: got %d want 1 (transfer; skip message)", len(buf.Txs[0]))
-	}
-}
-
-func TestIsStructInfusionTx(t *testing.T) {
-	structInfusion := []rpc.Event{
-		{Type: "message", Attributes: []rpc.Attribute{
-			{Key: "action", Value: "/structs.structs.MsgStructGeneratorInfuse"},
-		}},
-		{Type: "structs.structs.EventInfusion", Attributes: []rpc.Attribute{
-			{Key: "infusion", Value: `{"destinationType":"struct","destinationId":"5-1916","fuel":"1000000"}`},
-		}},
-	}
-	if !isStructInfusionTx(structInfusion) {
-		t.Error("struct infusion group: want true")
-	}
-
-	reactorInfusion := []rpc.Event{
-		{Type: "message", Attributes: []rpc.Attribute{
-			{Key: "action", Value: "/structs.structs.MsgReactorInfuse"},
-		}},
-		{Type: "structs.structs.EventInfusion", Attributes: []rpc.Attribute{
-			{Key: "infusion", Value: `{"destinationType":"reactor","destinationId":"3-1","fuel":"3000000"}`},
-		}},
-	}
-	if isStructInfusionTx(reactorInfusion) {
-		t.Error("reactor infusion group: want false")
-	}
-
-	if isStructInfusionTx([]rpc.Event{{
-		Type: "transfer",
-		Attributes: []rpc.Attribute{
-			{Key: "sender", Value: "a"},
-			{Key: "recipient", Value: "b"},
-			{Key: "amount", Value: "1ualpha"},
-		},
-	}}) {
-		t.Error("plain transfer group: want false")
+	if len(buf.Txs[0]) != 2 {
+		t.Errorf("tx[0]: got %d want 2 (retain message metadata)", len(buf.Txs[0]))
 	}
 }
 
@@ -194,6 +137,10 @@ func TestHandleTransfer_StructInfusionSkipsSent(t *testing.T) {
 			{Key: "infusion", Value: `{"destinationType":"struct","destinationId":"5-1","fuel":"1000000"}`},
 		}},
 		transferEventTest(player, pool, "1000000ualpha"),
+		{Type: "structs.structs.EventAlphaInfuse", Attributes: []rpc.Attribute{
+			{Key: "eventAlphaInfuseDetail", Value: `{"primaryAddress":"structs1player","amount":"1000000"}`},
+		}},
+		{Type: "burn", Attributes: []rpc.Attribute{{Key: "burner", Value: pool}, {Key: "amount", Value: "1000000ualpha"}}},
 	}
 	buf := buffers.New()
 	tm := time.Date(2026, 6, 2, 22, 0, 0, 0, time.UTC)
@@ -221,23 +168,6 @@ func TestHandleTransfer_NormalTransferWritesBoth(t *testing.T) {
 	}
 }
 
-func TestIsAlphaRefineTx(t *testing.T) {
-	refine := []rpc.Event{
-		{Type: "message", Attributes: []rpc.Attribute{
-			{Key: "action", Value: "/structs.structs.MsgStructOreRefineryComplete"},
-		}},
-		{Type: "structs.structs.EventAlphaRefine", Attributes: []rpc.Attribute{
-			{Key: "eventAlphaRefineDetail", Value: `{"primaryAddress":"structs1p","amount":"1"}`},
-		}},
-	}
-	if !isAlphaRefineTx(refine) {
-		t.Error("refine group: want true")
-	}
-	if isAlphaRefineTx([]rpc.Event{transferEventTest("a", "b", "1ualpha")}) {
-		t.Error("plain transfer group: want false")
-	}
-}
-
 func TestHandleTransfer_AlphaRefineSkipsReceived(t *testing.T) {
 	player := "structs1refiner"
 	pool := "structs1pool"
@@ -246,6 +176,7 @@ func TestHandleTransfer_AlphaRefineSkipsReceived(t *testing.T) {
 			{Key: "eventAlphaRefineDetail", Value: `{"primaryAddress":"structs1refiner","amount":"1"}`},
 		}},
 		transferEventTest(pool, player, "1000000ualpha"),
+		{Type: "coinbase", Attributes: []rpc.Attribute{{Key: "minter", Value: pool}, {Key: "amount", Value: "1000000ualpha"}}},
 	}
 	buf := buffers.New()
 	tm := time.Date(2026, 4, 3, 3, 0, 0, 0, time.UTC)

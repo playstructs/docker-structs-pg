@@ -48,7 +48,7 @@ func (guildRankPermissionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx Bl
 	if p.ObjectID == "" || p.GuildID == "" {
 		return fmt.Errorf("guild_rank_permission: empty object_id (%q) or guild_id (%q)", p.ObjectID, p.GuildID)
 	}
-	if p.Rank.Int64() == 0 {
+	if p.Rank == 0 {
 		if _, err := tx.Exec(ctx, guildRankPermissionDeleteSQL,
 			p.ObjectID, p.GuildID, p.Permissions.Int64(),
 		); err != nil {
@@ -58,7 +58,7 @@ func (guildRankPermissionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx Bl
 		return nil
 	}
 	if _, err := tx.Exec(ctx, guildRankPermissionUpsertSQL,
-		p.ObjectID, p.GuildID, p.Permissions.Int64(), p.Rank.Int64(),
+		p.ObjectID, p.GuildID, p.Permissions.Int64(), p.Rank.PgValue(),
 	); err != nil {
 		return fmt.Errorf("guild_rank_permission upsert (%s,%s,%d): %w",
 			p.ObjectID, p.GuildID, p.Permissions.Int64(), err)

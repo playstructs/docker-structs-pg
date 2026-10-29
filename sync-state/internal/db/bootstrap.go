@@ -100,6 +100,7 @@ const InfusionEventPositionDDL = `CREATE TABLE IF NOT EXISTS sync_state.infusion
 		height          BIGINT  NOT NULL,
 		tx_index        INT     NOT NULL,
 		event_index     INT     NOT NULL,
+		phase           SMALLINT CHECK (phase BETWEEN 0 AND 3),
 		PRIMARY KEY (destination_id, address)
 	)`
 

@@ -146,7 +146,7 @@ func TestProcessBlock_Transfer_EmptyAmountIsNoOp(t *testing.T) {
 	})
 }
 
-func TestProcessBlock_Transfer_MissingAmountIsNoOp(t *testing.T) {
+func TestProcessBlock_Transfer_MissingAmountIsError(t *testing.T) {
 	conn := connect(t)
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
@@ -154,8 +154,8 @@ func TestProcessBlock_Transfer_MissingAmountIsNoOp(t *testing.T) {
 			{Key: "recipient", Value: "structs1r"},
 			{Key: "sender", Value: "structs1s"},
 		}}
-		if err := processAndFlush(ctx, tx, 1002, fixedTime(), []rpc.Event{ev}, nil); err != nil {
-			t.Fatalf("process: %v", err)
+		if err := processAndFlush(ctx, tx, 1002, fixedTime(), []rpc.Event{ev}, nil); err == nil {
+			t.Fatal("missing required amount accepted")
 		}
 		if n := queryLedgerCount(t, tx, "block_height=1002"); n != 0 {
 			t.Errorf("expected no ledger rows for missing amount; got %d", n)
@@ -253,7 +253,7 @@ func TestProcessBlock_Redelegate_CrossEventAndDefusion(t *testing.T) {
 			{Key: "delegator", Value: "structs1delegator"},
 			{Key: "validator", Value: "structsvaloper1src"},
 		}}
-		if err := processAndFlush(ctx, tx, 1040, fixedTime(), nil, []rpc.TxResult{{Events: []rpc.Event{redel, wr}}}); err != nil {
+		if err := processAndFlush(ctx, tx, 1040, fixedTime(), nil, []rpc.TxResult{{Events: []rpc.Event{wr, redel}}}); err != nil {
 			t.Fatalf("process: %v", err)
 		}
 		// 4 diversion_started rows
@@ -297,6 +297,7 @@ func TestProcessBlock_CompleteRedelegation(t *testing.T) {
 	inTx(t, conn, func(tx pgx.Tx) {
 		ctx := context.Background()
 		ev := rpc.Event{Type: "complete_redelegation", Attributes: []rpc.Attribute{
+			{Key: "source_validator", Value: "structsvaloper1src"},
 			{Key: "destination_validator", Value: "structsvaloper1dst"},
 			{Key: "delegator", Value: "structs1d"},
 			{Key: "amount", Value: "750ualpha"},
@@ -417,7 +418,7 @@ func TestProcessBlock_CreateValidator_CrossEventSpender(t *testing.T) {
 			{Key: "spender", Value: "structs1selfdelegate"},
 			{Key: "amount", Value: "5000ualpha"},
 		}}
-		if err := processAndFlush(ctx, tx, 1090, fixedTime(), nil, []rpc.TxResult{{Events: []rpc.Event{cv, spend}}}); err != nil {
+		if err := processAndFlush(ctx, tx, 1090, fixedTime(), nil, []rpc.TxResult{{Events: []rpc.Event{spend, cv}}}); err != nil {
 			t.Fatalf("process: %v", err)
 		}
 		if n := queryLedgerCount(t, tx, "action='infused' AND block_height=1090"); n != 3 {
@@ -449,6 +450,9 @@ func TestProcessBlock_Transfer_StructInfusionSkipsSentDebit(t *testing.T) {
 				{Key: "infusion", Value: `{"destinationType":"struct","destinationId":"5-9999","fuel":"1000000"}`},
 			}},
 			transferEvent(player, pool, "1000000ualpha"),
+			{Type: "structs.structs.EventAlphaInfuse", Attributes: []rpc.Attribute{
+				{Key: "eventAlphaInfuseDetail", Value: `{"primaryAddress":"structs1infuserstruct","amount":"1000000"}`},
+			}},
 			{Type: "burn", Attributes: []rpc.Attribute{
 				{Key: "burner", Value: pool},
 				{Key: "amount", Value: "1000000ualpha"},

@@ -3,8 +3,6 @@ package bank
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,10 +21,9 @@ import (
 // ledger-handler convention from Phase 5 (replay-safe + correct
 // hypertable partitioning).
 //
-// Cross-event correlation (redelegate/create_validator) only looks within
-// the same event group — same tx for tx-bound events, or the finalize
-// batch for finalize events. This mirrors the SQL's
-// `events.tx_id = event.tx_id` join.
+// Cross-event correlation is scoped to execution phase and message, with
+// matching address/amount or staking operation evidence. Financial source
+// coordinates remain the original unfiltered RPC ordinals.
 //
 // tx is kept on the signature for symmetry with the legacy code path and
 // to leave room for future bank handlers that need direct query access;
@@ -41,45 +38,66 @@ func ProcessBlock(
 	finalize []rpc.Event,
 	txResults []rpc.TxResult,
 ) error {
-	if err := processGroup(ctx, tx, buf, height, blockTime, chainID, -1, finalize); err != nil {
-		return fmt.Errorf("finalize: %w", err)
+	ordered, err := rpc.OrderedEvents(finalize, txResults)
+	if err != nil {
+		return err
 	}
-	for i, tr := range txResults {
-		if err := processGroup(ctx, tx, buf, height, blockTime, chainID, i, tr.Events); err != nil {
-			return fmt.Errorf("tx[%d]: %w", i, err)
-		}
+	type scope struct {
+		phase   rpc.ExecutionPhase
+		tx, msg int
 	}
-	return nil
-}
-
-// ProcessBuffer is a convenience wrapper for callers that already hold an
-// EventBuffer (e.g. the legacy Capture path). New callers should prefer
-// ProcessBlock so they don't pay the extra Capture filtering pass.
-func ProcessBuffer(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, blockTime time.Time, chainID string, evBuf EventBuffer) error {
-	if err := processGroup(ctx, tx, buf, evBuf.Height, blockTime, chainID, -1, evBuf.Finalize); err != nil {
-		return fmt.Errorf("finalize: %w", err)
+	groups := make(map[scope][]rpc.Event)
+	indices := make([]int, len(ordered))
+	for i, p := range ordered {
+		key := scope{p.Phase, p.TxIndex, p.MsgIndex}
+		indices[i] = len(groups[key])
+		groups[key] = append(groups[key], p.Event)
 	}
-	for i, evs := range evBuf.Txs {
-		if err := processGroup(ctx, tx, buf, evBuf.Height, blockTime, chainID, i, evs); err != nil {
-			return fmt.Errorf("tx[%d]: %w", i, err)
-		}
-	}
-	return nil
-}
-
-// processGroup walks every bank-relevant event in `events` and pushes
-// rows into buf, passing the same slice as the cross-event lookup pool.
-// Non-bank events are skipped silently.
-func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height int64, t time.Time, chainID string, txIndex int, events []rpc.Event) error {
-	for evIdx, ev := range events {
-		if !IsBankEventType(ev.Type) {
+	for i, p := range ordered {
+		if !IsBankEventType(p.Event.Type) {
 			continue
 		}
-		id := eventIdent{ChainID: chainID, TxIndex: txIndex, EventIndex: evIdx}
-		var err error
+		key := scope{p.Phase, p.TxIndex, p.MsgIndex}
+		id := eventIdent{ChainID: chainID, TxIndex: p.TxIndex, EventIndex: p.EventIndex, CorrelationIndex: indices[i]}
+		if err := processEvent(buf, height, blockTime, id, p.Event, groups[key]); err != nil {
+			return fmt.Errorf("phase=%d tx=%d event=%d %s: %w", p.Phase, p.TxIndex, p.EventIndex, p.Event.Type, err)
+		}
+	}
+	_ = ctx
+	_ = tx
+	return nil
+}
+
+// ProcessBuffer retains the original stream and coordinates, just like ingest.
+func ProcessBuffer(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, blockTime time.Time, chainID string, evBuf EventBuffer) error {
+	txs := make([]rpc.TxResult, len(evBuf.Txs))
+	for i, evs := range evBuf.Txs {
+		txs[i].Events = evs
+	}
+	return ProcessBlock(ctx, tx, buf, evBuf.Height, blockTime, chainID, evBuf.Finalize, txs)
+}
+
+// Coin expansion never changes source coordinates or semantic leg numbers.
+// Denomination is the extra dimension in the paired ledger uniqueness key.
+func processEvent(buf *buffers.Buffer, height int64, t time.Time, id eventIdent, event rpc.Event, group []rpc.Event) error {
+	coins, err := eventCoins(event)
+	if err != nil {
+		return err
+	}
+	if err := validateBankFields(event); err != nil {
+		return err
+	}
+	for _, coin := range coins {
+		ev := event
+		ev.Attributes = append([]rpc.Attribute(nil), event.Attributes...)
+		for i := range ev.Attributes {
+			if ev.Attributes[i].Key == "amount" {
+				ev.Attributes[i].Value = coin.amount + coin.denom
+			}
+		}
 		switch ev.Type {
 		case "transfer":
-			err = handleTransfer(buf, height, t, id, ev, events)
+			err = handleTransfer(buf, height, t, id, ev, group)
 		case "coinbase":
 			err = handleCoinbase(buf, height, t, id, ev)
 		case "burn":
@@ -87,7 +105,7 @@ func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height in
 		case "delegate":
 			err = handleDelegate(buf, height, t, id, ev)
 		case "redelegate":
-			err = handleRedelegate(buf, height, t, id, ev, events)
+			err = handleRedelegate(buf, height, t, id, ev, group)
 		case "complete_redelegation":
 			err = handleCompleteRedelegation(buf, height, t, id, ev)
 		case "unbond":
@@ -97,14 +115,12 @@ func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height in
 		case "complete_unbonding":
 			err = handleCompleteUnbonding(buf, height, t, id, ev)
 		case "create_validator":
-			err = handleCreateValidator(buf, height, t, id, ev, events)
+			err = handleCreateValidator(buf, height, t, id, ev, group)
 		}
 		if err != nil {
-			return fmt.Errorf("%s: %w", ev.Type, err)
+			return err
 		}
 	}
-	_ = ctx
-	_ = tx
 	return nil
 }
 
@@ -113,9 +129,10 @@ func processGroup(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, height in
 // indexes). EventIndex is the in-block event offset; legs are encoded
 // via buffers.EncodeLedgerEventIndex.
 type eventIdent struct {
-	ChainID    string
-	TxIndex    int
-	EventIndex int
+	ChainID          string
+	TxIndex          int
+	EventIndex       int
+	CorrelationIndex int // position within the same execution phase/message; never persisted
 }
 
 // --- buffer helpers ----------------------------------------------------
@@ -180,23 +197,13 @@ func parseChainTime(s string) (time.Time, error) {
 
 // --- attribute helpers -------------------------------------------------
 
-// amountDenomRegex parses "123ualpha" / "0.5uvert" into the amount and
-// denom parts. Matches the SQL `(^[0-9\.]+)([a-zA-Z0-9\.-]+)` regex.
-var amountDenomRegex = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)([a-zA-Z0-9.\-]+)`)
-
-// parseAmountDenom returns ("123","ualpha",true) for "123ualpha", or
-// ("","",false) when the input is empty or doesn't match. Multi-coin
-// values like "100ualpha,500uvert" only return the first coin (mirrors
-// regexp_matches which returns the first match).
+// parseAmountDenom is used only after processEvent expands a validated coin set.
 func parseAmountDenom(s string) (amount, denom string, ok bool) {
-	if s == "" {
+	coins, err := parseCoins(s)
+	if err != nil || len(coins) != 1 {
 		return "", "", false
 	}
-	m := amountDenomRegex.FindStringSubmatch(s)
-	if m == nil {
-		return "", "", false
-	}
-	return m[1], m[2], true
+	return coins[0].amount, coins[0].denom, true
 }
 
 // findAttr returns the first attribute with key `k`, or "" if absent.
@@ -211,70 +218,10 @@ func findAttr(ev rpc.Event, k string) string {
 	return ""
 }
 
-// findAmount parses the event's "amount" attribute into amount/denom.
-// Returns ok=false when missing, empty, or malformed — handlers treat
-// that as "skip this event" (the SQL did the same via amount_populated).
+// findAmount reads one normalized coin after processEvent has validated the
+// required amount and expanded the full set. Empty sets never reach handlers.
 func findAmount(ev rpc.Event) (amount, denom string, ok bool) {
 	return parseAmountDenom(findAttr(ev, "amount"))
-}
-
-// findInGroup returns the first occurrence of attribute `attrKey` on
-// any event of type `eventType` within group. Mirrors the SQL's
-// IN (SELECT events.rowid ... WHERE type=$1 AND tx_id = event.tx_id)
-// sub-select for redelegate/create_validator cross-references.
-func findInGroup(group []rpc.Event, eventType, attrKey string) string {
-	for _, e := range group {
-		if e.Type != eventType {
-			continue
-		}
-		if v := findAttr(e, attrKey); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// --- per-event handlers ------------------------------------------------
-
-// isStructInfusionTx reports whether the event group is a struct-generator
-// infusion tx. The infusion handler already debits the player via 'infused';
-// the companion Cosmos transfer (player → module escrow → burn) must not
-// also write a duplicate 'sent' on the player. Reactor infusions use
-// destinationType=reactor and delegate/unbond bank events instead.
-func isStructInfusionTx(group []rpc.Event) bool {
-	for _, e := range group {
-		if e.Type != "structs.structs.EventInfusion" {
-			continue
-		}
-		infusion := findAttr(e, "infusion")
-		if infusion != "" && strings.Contains(infusion, `"destinationType":"struct"`) {
-			return true
-		}
-	}
-	for _, e := range group {
-		if e.Type == "message" && findAttr(e, "action") == "/structs.structs.MsgStructGeneratorInfuse" {
-			return true
-		}
-	}
-	return false
-}
-
-// isAlphaRefineTx reports whether the event group is an ore-refinery complete
-// tx. The alphaRefine handler already credits the player via 'refined';
-// the companion Cosmos transfer (pool → player) must not also write a
-// duplicate 'received' on the player.
-func isAlphaRefineTx(group []rpc.Event) bool {
-	for _, e := range group {
-		if e.Type == "structs.structs.EventAlphaRefine" {
-			return true
-		}
-	}
-	for _, e := range group {
-		if e.Type == "message" && findAttr(e, "action") == "/structs.structs.MsgStructOreRefineryComplete" {
-			return true
-		}
-	}
-	return false
 }
 
 // handleTransfer ports the WHEN 'transfer' branch (cache-system.sql:1433-1452).
@@ -294,11 +241,15 @@ func handleTransfer(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, ev
 	}
 	recipient := findAttr(ev, "recipient")
 	sender := findAttr(ev, "sender")
-	if isStructInfusionTx(group) {
+	skipSent, skipReceived, err := transferOverlap(ev, group)
+	if err != nil {
+		return err
+	}
+	if skipSent {
 		pushLedger(buf, id, 0, recipient, sender, amt, h, t, "received", "credit", denom)
 		return nil
 	}
-	if isAlphaRefineTx(group) {
+	if skipReceived {
 		pushLedger(buf, id, 0, sender, recipient, amt, h, t, "sent", "debit", denom)
 		return nil
 	}
@@ -369,7 +320,10 @@ func handleRedelegate(buf *buffers.Buffer, h int64, t time.Time, id eventIdent, 
 	}
 	src := findAttr(ev, "source_validator")
 	dst := findAttr(ev, "destination_validator")
-	delegator := findInGroup(group, "withdraw_rewards", "delegator")
+	delegator, err := redelegationOwner(group, id.CorrelationIndex, src)
+	if err != nil {
+		return err
+	}
 	completion := findAttr(ev, "completion_time")
 
 	pushLedger(buf, id, 0, src, delegator, amt, h, t, "diversion_started", "debit", denom+".infused")
@@ -483,7 +437,10 @@ func handleCreateValidator(buf *buffers.Buffer, h int64, t time.Time, id eventId
 		return nil
 	}
 	val := findAttr(ev, "validator")
-	spender := findInGroup(group, "coin_spent", "spender")
+	spender, err := validatorSpender(group, amt, denom)
+	if err != nil {
+		return err
+	}
 
 	pushLedger(buf, id, 0, spender, val, amt, h, t, "infused", "debit", denom)
 	pushLedger(buf, id, 1, val, spender, amt, h, t, "infused", "credit", denom+".infused")

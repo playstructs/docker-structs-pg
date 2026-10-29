@@ -31,7 +31,8 @@ const SeverityWarn = "warn"
 // dispatch (handlers receive their own tx, so the router itself just
 // reads-only into its map).
 type Router struct {
-	handlers map[string]Handler
+	handlers         map[string]Handler
+	nestedAttributes map[string][]string
 
 	// Unknown-event accounting. Mutated under unknownMu.
 	//
@@ -70,10 +71,11 @@ type UnknownDelta struct {
 // caught at startup.
 func NewRouter(strictUnknown bool) *Router {
 	r := &Router{
-		handlers:      make(map[string]Handler),
-		unknownCounts: make(map[string]uint64),
-		unknownDeltas: make(map[string]*UnknownDelta),
-		StrictUnknown: strictUnknown,
+		handlers:         make(map[string]Handler),
+		nestedAttributes: make(map[string][]string),
+		unknownCounts:    make(map[string]uint64),
+		unknownDeltas:    make(map[string]*UnknownDelta),
+		StrictUnknown:    strictUnknown,
 	}
 	for _, h := range AllHandlers() {
 		key := h.CompositeKey()
@@ -81,6 +83,10 @@ func NewRouter(strictUnknown bool) *Router {
 			panic(fmt.Sprintf("duplicate handler for composite_key %q", key))
 		}
 		r.handlers[key] = h
+		if event, attribute, nested := strings.Cut(strings.TrimPrefix(key, "structs.structs."), "."); nested {
+			typeName := "structs.structs." + event
+			r.nestedAttributes[typeName] = append(r.nestedAttributes[typeName], attribute)
+		}
 	}
 	return r
 }
@@ -111,9 +117,9 @@ func (r *Router) Count() int { return len(r.handlers) }
 //   - a HandlerError describing what to log if the handler returned an error or panicked,
 //   - a fatal error if StrictUnknown is true and the key is unknown.
 //
-// HandlerError is non-nil iff the handler failed; the block as a whole still
-// commits (the error is written to sync_state.handler_error_log after the
-// commit). This mirrors today's cache.add_queue EXCEPTION block behavior.
+// HandlerError is non-nil iff the handler failed or deliberately skipped.
+// The ingestion caller aborts the block/window on SeverityError and persists
+// diagnostics outside that transaction. Explicit legacy warnings may continue.
 //
 // Each handler runs inside its own SAVEPOINT so a failing PG statement only
 // kills that handler's effect — the per-block tx remains usable for the
@@ -177,9 +183,8 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 	bufSnap := bctx.Buf.Snapshot()
 	dirtySnap := bctx.Dirty.Snapshot()
 
-	// recover() so a panic in one handler doesn't abort the whole block;
-	// the block still commits (other handlers + cursor + block_log), but
-	// the event ends up in handler_error_log for replay.
+	// Convert a panic into a source-correlated failure. The caller rolls back
+	// the outer block/window and keeps the diagnostic for complete recovery.
 	defer func() {
 		if rec := recover(); rec != nil {
 			_ = sp.Rollback(ctx)

@@ -33,8 +33,7 @@ type BlockBundle struct {
 
 // applyBlock writes everything for one block in a single PG transaction:
 //
-//  1. dispatch each finalize_block + per-tx event to the events.Router; per-
-//     handler errors collect into pendingErrors (block still commits)
+//  1. dispatch events in execution order; required failures abort the block
 //  2. bank ledger derivation (bank/staking events -> structs.ledger,
 //     structs.defusion) — Go port of cache.PROCESS_BLOCK_LEDGER
 //  3. flush buffered authoritative rows, then recompute dirty api_*
@@ -48,7 +47,7 @@ type BlockBundle struct {
 //  8. bump sync_state.sync_cursor
 //  9. commit
 //
-// After commit, pending handler-error rows are written to
+// After commit or rollback, pending handler-error rows are written to
 // sync_state.handler_error_log (outside the per-block tx so they survive
 // even when the block tx itself rolled back).
 func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight int64) error {
@@ -57,14 +56,19 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 		return fmt.Errorf("begin tx h=%d: %w", bundle.Height, err)
 	}
 	committed := false
+	var pending []pendingHandlerError
 	defer func() {
 		if !committed {
 			_ = tx.Rollback(ctx)
 		}
+		s.writePendingHandlerErrors(ctx, bundle.ChainID, pending)
 	}()
 
 	buf := buffers.New()
 	res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, applyOpts{})
+	for _, he := range res.PendingErrors {
+		pending = append(pending, pendingHandlerError{height: bundle.Height, he: he})
+	}
 	if err != nil {
 		return err
 	}
@@ -73,23 +77,25 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 	}
 	committed = true
 
-	pending := make([]pendingHandlerError, len(res.PendingErrors))
-	for i, he := range res.PendingErrors {
-		pending[i] = pendingHandlerError{height: bundle.Height, he: he}
-	}
-	s.writePendingHandlerErrors(ctx, bundle.ChainID, pending)
 	return nil
 }
 
 // applyBlockInTx writes everything for one block inside an existing tx.
 // See applyBlock for the full step list. Handler errors are returned for
-// the caller to persist after commit.
+// the caller to persist after commit or rollback.
 //
 // buf is the per-block (streaming) or per-window (bulk) append-only row
 // buffer. Event handlers and bank.ProcessBlock push rows into buf;
 // applyBlockInTx flushes it after bank so api_* recomputation can see
 // this block's authoritative ledger/stat rows.
-func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBundle, tipHeight int64, buf *buffers.Buffer, opts applyOpts) (*blockApplyResult, error) {
+func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBundle, tipHeight int64, buf *buffers.Buffer, opts applyOpts) (result *blockApplyResult, resultErr error) {
+	pendingErrs := make([]events.HandlerError, 0)
+	defer func() {
+		if result == nil {
+			result = &blockApplyResult{}
+		}
+		result.PendingErrors = pendingErrs
+	}()
 	if !opts.SkipStatementTimeout && s.cfg.StatementTimeout > 0 {
 		ms := s.cfg.StatementTimeout.Milliseconds()
 		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", ms)); err != nil {
@@ -97,7 +103,6 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		}
 	}
 
-	pendingErrs := make([]events.HandlerError, 0)
 	numEvents := 0
 	dirty := readmodel.NewDirty()
 	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents); err != nil {
@@ -129,6 +134,9 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 			Error:        fmt.Sprintf("savepoint commit: %v", err),
 			Severity:     events.SeverityError,
 		})
+	}
+	if len(pendingErrs) > 0 && pendingErrs[len(pendingErrs)-1].CompositeKey == "bank.process_block" {
+		return nil, fmt.Errorf("bank h=%d: %s", bundle.Height, pendingErrs[len(pendingErrs)-1].Error)
 	}
 
 	// The buffer still flushes per block: the planet_activity COPY trigger
@@ -223,35 +231,54 @@ func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, 
 		Dirty:     dirty,
 	}
 
-	// Finalize-block events (BeginBlock/EndBlock): tx_index = -1.
-	for evIdx, ev := range b.FinalizeBlockEvents {
-		bctx.TxIndex = -1
-		bctx.MsgIndex = -1
-		bctx.EventIndex = evIdx
-		if err := s.dispatchOneEvent(ctx, tx, bctx, ev, errs); err != nil {
+	ordered, err := rpc.OrderedEvents(b.FinalizeBlockEvents, b.TxResults)
+	if err != nil {
+		return err
+	}
+	for _, positioned := range ordered {
+		bctx.Phase = positioned.Phase
+		bctx.TxIndex = positioned.TxIndex
+		bctx.MsgIndex = positioned.MsgIndex
+		bctx.EventIndex = positioned.EventIndex
+		if err := s.dispatchOneEvent(ctx, tx, bctx, positioned.Event, errs); err != nil {
 			return err
 		}
 		*numEvents++
-	}
-
-	// Per-tx events: tx_index = index, ordered by attribute.
-	for txIdx, tr := range b.TxResults {
-		for evIdx, ev := range tr.Events {
-			bctx.TxIndex = txIdx
-			bctx.MsgIndex = -1
-			bctx.EventIndex = evIdx
-			if err := s.dispatchOneEvent(ctx, tx, bctx, ev, errs); err != nil {
-				return err
-			}
-			*numEvents++
-		}
 	}
 	return nil
 }
 
 func (s *Syncer) dispatchOneEvent(ctx context.Context, tx pgx.Tx, bctx events.BlockContext, ev rpc.Event, errs *[]events.HandlerError) error {
+	if key, err := s.router.ValidateNestedEvent(ev); err != nil {
+		source, _ := json.Marshal(ev)
+		*errs = append(*errs, events.HandlerError{CompositeKey: key, Payload: source,
+			Error: err.Error(), Severity: events.SeverityError,
+			TxIndex: coordinatePtr(bctx.TxIndex), MsgIndex: coordinatePtr(bctx.MsgIndex), EventIndex: coordinatePtr(bctx.EventIndex)})
+		return err
+	}
+	if s.router.Lookup(ev.Type) != nil {
+		raw, err := events.Envelope(ev)
+		if err != nil {
+			source, _ := json.Marshal(ev)
+			*errs = append(*errs, events.HandlerError{CompositeKey: ev.Type, Payload: source,
+				Error: err.Error(), Severity: events.SeverityError,
+				TxIndex: coordinatePtr(bctx.TxIndex), MsgIndex: coordinatePtr(bctx.MsgIndex), EventIndex: coordinatePtr(bctx.EventIndex)})
+			return err
+		}
+		he, fatal := s.router.Dispatch(ctx, tx, bctx, ev.Type, raw)
+		if he != nil {
+			*errs = append(*errs, *he)
+			if he.Severity != events.SeverityWarn {
+				return fmt.Errorf("required event %s: %s", he.CompositeKey, he.Error)
+			}
+		}
+		return fatal
+	}
 	seen := make(map[string]struct{}, len(ev.Attributes))
 	for _, a := range ev.Attributes {
+		if a.Key == "mode" || a.Key == "msg_index" {
+			continue
+		}
 		if _, dup := seen[a.Key]; dup {
 			continue
 		}
@@ -260,14 +287,24 @@ func (s *Syncer) dispatchOneEvent(ctx context.Context, tx pgx.Tx, bctx events.Bl
 		raw := encodeAttributeValue(a.Value)
 
 		he, fatal := s.router.Dispatch(ctx, tx, bctx, compositeKey, raw)
-		if fatal != nil {
-			return fatal // strict-unknown-events
-		}
 		if he != nil {
 			*errs = append(*errs, *he)
+			if he.Severity != events.SeverityWarn {
+				return fmt.Errorf("required event %s: %s", he.CompositeKey, he.Error)
+			}
+		}
+		if fatal != nil {
+			return fatal
 		}
 	}
 	return nil
+}
+
+func coordinatePtr(index int) *int {
+	if index < 0 {
+		return nil
+	}
+	return &index
 }
 
 // encodeAttributeValue turns an attribute Value (always a string in the
@@ -297,6 +334,9 @@ func stripWhitespace(s string) string {
 }
 
 func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) error {
+	if len(b.RawTxs) != len(b.TxResults) {
+		return fmt.Errorf("raw transaction/result count mismatch")
+	}
 	if err := db.WriteRawBlock(ctx, tx, db.RawMirrorBlock{
 		ChainID:   b.ChainID,
 		Height:    b.Height,
@@ -311,9 +351,9 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) 
 	// tx_results
 	trRows := make([]db.RawMirrorTxResult, 0, len(b.TxResults))
 	for i, tr := range b.TxResults {
-		var rawTxBytes []byte
-		if i < len(b.RawTxs) {
-			rawTxBytes, _ = base64.StdEncoding.DecodeString(b.RawTxs[i])
+		rawTxBytes, err := base64.StdEncoding.Strict().DecodeString(b.RawTxs[i])
+		if err != nil || len(rawTxBytes) == 0 {
+			return fmt.Errorf("invalid raw transaction %d: %v", i, err)
 		}
 		trJSON, _ := json.Marshal(tr)
 		gas, _ := strconv.ParseInt(tr.GasUsed, 10, 64)
@@ -384,13 +424,5 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) 
 
 // validateBundle catches obvious shape problems before we try to write.
 func validateBundle(b *rpc.BlockResult, br *rpc.BlockResultsResult, chainID string, height int64) error {
-	if b.Block.Header.ChainID != chainID {
-		return fmt.Errorf("block %d chain_id=%q != live %q", height, b.Block.Header.ChainID, chainID)
-	}
-	gotH, _ := strconv.ParseInt(b.Block.Header.Height, 10, 64)
-	if gotH != height {
-		return fmt.Errorf("block %d returned header.height=%d", height, gotH)
-	}
-	_ = br
-	return nil
+	return rpc.ValidateBundle(b, br, chainID, height)
 }

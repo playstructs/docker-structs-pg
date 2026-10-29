@@ -12,7 +12,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/buffers"
+	"sync-state/internal/protocol"
 	"sync-state/internal/readmodel"
+	"sync-state/internal/rpc"
 )
 
 // Handler is implemented by one struct per chain event sync-state knows how
@@ -32,12 +34,13 @@ type Handler interface {
 
 	// Handle runs inside the per-block transaction. raw is the JSON payload
 	// (the chain attribute's value, JSON-decoded into the right type by the
-	// router via the payload package). Returning an error logs to
-	// sync_state.handler_error_log and the per-block tx continues with the
-	// next event (the block as a whole still commits — see Error model in
-	// the plan).
+	// router via the payload package). A required error aborts ingestion of
+	// the entire block/window; its diagnostic is persisted after rollback.
+	// Only an explicit ErrSkipWithWarn remains a recoverable legacy no-op.
 	Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error
 }
+
+func (b BlockContext) V022Active() bool { return protocol.V022Active(b.ChainID, b.Height) }
 
 // BlockContext carries everything a handler may need from the block being
 // processed. Helpers like NextPlanetActivitySeq are wired by the router at
@@ -57,6 +60,7 @@ type BlockContext struct {
 
 	// Per-event coordinates (filled by the router):
 	// TxIndex < 0 means a finalize_block (BeginBlock/EndBlock) event.
+	Phase      rpc.ExecutionPhase
 	TxIndex    int
 	MsgIndex   int
 	EventIndex int
@@ -77,4 +81,13 @@ type BlockContext struct {
 	// authoritative entities they changed; the orchestrator recomputes the
 	// corresponding api_* rows after buffered authoritative writes flush.
 	Dirty *readmodel.Dirty
+}
+
+// PositionPhase also preserves existing callers that only supply a transaction
+// coordinate. Finalize callers must establish Begin/EndBlock from RPC metadata.
+func (b BlockContext) PositionPhase() rpc.ExecutionPhase {
+	if b.TxIndex >= 0 {
+		return rpc.Transaction
+	}
+	return b.Phase
 }

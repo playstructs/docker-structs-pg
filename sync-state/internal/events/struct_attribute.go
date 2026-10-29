@@ -154,14 +154,14 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		bctx.Buf.StatStructHealth = append(bctx.Buf.StatStructHealth, buffers.StatRow{
 			Time:        bctx.BlockTime.UTC(),
 			ObjectIndex: objIndex,
-			Value:       val,
+			Value:       strconv.FormatInt(val, 10),
 			BlockHeight: bctx.Height,
 		})
 	case 1: // status
 		bctx.Buf.StatStructStatus = append(bctx.Buf.StatStructStatus, buffers.StatRow{
 			Time:        bctx.BlockTime.UTC(),
 			ObjectIndex: objIndex,
-			Value:       val,
+			Value:       strconv.FormatInt(val, 10),
 			BlockHeight: bctx.Height,
 		})
 		if val&structDestroyedBit != 0 {

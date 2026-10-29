@@ -41,11 +41,13 @@ func (infusionHandler) CompositeKey() string {
 const infusionUpsertSQL = `
 INSERT INTO structs.infusion (
     destination_id, address, destination_type, player_id,
-    fuel_p, defusing_p, power_p, ratio_p, commission,
+    fuel_p, defusing_p, power_p, ratio_p, commission, owner_id, generator_disabled,
     created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
 ON CONFLICT (destination_id, address) DO UPDATE
    SET player_id  = EXCLUDED.player_id,
+       owner_id   = EXCLUDED.owner_id,
+       generator_disabled = EXCLUDED.generator_disabled,
        fuel_p     = EXCLUDED.fuel_p,
        defusing_p = EXCLUDED.defusing_p,
        power_p    = EXCLUDED.power_p,
@@ -57,7 +59,9 @@ ON CONFLICT (destination_id, address) DO UPDATE
     OR structs.infusion.defusing_p IS DISTINCT FROM EXCLUDED.defusing_p
     OR structs.infusion.power_p    IS DISTINCT FROM EXCLUDED.power_p
     OR structs.infusion.ratio_p    IS DISTINCT FROM EXCLUDED.ratio_p
-    OR structs.infusion.commission IS DISTINCT FROM EXCLUDED.commission`
+    OR structs.infusion.commission IS DISTINCT FROM EXCLUDED.commission
+    OR structs.infusion.owner_id IS DISTINCT FROM EXCLUDED.owner_id
+    OR structs.infusion.generator_disabled IS DISTINCT FROM EXCLUDED.generator_disabled`
 
 // infusionPrevFuelSelectSQL grabs the pre-upsert fuel_p so we can
 // compute the delta the dropped SQL trigger needed on UPDATE
@@ -74,7 +78,7 @@ const infusionPrevFuelSelectSQL = `SELECT fuel_p::text FROM structs.infusion WHE
 // landed) is skipped, because diffing it against newer state writes a
 // wrong, often negative, delta.
 const infusionPositionSelectSQL = `
-SELECT height, tx_index, event_index
+SELECT height, tx_index, event_index, phase
   FROM sync_state.infusion_event_position
  WHERE destination_id = $1 AND address = $2`
 
@@ -92,24 +96,33 @@ SELECT CASE WHEN i.destination_id IS NULL THEN NULL ELSE COALESCE((
   LEFT JOIN structs.infusion i ON i.destination_id = $2 AND i.address = $1`
 
 const infusionPositionUpsertSQL = `
-INSERT INTO sync_state.infusion_event_position (destination_id, address, height, tx_index, event_index)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO sync_state.infusion_event_position (destination_id, address, height, tx_index, event_index, phase)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (destination_id, address) DO UPDATE
    SET height      = EXCLUDED.height,
        tx_index    = EXCLUDED.tx_index,
-       event_index = EXCLUDED.event_index`
+       event_index = EXCLUDED.event_index,
+       phase       = EXCLUDED.phase`
 
 // infusionEventApplied reports whether the row already reflects an event
 // at or after bctx's position. Positions follow dispatch order: height,
-// then tx_index (-1 for finalize_block events), then event_index.
+// execution phase, tx_index, then original event_index. NULL legacy phases
+// cannot establish a same-height order.
 func infusionEventApplied(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Infusion) (bool, error) {
 	var h int64
 	var txIdx, evIdx int
-	err := tx.QueryRow(ctx, infusionPositionSelectSQL, p.DestinationID, p.Address).Scan(&h, &txIdx, &evIdx)
+	var phase *int16
+	err := tx.QueryRow(ctx, infusionPositionSelectSQL, p.DestinationID, p.Address).Scan(&h, &txIdx, &evIdx, &phase)
 	switch {
 	case err == nil:
 		if bctx.Height != h {
 			return bctx.Height < h, nil
+		}
+		if phase == nil {
+			return false, fmt.Errorf("infusion position at height %d has unknown legacy phase; reconcile the complete block before same-height replay", h)
+		}
+		if int16(bctx.PositionPhase()) != *phase {
+			return int16(bctx.PositionPhase()) < *phase, nil
 		}
 		if bctx.TxIndex != txIdx {
 			return bctx.TxIndex < txIdx, nil
@@ -127,12 +140,15 @@ func infusionEventApplied(ctx context.Context, tx pgx.Tx, bctx BlockContext, p p
 }
 
 func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
-	p, err := payload.Decode[payload.Infusion](raw)
+	p, err := payload.DecodeVersioned[payload.Infusion](raw, bctx.V022Active(), "ownerId", "generatorDisabled")
 	if err != nil {
 		return err
 	}
 	if p.DestinationID == "" || p.Address == "" {
 		return fmt.Errorf("infusion: empty destination_id or address (dest=%q addr=%q)", p.DestinationID, p.Address)
+	}
+	if p.OwnerID != "" && !ownerIDPattern.MatchString(p.OwnerID) {
+		return fmt.Errorf("infusion: invalid owner %q", p.OwnerID)
 	}
 
 	applied, err := infusionEventApplied(ctx, tx, bctx, p)
@@ -142,8 +158,13 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 	if applied {
 		return nil
 	}
+	var previousOwner *string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(NULLIF(owner_id,''),player_id) FROM structs.infusion WHERE destination_id=$1 AND address=$2`,
+		p.DestinationID, p.Address).Scan(&previousOwner); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
 	if _, err := tx.Exec(ctx, infusionPositionUpsertSQL,
-		p.DestinationID, p.Address, bctx.Height, bctx.TxIndex, bctx.EventIndex,
+		p.DestinationID, p.Address, bctx.Height, bctx.TxIndex, bctx.EventIndex, int16(bctx.PositionPhase()),
 	); err != nil {
 		return fmt.Errorf("infusion position upsert (%s,%s): %w", p.DestinationID, p.Address, err)
 	}
@@ -182,6 +203,8 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 		p.Power.PgValue(),
 		p.Ratio.PgValue(),
 		p.Commission.PgValue(),
+		payload.NullableText(p.OwnerID),
+		p.GeneratorDisabled,
 	); err != nil {
 		return fmt.Errorf("infusion upsert (%s, %s): %w", p.DestinationID, p.Address, err)
 	}
@@ -194,6 +217,11 @@ func (infusionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext,
 	if p.DestinationType == "reactor" {
 		bctx.Dirty.Reactor(p.DestinationID)
 	}
+	if previousOwner != nil {
+		dirtyOwner(bctx, *previousOwner)
+	}
+	dirtyOwner(bctx, p.AssetOwnerID())
+	bctx.Dirty.Address(p.Address)
 	return nil
 }
 

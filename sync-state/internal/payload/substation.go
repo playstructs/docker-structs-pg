@@ -6,9 +6,11 @@ package payload
 //
 // name/pfp live directly on structs.substation (no separate meta table).
 type Substation struct {
-	ID      string `json:"id"`
-	Owner   string `json:"owner"`
-	Creator string `json:"creator"`
-	Name    string `json:"name"`
-	PFP     string `json:"pfp"`
+	ID                            string `json:"id"`
+	Owner                         string `json:"owner"`
+	Creator                       string `json:"creator"`
+	Name                          string `json:"name"`
+	PFP                           string `json:"pfp"`
+	DeletionPending               bool   `json:"deletion_pending"`
+	DeletionMigrationSubstationID string `json:"deletion_migration_substation_id"`
 }

@@ -107,7 +107,7 @@ UPDATE structs.player p
        updated_at = NOW()
   FROM (
     SELECT unnest($1::text[])   AS id,
-           unnest($2::bigint[]) AS rank
+           unnest($2::text[])::numeric AS rank
   ) v
  WHERE p.id = v.id
    AND p.guild_rank IS DISTINCT FROM v.rank`
@@ -117,10 +117,10 @@ const countPresentSQL = `SELECT COUNT(*) FROM structs.player WHERE id = ANY($1::
 // applyGuildRanks runs the batched UPDATE in a single transaction.
 func applyGuildRanks(ctx context.Context, pool *pgxpool.Pool, players []payload.Player, r *PlayerRankReport) error {
 	ids := make([]string, len(players))
-	ranks := make([]int64, len(players))
+	ranks := make([]string, len(players))
 	for i, p := range players {
 		ids[i] = p.ID
-		ranks[i] = p.GuildRank.Int64()
+		ranks[i] = p.GuildRank.String()
 	}
 
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})

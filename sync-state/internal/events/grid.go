@@ -115,9 +115,9 @@ func (gridHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 		return nil
 	}
 
-	val, err := strconv.ParseInt(p.Value, 10, 64)
-	if err != nil {
-		return fmt.Errorf("grid: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
+	val, err := strconv.ParseUint(p.Value, 10, 64)
+	if err != nil || p.Value[0] < '0' || p.Value[0] > '9' {
+		return fmt.Errorf("grid: invalid uint64 val %q for id=%s", p.Value, p.AttributeID)
 	}
 
 	attrLabel := gridLabelFor(subIdx)
@@ -203,7 +203,7 @@ func gridLabelFor(subIdx int) string {
 //
 // blockHeight and time both come from bctx so replays + bulk windows
 // land the correct historical block in the right TimescaleDB chunk.
-func writeGridStat(bctx BlockContext, subIdx, objTypeID, objIndex int, val int64) error {
+func writeGridStat(bctx BlockContext, subIdx, objTypeID, objIndex int, val uint64) error {
 	t := bctx.BlockTime.UTC()
 	switch subIdx {
 	case 0:
@@ -211,37 +211,37 @@ func writeGridStat(bctx BlockContext, subIdx, objTypeID, objIndex int, val int64
 		if err != nil {
 			return err
 		}
-		bctx.Buf.StatOre = append(bctx.Buf.StatOre, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatOre = append(bctx.Buf.StatOre, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 1:
 		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		bctx.Buf.StatFuel = append(bctx.Buf.StatFuel, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatFuel = append(bctx.Buf.StatFuel, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 2:
 		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		bctx.Buf.StatCapacity = append(bctx.Buf.StatCapacity, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatCapacity = append(bctx.Buf.StatCapacity, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 3:
 		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		bctx.Buf.StatLoad = append(bctx.Buf.StatLoad, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatLoad = append(bctx.Buf.StatLoad, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 4:
-		bctx.Buf.StatStructsLoad = append(bctx.Buf.StatStructsLoad, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatStructsLoad = append(bctx.Buf.StatStructsLoad, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 5:
 		ot, err := requireObjectTypeLabel(objTypeID)
 		if err != nil {
 			return err
 		}
-		bctx.Buf.StatPower = append(bctx.Buf.StatPower, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatPower = append(bctx.Buf.StatPower, buffers.StatRow{Time: t, ObjectType: &ot, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 6:
-		bctx.Buf.StatConnectionCapacity = append(bctx.Buf.StatConnectionCapacity, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatConnectionCapacity = append(bctx.Buf.StatConnectionCapacity, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	case 7:
-		bctx.Buf.StatConnectionCount = append(bctx.Buf.StatConnectionCount, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: val, BlockHeight: bctx.Height})
+		bctx.Buf.StatConnectionCount = append(bctx.Buf.StatConnectionCount, buffers.StatRow{Time: t, ObjectIndex: objIndex, Value: strconv.FormatUint(val, 10), BlockHeight: bctx.Height})
 	}
 	return nil
 }

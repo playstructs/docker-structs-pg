@@ -134,8 +134,8 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 	if err != nil {
 		return failAll(targets, fmt.Sprintf("rpc /block_results: %v", err)), nil
 	}
-	if block.Block.Header.ChainID != in.ChainID {
-		return failAll(targets, fmt.Sprintf("block chain_id=%q != %q", block.Block.Header.ChainID, in.ChainID)), nil
+	if err := rpc.ValidateBundle(block, results, in.ChainID, height); err != nil {
+		return failAll(targets, err.Error()), nil
 	}
 
 	tx, err := in.Pool.BeginTx(ctx, pgx.TxOptions{})
@@ -170,14 +170,16 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 			Height:       t.Height,
 			CompositeKey: t.CompositeKey,
 		}
+		if t.CompositeKey == "structs.structs.EventOwnerReactorDiversityReset" ||
+			t.CompositeKey == "structs.structs.EventReactorCommissionRevisionReset" {
+			o.Skipped = true
+			o.SkipReason = "reset requires complete-block recovery with all following replacement rows"
+			outcomes = append(outcomes, o)
+			continue
+		}
 
-		// Locate the original (event, attribute) coordinate inside the
-		// freshly fetched block. We try the recorded (tx_index,
-		// event_index) first; if that doesn't match, fall back to
-		// scanning the block for the first attribute whose composite_key
-		// matches. This handles the case where the recorded indices
-		// drifted (a known historical gap on older error rows that
-		// didn't capture event_index).
+		// Resolve the exact original event; a similar payload at another
+		// coordinate is not evidence that this failed event was recovered.
 		raw, found, reason := locateAttribute(block, results, t)
 		if !found {
 			o.Skipped = true
@@ -203,13 +205,36 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 			bctxLocal.EventIndex = -1
 		}
 
-		he, fatal := in.Router.Dispatch(ctx, tx, bctxLocal, t.CompositeKey, raw)
-		if fatal != nil {
-			o.Error = fatal.Error()
+		// A fallback attribute match without its actual source position cannot
+		// safely mutate ordered state. Retain the error for scoped recovery.
+		var original *rpc.Event
+		if bctxLocal.TxIndex < 0 && bctxLocal.EventIndex >= 0 && bctxLocal.EventIndex < len(results.FinalizeBlockEvents) {
+			original = &results.FinalizeBlockEvents[bctxLocal.EventIndex]
+		} else if bctxLocal.TxIndex >= 0 && bctxLocal.TxIndex < len(results.TxsResults) && bctxLocal.EventIndex >= 0 && bctxLocal.EventIndex < len(results.TxsResults[bctxLocal.TxIndex].Events) {
+			original = &results.TxsResults[bctxLocal.TxIndex].Events[bctxLocal.EventIndex]
+		}
+		if original == nil {
+			o.Error = "original event coordinate unavailable; complete-block recovery required"
 			outcomes = append(outcomes, o)
 			continue
 		}
+		positioned, err := rpc.PositionEvent(*original, bctxLocal.TxIndex, bctxLocal.EventIndex)
+		if err != nil {
+			o.Error = err.Error()
+			outcomes = append(outcomes, o)
+			continue
+		}
+		bctxLocal.Phase = positioned.Phase
+		bctxLocal.MsgIndex = positioned.MsgIndex
+
+		he, fatal := in.Router.Dispatch(ctx, tx, bctxLocal, t.CompositeKey, raw)
+		if fatal != nil {
+			return failAll(targets, fatal.Error()), fatal
+		}
 		if he != nil {
+			if he.Severity != events.SeverityWarn {
+				return failAll(targets, he.Error), fmt.Errorf("required replay event %s: %s", he.CompositeKey, he.Error)
+			}
 			o.Error = he.Error
 			outcomes = append(outcomes, o)
 			continue
@@ -275,35 +300,22 @@ func locateAttribute(block *rpc.BlockResult, results *rpc.BlockResultsResult, t 
 		return results.TxsResults[txIdx].Events
 	}
 
-	// First try the recorded coordinate.
-	if t.TxIndex != nil && t.EventIndex != nil {
-		events := pickEvents(*t.TxIndex)
-		if *t.EventIndex >= 0 && *t.EventIndex < len(events) {
-			ev := events[*t.EventIndex]
-			if raw, ok := matchComposite(ev, t.CompositeKey); ok {
-				return raw, true, ""
-			}
+	// A nil tx_index represents finalize events in the error table. A missing
+	// event_index is genuinely unknown; never select the first similar event.
+	txIndex := -1
+	if t.TxIndex != nil {
+		txIndex = *t.TxIndex
+	}
+	if t.EventIndex == nil {
+		return nil, false, "original event index missing; complete-block recovery required"
+	}
+	sourceEvents := pickEvents(txIndex)
+	if *t.EventIndex >= 0 && *t.EventIndex < len(sourceEvents) {
+		if raw, ok := matchComposite(sourceEvents[*t.EventIndex], t.CompositeKey); ok {
+			return raw, true, ""
 		}
 	}
-
-	// Fallback: scan every event for the first composite_key match.
-	scan := func(events []rpc.Event) ([]byte, bool) {
-		for _, ev := range events {
-			if raw, ok := matchComposite(ev, t.CompositeKey); ok {
-				return raw, true
-			}
-		}
-		return nil, false
-	}
-	if raw, ok := scan(results.FinalizeBlockEvents); ok {
-		return raw, true, "(matched via fallback scan of finalize_block_events)"
-	}
-	for _, tr := range results.TxsResults {
-		if raw, ok := scan(tr.Events); ok {
-			return raw, true, "(matched via fallback scan of tx events)"
-		}
-	}
-	return nil, false, "composite_key not found in fetched block (block may have been re-executed)"
+	return nil, false, "recorded event coordinate does not match; complete-block recovery required"
 }
 
 // matchComposite returns the JSON-encoded attribute value when ev.Type
@@ -311,6 +323,10 @@ func locateAttribute(block *rpc.BlockResult, results *rpc.BlockResultsResult, t 
 // router uses the same encoding so this is byte-for-byte compatible
 // with what the original handler saw.
 func matchComposite(ev rpc.Event, compositeKey string) ([]byte, bool) {
+	if ev.Type == compositeKey {
+		raw, err := events.Envelope(ev)
+		return raw, err == nil
+	}
 	seen := make(map[string]struct{}, len(ev.Attributes))
 	for _, a := range ev.Attributes {
 		if _, dup := seen[a.Key]; dup {

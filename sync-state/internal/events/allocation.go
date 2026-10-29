@@ -26,10 +26,12 @@ INSERT INTO structs.allocation (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 ON CONFLICT (id) DO UPDATE
    SET destination_id = EXCLUDED.destination_id,
+       allocation_type = EXCLUDED.allocation_type,
        controller     = EXCLUDED.controller,
        updated_at     = NOW()
  WHERE structs.allocation.destination_id IS DISTINCT FROM EXCLUDED.destination_id
-    OR structs.allocation.controller     IS DISTINCT FROM EXCLUDED.controller`
+    OR structs.allocation.controller     IS DISTINCT FROM EXCLUDED.controller
+    OR structs.allocation.allocation_type IS DISTINCT FROM EXCLUDED.allocation_type`
 
 func (allocationHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.Allocation](raw)

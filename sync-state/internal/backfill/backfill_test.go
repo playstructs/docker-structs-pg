@@ -65,7 +65,7 @@ func TestFetchAllPlayers_TwoPages(t *testing.T) {
 	}
 	want := []struct {
 		id   string
-		rank int64
+		rank uint64
 	}{
 		{"1-1", 1},
 		{"1-2", 2},
@@ -75,8 +75,8 @@ func TestFetchAllPlayers_TwoPages(t *testing.T) {
 		if players[i].ID != w.id {
 			t.Errorf("players[%d].ID = %q want %q", i, players[i].ID, w.id)
 		}
-		if players[i].GuildRank.Int64() != w.rank {
-			t.Errorf("players[%d].GuildRank = %d want %d", i, players[i].GuildRank.Int64(), w.rank)
+		if uint64(players[i].GuildRank) != w.rank {
+			t.Errorf("players[%d].GuildRank = %d want %d", i, players[i].GuildRank, w.rank)
 		}
 	}
 }

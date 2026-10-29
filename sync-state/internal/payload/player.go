@@ -15,12 +15,12 @@ type Player struct {
 	PlanetID       string  `json:"planetId"`
 	FleetID        string  `json:"fleetId"`
 	// GuildRank is chain Player field 9. Emitted as a quoted uint64
-	// string by protojson, so JSONInt (not int64). Written to
+	// string by protojson, preserving the full unsigned range. Written to
 	// structs.player.guild_rank; a rank of 0 is stored as 0 (matching
 	// the 20260325 SQL handler).
-	GuildRank JSONInt `json:"guildRank"`
-	Name      string  `json:"name"`
-	PFP       string  `json:"pfp"`
+	GuildRank Uint64 `json:"guildRank"`
+	Name      string `json:"name"`
+	PFP       string `json:"pfp"`
 	// PFPClientRenderAttributes is chain Player field 12
 	// (pfpClientRenderAttributes), added in structsd v0.18.0: a compacted
 	// JSON object string describing how the client renders the player's

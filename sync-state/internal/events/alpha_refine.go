@@ -36,12 +36,22 @@ func (alphaRefineHandler) CompositeKey() string {
 var alphaRefineMicroFactor = big.NewInt(1_000_000)
 
 func (alphaRefineHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
-	p, err := payload.Decode[payload.AlphaRefine](raw)
+	p, err := payload.DecodeVersioned[payload.AlphaRefine](raw, bctx.V022Active(), "vaultAddress")
 	if err != nil {
+		return err
+	}
+	if _, err := payload.DecodeRequired[payload.AlphaRefine](raw, "primaryAddress", "amount"); err != nil {
 		return err
 	}
 	if p.PrimaryAddress == "" {
 		return fmt.Errorf("alpha_refine: empty primaryAddress")
+	}
+	creditAddress := p.VaultAddress
+	if creditAddress == "" {
+		if bctx.V022Active() {
+			return fmt.Errorf("alpha_refine: missing vaultAddress after activation")
+		}
+		creditAddress = p.PrimaryAddress
 	}
 	amtRaw := p.Amount.String()
 	amt := new(big.Int)
@@ -54,7 +64,7 @@ func (alphaRefineHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockConte
 	microAlpha := new(big.Int).Mul(amt, alphaRefineMicroFactor).String()
 	appendLedger(bctx,
 		buffers.LedgerRow{Address: p.PrimaryAddress, AmountP: amtRaw, Action: "refined", Direction: "debit", Denom: "ore"},
-		buffers.LedgerRow{Address: p.PrimaryAddress, AmountP: microAlpha, Action: "refined", Direction: "credit", Denom: "ualpha"},
+		buffers.LedgerRow{Address: creditAddress, AmountP: microAlpha, Action: "refined", Direction: "credit", Denom: "ualpha"},
 	)
 	_ = tx
 	return nil

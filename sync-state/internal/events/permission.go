@@ -70,7 +70,7 @@ func (permissionHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 	if p.PermissionID == "" {
 		return fmt.Errorf("permission: empty permissionId")
 	}
-	if p.Value == "" {
+	if p.Value == "" || p.Value == "0" {
 		if _, err := tx.Exec(ctx, permissionDeleteSQL, p.PermissionID); err != nil {
 			return fmt.Errorf("permission delete id=%s: %w", p.PermissionID, err)
 		}

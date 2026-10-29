@@ -52,7 +52,7 @@ type LedgerDelta struct {
 // column when the field is empty.
 //
 // ChainID/TxIndex/MsgIndex/EventIndex are the source-event identity
-// (table-ledger-20260914-source-event-identity). EventIndex must already
+// (table-ledger-20261029-denomination-identity, together with Denom). EventIndex must already
 // be EncodeLedgerEventIndex(chainEventIndex, leg). Time must be the
 // block time, never now().
 type LedgerRow struct {
@@ -100,7 +100,7 @@ type StatRow struct {
 	Time        time.Time
 	ObjectType  *string
 	ObjectIndex int
-	Value       int64
+	Value       string // Exact decimal text for NUMERIC, including full uint64 grid values.
 	BlockHeight int64
 }
 
@@ -383,7 +383,7 @@ INSERT INTO structs.ledger
     (time, address, counterparty, amount_p, block_height, action, direction, denom,
      chain_id, tx_index, msg_index, event_index)
 VALUES ` + strings.Join(placeholders, ",") + `
-ON CONFLICT (time, chain_id, tx_index, msg_index, event_index) DO NOTHING
+ON CONFLICT (time, chain_id, tx_index, msg_index, event_index, denom) DO NOTHING
 RETURNING address, denom,
           CASE direction WHEN 'credit' THEN amount_p ELSE -amount_p END::text AS delta`
 	qrows, err := tx.Query(ctx, sql, args...)

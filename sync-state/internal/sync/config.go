@@ -57,8 +57,8 @@ type Config struct {
 	// at the start of every per-block transaction. Any single SQL
 	// statement that runs longer than this gets cancelled by Postgres
 	// with SQLSTATE 57014 ("query_canceled"); the per-handler savepoint
-	// then catches the error and logs it to handler_error_log so the
-	// block as a whole still commits and the syncer keeps moving.
+	// then captures diagnostics. Required failures roll back the complete
+	// block/window and leave its cursor unchanged.
 	//
 	// 0 = no timeout (legacy behaviour; a hung statement stalls the
 	// entire syncer indefinitely). Default 60s — large enough that

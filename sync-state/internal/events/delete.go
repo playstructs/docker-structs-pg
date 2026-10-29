@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -19,6 +20,8 @@ import (
 // leaderboards stay stale after the upgrade block.
 type deleteHandler struct{}
 
+var regexpInfusionDestination = regexp.MustCompile(`^[35]-[1-9][0-9]*$`)
+
 func (deleteHandler) CompositeKey() string {
 	return "structs.structs.EventDelete.objectId"
 }
@@ -27,6 +30,9 @@ func (deleteHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 	id, err := decodeDeleteObjectID(raw)
 	if err != nil {
 		return err
+	}
+	if strings.Count(id, "-") > 1 {
+		return deleteInfusion(ctx, tx, bctx, id)
 	}
 	kind, _, _, err := objecttype.Parse(id)
 	if err != nil {
@@ -134,6 +140,40 @@ func (deleteHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 			return fmt.Errorf("delete player_object %s: %w", id, err)
 		}
 	}
+	return nil
+}
+
+func deleteInfusion(ctx context.Context, tx pgx.Tx, bctx BlockContext, id string) error {
+	parts := strings.Split(id, "-")
+	if len(parts) != 3 || (parts[0] != "3" && parts[0] != "5") || parts[2] == "" {
+		return fmt.Errorf("delete: malformed infusion id %q", id)
+	}
+	destination := parts[0] + "-" + parts[1]
+	if !regexpInfusionDestination.MatchString(destination) {
+		return fmt.Errorf("delete: malformed infusion destination %q", destination)
+	}
+	p := payload.Infusion{DestinationID: destination, Address: parts[2]}
+	if applied, err := infusionEventApplied(ctx, tx, bctx, p); err != nil || applied {
+		return err
+	}
+	var owner *string
+	err := tx.QueryRow(ctx, `DELETE FROM structs.infusion WHERE destination_id=$1 AND address=$2
+        RETURNING COALESCE(NULLIF(owner_id,''),player_id)`, destination, p.Address).Scan(&owner)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.Exec(ctx, infusionPositionUpsertSQL, destination, p.Address,
+		bctx.Height, bctx.TxIndex, bctx.EventIndex, int16(bctx.PositionPhase())); err != nil {
+		return err
+	}
+	if owner != nil {
+		dirtyOwner(bctx, *owner)
+	}
+	bctx.Dirty.Address(p.Address)
+	if parts[0] == "3" {
+		bctx.Dirty.Reactor(destination)
+	}
+	// Removing a position never refunds burned fuel or creates a bank credit.
 	return nil
 }
 

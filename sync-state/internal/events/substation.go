@@ -22,20 +22,24 @@ func (substationHandler) CompositeKey() string {
 
 const substationUpsertSQL = `
 INSERT INTO structs.substation (
-    id, owner, creator, name, pfp,
+    id, owner, creator, name, pfp, deletion_pending, deletion_migration_substation_id,
     created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 ON CONFLICT (id) DO UPDATE
    SET owner      = EXCLUDED.owner,
        name       = EXCLUDED.name,
        pfp        = EXCLUDED.pfp,
+       deletion_pending = EXCLUDED.deletion_pending,
+       deletion_migration_substation_id = EXCLUDED.deletion_migration_substation_id,
        updated_at = NOW()
  WHERE structs.substation.owner IS DISTINCT FROM EXCLUDED.owner
     OR structs.substation.name  IS DISTINCT FROM EXCLUDED.name
-    OR structs.substation.pfp   IS DISTINCT FROM EXCLUDED.pfp`
+    OR structs.substation.pfp   IS DISTINCT FROM EXCLUDED.pfp
+    OR structs.substation.deletion_pending IS DISTINCT FROM EXCLUDED.deletion_pending
+    OR structs.substation.deletion_migration_substation_id IS DISTINCT FROM EXCLUDED.deletion_migration_substation_id`
 
 func (substationHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
-	p, err := payload.Decode[payload.Substation](raw)
+	p, err := payload.DecodeVersioned[payload.Substation](raw, bctx.V022Active(), "deletion_pending", "deletion_migration_substation_id")
 	if err != nil {
 		return err
 	}
@@ -48,6 +52,8 @@ func (substationHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContex
 		payload.NullableText(p.Creator),
 		payload.NullableText(p.Name),
 		payload.NullableText(p.PFP),
+		p.DeletionPending,
+		p.DeletionMigrationSubstationID,
 	); err != nil {
 		return fmt.Errorf("substation upsert id=%s: %w", p.ID, err)
 	}
