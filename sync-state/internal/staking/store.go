@@ -117,7 +117,7 @@ func Pending(ctx context.Context, q Queryer, chainID string, limit int) ([]Reque
 SELECT s.address,c.last_height
 FROM sync_state.native_staking_snapshot s
 JOIN sync_state.sync_cursor c ON c.chain_id=s.chain_id
-WHERE s.chain_id=$1 AND (s.pending OR s.receipts_pending) AND s.retry_after<=NOW()
+WHERE s.chain_id=$1 AND (s.pending OR s.receipts_pending OR NOT s.positions_complete) AND s.retry_after<=NOW()
   AND s.required_height<=c.last_height AND c.last_height>0 AND c.status='current'
 ORDER BY s.retry_after,s.address LIMIT $2`, chainID, limit)
 	if err != nil {
@@ -141,14 +141,18 @@ func Publish(ctx context.Context, tx pgx.Tx, s *Snapshot) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	positions, err := positionTotals(s)
+	if err != nil {
+		return false, err
+	}
 	if err := readmodel.Lock(ctx, tx); err != nil {
 		return false, err
 	}
 	command, err := tx.Exec(ctx, `
 UPDATE sync_state.native_staking_snapshot s
-SET source_height=$3,bonded=$4::numeric,unbonding=$5::numeric,fetched_at=NOW(),retry_after='-infinity',receipts_pending=FALSE
+SET source_height=$3,bonded=$4::numeric,unbonding=$5::numeric,fetched_at=NOW(),retry_after='-infinity',receipts_pending=FALSE,positions_complete=TRUE
 WHERE chain_id=$1 AND address=$2 AND required_height<=$3
-  AND (source_height IS NULL OR source_height<$3 OR (source_height=$3 AND receipts_pending))
+  AND (source_height IS NULL OR source_height<$3 OR (source_height=$3 AND (receipts_pending OR NOT positions_complete)))
   AND EXISTS (SELECT 1 FROM sync_state.sync_cursor c WHERE c.chain_id=s.chain_id AND c.last_height>=$3)
   AND NOT EXISTS (SELECT 1 FROM sync_state.native_staking_invalidation i
       WHERE i.chain_id=s.chain_id AND (i.validator='' OR i.validator=ANY($6::varchar[])) AND i.height>$3)`,
@@ -166,6 +170,9 @@ SELECT $1,unnest($3::varchar[]),$2`, s.ChainID, s.Address, validators); err != n
 	if err := reconcileReceipts(ctx, tx, s); err != nil {
 		return false, err
 	}
+	if err := replacePositions(ctx, tx, s, positions); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -176,7 +183,7 @@ func RetryLater(ctx context.Context, tx pgx.Tx, chainID, address string, height 
 		return err
 	}
 	_, err := tx.Exec(ctx, `UPDATE sync_state.native_staking_snapshot SET retry_after=$4
-WHERE chain_id=$1 AND address=$2 AND (pending OR receipts_pending) AND required_height<=$3`, chainID, address, height, after)
+WHERE chain_id=$1 AND address=$2 AND (pending OR receipts_pending OR NOT positions_complete) AND required_height<=$3`, chainID, address, height, after)
 	return err
 }
 

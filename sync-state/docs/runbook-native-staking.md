@@ -9,13 +9,12 @@ second asset. Query limits and any failed page leave the address unknown.
 
 The implementation now uses these claims for synthetic inventory and player
 valuation in incremental projection, full rebuild, SQL reconciliation and the
-verifier. This code has not been deployed to the running writer. Existing API
-and browser adapters, pending-receipt cleanup and rollout rehearsal remain open;
+verifier. This code has not been deployed to the running writer. Existing browser adapters and rollout rehearsal remain open;
 a successful cache refresh alone does not complete the application migration.
 
 ## Prerequisites and operation
 
-Deploy through `function-api-inventory-20261029-current-claims` with structs-pg
+Deploy through `function-api-player-reactor-20261029` with structs-pg
 Sqitch before starting this writer, plus the separately gated ledger identity
 switch during the coordinated writer change. Compatible schema predeployment
 leaves SQL maintenance on the existing ledger authority. The first writer rebuild
@@ -114,8 +113,8 @@ for deterministic complete/partial snapshots. They cover real transaction rollba
 concurrent writer progress during HTTP, stale-result rejection, newly discovered
 exposure, source-validator redelegation exposure, exact large totals, empty native
 completion, retry isolation and worker shutdown. The release-height chain upgrade,
-representative deployment timings, pending-receipt cleanup and unchanged-UI
-adapter validation remain separate acceptance work.
+representative deployment timings and unchanged-UI adapter validation remain
+separate acceptance work.
 
 ## Pending operation receipts
 
@@ -130,3 +129,34 @@ A receipt retires only after the complete native query contains no compatible op
 The old wall-clock `defusion_cleaner` job is removed by Sqitch; its procedure becomes harmless for callers that still invoke it. The replacement is transactionally reconciled retirement, not deletion. Use `structs.defusion_current` for catalog reads; it excludes retired tombstones and reports `pending_state` (`pending`, `unknown`, or `unidentified`). `amount_p` is still the original event amount. Use native current claims for pending balance, never the sum of receipt amounts. Missing or unidentified history is not a complete queue mirror.
 
 `sync-state verify` includes `pending_receipts`: impossible indexed boundaries or missing reconciliation requests fail, unresolved/unidentified coverage is INFO, and matched/retired coverage passes. The ordinary time-ordering check does not claim receipt-lifecycle coverage. Rollback refuses identified/adopted receipts or outstanding receipt work; use a verified checkpoint if that contract must be removed. Do not manually delete tombstones to make rollback pass.
+
+## Per-validator position evidence
+
+Sqitch `table-native-staking-20261029-positions` adds `native_staking_position`
+and the parent `positions_complete` flag. The same complete address query now
+publishes exact bonded/unbonding totals and actual unbonding-entry counts by
+validator in the existing transaction. A held zero-balance entry still occupies
+a slot. Redelegations remain exposure, not another asset. The grouped totals
+must equal the complete address totals before any mutation is accepted.
+
+Existing snapshots start with `positions_complete=false`, which queues a bounded
+refresh even when the old total is current. Same-height publication is permitted
+for this missing coverage as well as queued receipt work. Failed queries back off;
+complete-empty publication removes prior child rows. `native_staking_position_state`
+requires both complete address evidence and complete position coverage. Child rows
+alone are diagnostic while the parent is invalidated. Native aggregate claims
+remain usable independently of a legacy snapshot's missing position breakdown.
+
+The existing player reactor API uses `structs.api_player_reactor(text)` with the
+inventory snapshot. It starts from current player vault/approved retained ownership,
+uses exact validator keys and excludes guild treasuries, pending/revoked addresses
+and other reactors. At most 1,024 owned addresses may contribute; a 1,025th withholds
+the whole result. This read limit is not a transaction message/gas limit. A missing
+indexed vault or missing/stale per-address evidence withholds native totals.
+
+Applied infusion power remains a separate canonical field: sum gross power, and
+compute the owner share with the release's per-position ties-to-even commission
+rounding. Do not reconstruct applied power from native fuel or count cached power
+for a different recorded owner. The API exposes exact strings and coverage; it
+does not establish current permissions, queue limits, live stake availability,
+transaction simulation, or the maximum safe atomic withdrawal size.

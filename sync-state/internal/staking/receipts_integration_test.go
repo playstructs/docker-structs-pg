@@ -196,6 +196,7 @@ SELECT $1,$2,'r',5,'ualpha',$3 FROM generate_series(1,2)`, validatorB, testAddre
 	// Source validator began unbonding before this redelegation. Do not compare
 	// its native creation_height=80 to the receipt's transaction height=100.
 	s := &staking.Snapshot{ChainID: storeChain, Address: testAddress, Height: 199, Bonded: "5", Unbonding: "0",
+		Delegations:   []staking.Delegation{{Validator: validatorB, Balance: "5"}},
 		Redelegations: []staking.Redelegation{{SourceValidator: validatorA, DestinationValidator: validatorB, CreationHeight: 80, CompletionTime: completion, Balance: "5"}}}
 	if ok, err := staking.Publish(ctx, tx, s); err != nil || ok {
 		t.Fatalf("legacy upper bound ignored %v %v", ok, err)
