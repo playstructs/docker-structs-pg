@@ -9,14 +9,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ConsumeDrift repairs structs.api_inventory from the latest
-// structs.api_inventory_drift batch (written by the nightly reconciler)
+// ConsumeDrift repairs structs.api_inventory from outstanding
+// structs.api_inventory_drift batches (written by the nightly reconciler)
 // and deletes those drift rows. A non-empty batch two nights running
 // means the incremental inventory path has a bug, not just a race.
 //
 // No-ops when the drift table is missing or empty. Never writes the
 // reconciler function — it only consumes.
 func ConsumeDrift(ctx context.Context, tx pgx.Tx) (int, error) {
+	return consumeDrift(ctx, tx, NewDirty())
+}
+
+func consumeDrift(ctx context.Context, tx pgx.Tx, dirty *Dirty) (int, error) {
+	if err := Lock(ctx, tx); err != nil {
+		return 0, err
+	}
 	var present *string
 	if err := tx.QueryRow(ctx, `SELECT to_regclass('structs.api_inventory_drift')`).Scan(&present); err != nil {
 		return 0, fmt.Errorf("lookup api_inventory_drift: %w", err)
@@ -32,9 +39,9 @@ func ConsumeDrift(ctx context.Context, tx pgx.Tx) (int, error) {
 		return 0, nil
 	}
 	rows, err := tx.Query(ctx, `
-SELECT owner_type::text, owner_id, denom
+SELECT DISTINCT owner_type::text, owner_id, denom
   FROM structs.api_inventory_drift
- WHERE checked_at = $1`, *checkedAt)
+ WHERE checked_at <= $1`, *checkedAt)
 	if err != nil {
 		return 0, fmt.Errorf("read drift batch: %w", err)
 	}
@@ -55,61 +62,75 @@ SELECT owner_type::text, owner_id, denom
 	rows.Close()
 
 	for _, k := range keys {
-		if k.ownerType == "address" {
-			if err := repairAddressInventory(ctx, tx, k.ownerID, k.denom); err != nil {
-				return 0, err
-			}
+		switch k.ownerType {
+		case "address":
+			dirty.Address(k.ownerID)
+		case "player":
+			dirty.Player(k.ownerID)
+		case "guild":
+			dirty.Guild(k.ownerID)
 		}
 	}
-	seenPlayer := map[string]struct{}{}
-	for _, k := range keys {
-		if k.ownerType != "player" {
-			continue
-		}
-		if _, ok := seenPlayer[k.ownerID]; ok {
-			continue
-		}
-		seenPlayer[k.ownerID] = struct{}{}
-		if err := rebuildPlayerInventory(ctx, tx, []string{k.ownerID}); err != nil {
-			return 0, err
-		}
+	dirty.inventoryPlayers = cloneSet(dirty.Players)
+	if err := expandAddresses(ctx, tx, dirty); err != nil {
+		return 0, err
 	}
-	tag, err := tx.Exec(ctx, `DELETE FROM structs.api_inventory_drift WHERE checked_at = $1`, *checkedAt)
+	if err := recomputeInventory(ctx, tx, dirty); err != nil {
+		return 0, err
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM structs.api_inventory_drift WHERE checked_at <= $1`, *checkedAt)
 	if err != nil {
 		return 0, fmt.Errorf("delete drift batch: %w", err)
 	}
-	_ = tag
 	return len(keys), nil
 }
 
-func repairAddressInventory(ctx context.Context, tx pgx.Tx, address, denom string) error {
-	if _, err := tx.Exec(ctx, `
-INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
-SELECT 'address'::structs.object_type, $1, $2,
-       COALESCE(SUM(CASE direction WHEN 'credit' THEN amount_p ELSE -amount_p END), 0)
-  FROM structs.ledger
- WHERE address = $1 AND denom = $2
-ON CONFLICT (owner_type, owner_id, denom)
-DO UPDATE SET balance = EXCLUDED.balance`, address, denom); err != nil {
-		return fmt.Errorf("repair address inventory %s %s: %w", address, denom, err)
-	}
-	return nil
-}
-
 // ConsumeDriftOn opens a short transaction against pool to apply the
-// latest reconciler batch. Safe to call at ingest start.
+// outstanding reconciler batches. Safe to call at ingest start.
 func ConsumeDriftOn(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	n, err := ConsumeDrift(ctx, tx)
+	n, err := consumeDriftReady(ctx, tx)
 	if err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
+	}
+	return n, nil
+}
+
+// consumeDriftReady repairs only a complete indexed snapshot and refreshes its
+// dependent models before returning. The caller commits the same transaction.
+func consumeDriftReady(ctx context.Context, tx pgx.Tx) (int, error) {
+	if err := Lock(ctx, tx); err != nil {
+		return 0, err
+	}
+	var height int64
+	var sourceTime *time.Time
+	if err := tx.QueryRow(ctx, `SELECT b.source_height, b.source_time FROM structs.api_projection_boundary() b
+WHERE (SELECT count(*) FROM structs.api_refresh_state rs
+        WHERE rs.model=ANY($1::text[]) AND rs.source_height=b.source_height
+          AND rs.source_time IS NOT DISTINCT FROM b.source_time)=$2`, modelNames, len(modelNames)).Scan(&height, &sourceTime); err != nil {
+		if err == pgx.ErrNoRows {
+			// Deferred/uninitialized projections need a full backfill, not a
+			// partial repair that would advance their readiness watermark.
+			return 0, nil
+		}
+		return 0, err
+	}
+	dirty := NewDirty()
+	n, err := consumeDrift(ctx, tx, dirty)
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		if err := Recompute(ctx, tx, dirty, height, sourceTime, InventoryAlreadyWritten()); err != nil {
+			return 0, fmt.Errorf("refresh repaired inventory dependencies: %w", err)
+		}
 	}
 	return n, nil
 }

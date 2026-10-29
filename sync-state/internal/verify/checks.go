@@ -659,7 +659,7 @@ WHERE model = ANY(ARRAY[
 	r.Counts["refresh_models"] = models
 	r.Counts["stale_models"] = stale
 
-	var addressDiff, playerDiff, totalsDiff int64
+	var addressDiff, ownerDiff, totalsDiff int64
 	err = in.Pool.QueryRow(ctx, `
 WITH expected AS (
   SELECT address AS owner_id, denom,
@@ -681,40 +681,40 @@ SELECT COUNT(*) FROM delta`).Scan(&addressDiff)
 	}
 	err = in.Pool.QueryRow(ctx, `
 WITH expected AS (
-  SELECT pa.player_id AS owner_id, l.denom,
+  SELECT ao.owner_type, ao.owner_id, l.denom,
          SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END) AS balance
-  FROM structs.player_address pa JOIN structs.ledger l ON l.address = pa.address
-  GROUP BY pa.player_id, l.denom
+  FROM structs.asset_owner ao JOIN structs.ledger l ON l.address = ao.address
+  GROUP BY ao.owner_type, ao.owner_id, l.denom
 ), actual AS (
-  SELECT owner_id, denom, balance FROM structs.api_inventory
-  WHERE owner_type = 'player'
+  SELECT owner_type, owner_id, denom, balance FROM structs.api_inventory
+  WHERE owner_type IN ('player','guild')
 ), delta AS (
   (SELECT * FROM expected EXCEPT SELECT * FROM actual)
   UNION ALL
   (SELECT * FROM actual EXCEPT SELECT * FROM expected)
 )
-SELECT COUNT(*) FROM delta`).Scan(&playerDiff)
+SELECT COUNT(*) FROM delta`).Scan(&ownerDiff)
 	if err != nil {
 		r.Status = StatusFail
-		r.Detail = fmt.Sprintf("player inventory reconciliation: %v", err)
+		r.Detail = fmt.Sprintf("owner inventory reconciliation: %v", err)
 		return r
 	}
 	err = in.Pool.QueryRow(ctx, `
 WITH address_total AS (
   SELECT denom, SUM(balance) balance FROM structs.api_inventory
   WHERE owner_type = 'address' GROUP BY denom
-), player_total AS (
+), owner_total AS (
   SELECT denom, SUM(balance) balance FROM structs.api_inventory
-  WHERE owner_type = 'player' GROUP BY denom
+  WHERE owner_type IN ('player','guild') GROUP BY denom
 ), unassociated AS (
   SELECT i.denom, SUM(i.balance) balance
   FROM structs.api_inventory i
-  LEFT JOIN structs.player_address pa ON pa.address = i.owner_id
-  WHERE i.owner_type = 'address' AND pa.address IS NULL
+  LEFT JOIN structs.asset_owner ao ON ao.address = i.owner_id
+  WHERE i.owner_type = 'address' AND ao.address IS NULL
   GROUP BY i.denom
 )
 SELECT COUNT(*) FROM address_total a
-FULL JOIN player_total p USING (denom)
+FULL JOIN owner_total p USING (denom)
 FULL JOIN unassociated u USING (denom)
 WHERE COALESCE(a.balance, 0) <> COALESCE(p.balance, 0) + COALESCE(u.balance, 0)`).Scan(&totalsDiff)
 	if err != nil {
@@ -723,7 +723,7 @@ WHERE COALESCE(a.balance, 0) <> COALESCE(p.balance, 0) + COALESCE(u.balance, 0)`
 		return r
 	}
 	r.Counts["address_inventory_differences"] = addressDiff
-	r.Counts["player_inventory_differences"] = playerDiff
+	r.Counts["owner_inventory_differences"] = ownerDiff
 	r.Counts["inventory_total_differences"] = totalsDiff
 
 	var orphans, bankDiff, leaderboardDiff int64
@@ -755,7 +755,7 @@ WITH expected AS (
            JOIN structs.address_tag gid
              ON gid.address = typ.address AND gid.label = 'GuildId' AND gid.entry = g.id
            JOIN structs.ledger l ON l.address = typ.address
-           WHERE typ.label = 'Type' AND typ.entry = 'Bank Collateral Pool'
+           WHERE typ.label = 'Type' AND typ.entry = 'Bank Collateral Pool' AND l.denom = 'ualpha'
          ) AS collateral,
          (
            SELECT SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)
@@ -827,7 +827,7 @@ SELECT
 	r.Counts["guild_bank_differences"] = bankDiff
 	r.Counts["leaderboard_differences"] = leaderboardDiff
 	r.Height = &cursor.LastHeight
-	if models != 7 || stale != 0 || addressDiff != 0 || playerDiff != 0 || totalsDiff != 0 || orphans != 0 || bankDiff != 0 || leaderboardDiff != 0 {
+	if models != 7 || stale != 0 || addressDiff != 0 || ownerDiff != 0 || totalsDiff != 0 || orphans != 0 || bankDiff != 0 || leaderboardDiff != 0 {
 		r.Status = StatusFail
 		r.Detail = "API projections are not cutover-ready"
 	} else {

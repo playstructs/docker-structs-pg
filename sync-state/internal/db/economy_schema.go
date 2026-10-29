@@ -116,6 +116,14 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 	if !ownerRead {
 		return fmt.Errorf("v0.22 schema missing SELECT on structs.asset_owner")
 	}
+	var boundaryReady bool
+	if err := q.QueryRow(ctx, `SELECT COALESCE(has_function_privilege(current_user,
+to_regprocedure('structs.api_projection_boundary()'),'EXECUTE'),FALSE)`).Scan(&boundaryReady); err != nil {
+		return err
+	}
+	if !boundaryReady {
+		return fmt.Errorf("v0.22 schema missing executable structs.api_projection_boundary(); deploy the ownership maintenance migration")
+	}
 	var legacyLedgerKey bool
 	if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_index i
         WHERE i.indrelid='structs.ledger'::regclass AND i.indisunique AND i.indisvalid

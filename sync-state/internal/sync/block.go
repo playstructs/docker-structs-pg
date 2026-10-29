@@ -103,6 +103,9 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		}
 	}
 
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return nil, err
+	}
 	numEvents := 0
 	dirty := readmodel.NewDirty()
 	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents); err != nil {

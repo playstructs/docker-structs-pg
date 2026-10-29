@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"sync-state/internal/payload"
+	"sync-state/internal/readmodel"
 )
 
 // PlanetAttributeInputs is the dependency bundle runIngest hands the sweep.
@@ -187,6 +188,10 @@ func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []plane
 		}
 	}()
 
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return err
+	}
+
 	if _, err := tx.Exec(ctx, createChainPATempSQL); err != nil {
 		return fmt.Errorf("create temp chain_pa: %w", err)
 	}
@@ -217,6 +222,12 @@ func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []plane
 		return fmt.Errorf("zero missing planet_attribute: %w", err)
 	}
 	r.Zeroed = tag.RowsAffected()
+
+	if r.Upserted+r.Zeroed > 0 {
+		if err := readmodel.Invalidate(ctx, tx); err != nil {
+			return err
+		}
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)

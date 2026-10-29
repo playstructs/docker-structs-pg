@@ -35,6 +35,18 @@ func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime 
 		return report, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := Lock(ctx, tx); err != nil {
+		return report, err
+	}
+	var advanced bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+SELECT 1 FROM sync_state.sync_cursor WHERE last_height <> $1
+ OR last_block_time IS DISTINCT FROM $2::timestamptz)`, height, sourceTime).Scan(&advanced); err != nil {
+		return report, err
+	}
+	if advanced {
+		return report, fmt.Errorf("backfill boundary changed before maintenance lock; retry at the indexed cursor")
+	}
 
 	d := NewDirty()
 	if err := loadAllDirty(ctx, tx, d); err != nil {
@@ -51,6 +63,11 @@ func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime 
 	}
 	if err := backfillInventory(ctx, tx); err != nil {
 		return report, err
+	}
+	if n, err := ConsumeDrift(ctx, tx); err != nil {
+		return report, fmt.Errorf("consume inventory drift: %w", err)
+	} else {
+		report.Rows["api_inventory_drift_consumed"] = int64(n)
 	}
 	if err := refresh(ctx, tx, "inventory", height, sourceTime); err != nil {
 		return report, fmt.Errorf("inventory refresh_state: %w", err)
@@ -69,11 +86,6 @@ func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime 
 			return report, fmt.Errorf("count %s: %w", table, err)
 		}
 		report.Rows[table] = n
-	}
-	if n, err := ConsumeDrift(ctx, tx); err != nil {
-		return report, fmt.Errorf("consume inventory drift: %w", err)
-	} else {
-		report.Rows["api_inventory_drift_consumed"] = int64(n)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return report, fmt.Errorf("commit: %w", err)
@@ -97,12 +109,12 @@ SELECT 'address'::structs.object_type, address, denom,
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
-SELECT 'player'::structs.object_type, pa.player_id, i.denom, SUM(i.balance)
+SELECT ao.owner_type, ao.owner_id, i.denom, SUM(i.balance)
   FROM structs.api_inventory i
-  JOIN structs.player_address pa ON pa.address = i.owner_id
+  JOIN structs.asset_owner ao ON ao.address = i.owner_id
  WHERE i.owner_type = 'address'
- GROUP BY pa.player_id, i.denom`); err != nil {
-		return fmt.Errorf("backfill player inventory: %w", err)
+ GROUP BY ao.owner_type, ao.owner_id, i.denom`); err != nil {
+		return fmt.Errorf("backfill owner inventory: %w", err)
 	}
 	return nil
 }

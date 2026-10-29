@@ -153,26 +153,30 @@ func expandAddresses(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 		return nil
 	}
 	rows, err := tx.Query(ctx, `
-SELECT pa.player_id, gt.entry
+SELECT ao.owner_type::text, ao.owner_id, gt.entry
 FROM unnest($1::varchar[]) a(address)
-LEFT JOIN structs.player_address pa ON pa.address = a.address
+LEFT JOIN structs.asset_owner ao ON ao.address = a.address
 LEFT JOIN structs.address_tag typ
   ON typ.address = a.address AND typ.label = 'Type'
  AND typ.entry = 'Bank Collateral Pool'
 LEFT JOIN structs.address_tag gt
-  ON gt.address = a.address AND gt.label = 'GuildId'`, ids)
+  ON gt.address = a.address AND gt.label = 'GuildId' AND typ.address IS NOT NULL`, ids)
 	if err != nil {
 		return fmt.Errorf("expand dirty addresses: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var player, guild *string
-		if err := rows.Scan(&player, &guild); err != nil {
+		var ownerType, owner, guild *string
+		if err := rows.Scan(&ownerType, &owner, &guild); err != nil {
 			return err
 		}
-		if player != nil {
-			d.Player(*player)
-			add(d.inventoryPlayers, *player)
+		if owner != nil && ownerType != nil {
+			if *ownerType == "guild" {
+				d.Guild(*owner)
+			} else {
+				d.Player(*owner)
+				add(d.inventoryPlayers, *owner)
+			}
 		}
 		if guild != nil {
 			d.Guild(*guild)
@@ -320,15 +324,15 @@ SELECT inserted, updated, deleted
 }
 
 func recomputeInventory(ctx context.Context, tx pgx.Tx, d *Dirty) error {
-	addresses, players := d.AddressIDs(), d.InventoryPlayerIDs()
-	if len(addresses) == 0 && len(players) == 0 {
+	addresses, owners := d.AddressIDs(), d.InventoryOwnerIDs()
+	if len(addresses) == 0 && len(owners) == 0 {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `
 DELETE FROM structs.api_inventory
 WHERE (owner_type = 'address' AND owner_id = ANY($1::varchar[]))
-   OR (owner_type = 'player' AND owner_id = ANY($2::varchar[]))`,
-		addresses, players); err != nil {
+   OR (owner_type IN ('player','guild') AND owner_id = ANY($2::varchar[]))`,
+		addresses, owners); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -342,12 +346,12 @@ GROUP BY l.address, l.denom`, addresses); err != nil {
 	}
 	_, err := tx.Exec(ctx, `
 INSERT INTO structs.api_inventory(owner_type, owner_id, denom, balance)
-SELECT 'player'::structs.object_type, pa.player_id, l.denom,
+SELECT ao.owner_type, ao.owner_id, l.denom,
        SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)
-FROM structs.player_address pa
-JOIN structs.ledger l ON l.address = pa.address
-WHERE pa.player_id = ANY($1::varchar[])
-GROUP BY pa.player_id, l.denom`, players)
+FROM structs.asset_owner ao
+JOIN structs.ledger l ON l.address = ao.address
+WHERE ao.owner_id = ANY($1::varchar[])
+GROUP BY ao.owner_type, ao.owner_id, l.denom`, owners)
 	return err
 }
 
@@ -373,36 +377,33 @@ DO UPDATE SET balance = structs.api_inventory.balance + EXCLUDED.balance`,
 			return err
 		}
 	}
-	return rebuildPlayerInventory(ctx, tx, d.InventoryPlayerIDs())
+	return rebuildOwnerInventory(ctx, tx, d.InventoryOwnerIDs())
 }
 
-// rebuildPlayerInventory rewrites only the player rows whose balance actually
-// changed, so unchanged rows produce no dead tuples or WAL. The DELETE and the
-// upsert touch disjoint rows (denoms absent vs present in fresh).
-func rebuildPlayerInventory(ctx context.Context, tx pgx.Tx, players []string) error {
-	if len(players) == 0 {
+// rebuildOwnerInventory uses current economic ownership for both players and
+// guild treasuries. Removed/revoked associations remove only attribution, never
+// the unowned address balance or historical receipts.
+func rebuildOwnerInventory(ctx context.Context, tx pgx.Tx, owners []string) error {
+	if len(owners) == 0 {
 		return nil
 	}
 	_, err := tx.Exec(ctx, `
 WITH fresh AS (
-  SELECT pa.player_id, i.denom, SUM(i.balance) AS balance
-  FROM structs.player_address pa
-  JOIN structs.api_inventory i
-    ON i.owner_type = 'address' AND i.owner_id = pa.address
-  WHERE pa.player_id = ANY($1::varchar[])
-  GROUP BY pa.player_id, i.denom
+  SELECT ao.owner_type, ao.owner_id, i.denom, SUM(i.balance) AS balance
+  FROM structs.asset_owner ao
+  JOIN structs.api_inventory i ON i.owner_type='address' AND i.owner_id=ao.address
+  WHERE ao.owner_id=ANY($1::varchar[])
+  GROUP BY ao.owner_type, ao.owner_id, i.denom
 ), stale AS (
   DELETE FROM structs.api_inventory a
-  WHERE a.owner_type = 'player' AND a.owner_id = ANY($1::varchar[])
-    AND NOT EXISTS (
-      SELECT 1 FROM fresh f WHERE f.player_id = a.owner_id AND f.denom = a.denom
-    )
+  WHERE a.owner_type IN ('player','guild') AND a.owner_id=ANY($1::varchar[])
+    AND NOT EXISTS (SELECT 1 FROM fresh f
+      WHERE f.owner_type=a.owner_type AND f.owner_id=a.owner_id AND f.denom=a.denom)
 )
-INSERT INTO structs.api_inventory (owner_type, owner_id, denom, balance)
-SELECT 'player'::structs.object_type, player_id, denom, balance FROM fresh
-ON CONFLICT (owner_type, owner_id, denom) DO UPDATE
-SET balance = EXCLUDED.balance
-WHERE structs.api_inventory.balance IS DISTINCT FROM EXCLUDED.balance`, players)
+INSERT INTO structs.api_inventory(owner_type,owner_id,denom,balance)
+SELECT owner_type,owner_id,denom,balance FROM fresh
+ON CONFLICT (owner_type,owner_id,denom) DO UPDATE SET balance=EXCLUDED.balance
+WHERE structs.api_inventory.balance IS DISTINCT FROM EXCLUDED.balance`, owners)
 	return err
 }
 
@@ -423,7 +424,7 @@ SELECT g.id, 'uguild.' || g.id,
          JOIN structs.address_tag gid
            ON gid.address = typ.address AND gid.label = 'GuildId' AND gid.entry = g.id
          JOIN structs.ledger l ON l.address = typ.address
-         WHERE typ.label = 'Type' AND typ.entry = 'Bank Collateral Pool'
+         WHERE typ.label = 'Type' AND typ.entry = 'Bank Collateral Pool' AND l.denom = 'ualpha'
        ),
        (
          SELECT SUM(CASE l.direction WHEN 'credit' THEN l.amount_p ELSE -l.amount_p END)

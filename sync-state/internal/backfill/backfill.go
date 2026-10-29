@@ -38,6 +38,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"sync-state/internal/payload"
+	"sync-state/internal/readmodel"
 )
 
 // PlayerRankInputs is the dependency bundle runIngest hands the sweep.
@@ -134,6 +135,10 @@ func applyGuildRanks(ctx context.Context, pool *pgxpool.Pool, players []payload.
 		}
 	}()
 
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return err
+	}
+
 	// Chain ids the DB has never seen mean ingest is behind the LCD
 	// snapshot; worth surfacing but not an error.
 	var present int64
@@ -150,6 +155,12 @@ func applyGuildRanks(ctx context.Context, pool *pgxpool.Pool, players []payload.
 	r.AlreadyCorrect = present - r.Updated
 	if r.AlreadyCorrect < 0 {
 		r.AlreadyCorrect = 0
+	}
+
+	if r.Updated > 0 {
+		if err := readmodel.Invalidate(ctx, tx); err != nil {
+			return err
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -223,9 +234,19 @@ func SweepStaleDefenders(ctx context.Context, pool *pgxpool.Pool) (StaleDefender
 		}
 	}()
 
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return r, err
+	}
+
 	if err := tx.QueryRow(ctx, sweepStaleDefendersSQL).Scan(&r.DefendersRemoved, &r.AttrsRemoved); err != nil {
 		return r, fmt.Errorf("sweep stale defenders: %w", err)
 	}
+	if r.DefendersRemoved+r.AttrsRemoved > 0 {
+		if err := readmodel.Invalidate(ctx, tx); err != nil {
+			return r, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return r, fmt.Errorf("commit: %w", err)
 	}
@@ -288,11 +309,21 @@ func SweepDefenderPlanetary(ctx context.Context, pool *pgxpool.Pool) (DefenderPl
 		}
 	}()
 
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return r, err
+	}
+
 	updated, err := applyDefenderPlanetary(ctx, tx)
 	if err != nil {
 		return r, err
 	}
 	r.Updated = updated
+	if r.Updated > 0 {
+		if err := readmodel.Invalidate(ctx, tx); err != nil {
+			return r, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return r, fmt.Errorf("commit: %w", err)
 	}

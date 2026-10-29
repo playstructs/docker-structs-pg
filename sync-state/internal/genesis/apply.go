@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"sync-state/internal/db"
+	"sync-state/internal/readmodel"
 )
 
 // Apply loads the genesis document into structs.ledger and records the
@@ -45,6 +46,10 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, loaded *LoadedDocument) (*Ap
 			_ = tx.Rollback(ctx)
 		}
 	}()
+
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return nil, err
+	}
 
 	deleted, err := db.DeleteGenesisLedgerRows(ctx, tx)
 	if err != nil {
@@ -91,6 +96,10 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, loaded *LoadedDocument) (*Ap
 	}
 	if err := db.WriteGenesisLog(ctx, tx, logRow); err != nil {
 		return nil, fmt.Errorf("genesis: write genesis_log: %w", err)
+	}
+
+	if err := readmodel.Invalidate(ctx, tx); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

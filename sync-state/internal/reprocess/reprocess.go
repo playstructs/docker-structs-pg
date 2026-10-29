@@ -152,6 +152,9 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 	// Replay-time buffer: handlers push leaf rows here, we Flush once
 	// before commit. Keeps reprocess byte-identical to the live ingest
 	// path which uses the same Buffer model (sync/block.go).
+	if err := readmodel.Lock(ctx, tx); err != nil {
+		return nil, err
+	}
 	buf := buffers.New()
 	dirty := readmodel.NewDirty()
 	bctx := events.BlockContext{

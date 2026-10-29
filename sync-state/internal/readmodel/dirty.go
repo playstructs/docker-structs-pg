@@ -163,3 +163,7 @@ func (d *Dirty) InventoryPlayerIDs() []string {
 	}
 	return keys(d.inventoryPlayers)
 }
+
+func (d *Dirty) InventoryOwnerIDs() []string {
+	return append(d.InventoryPlayerIDs(), d.GuildIDs()...)
+}
