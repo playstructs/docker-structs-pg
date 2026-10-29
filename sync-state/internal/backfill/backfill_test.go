@@ -19,6 +19,7 @@ import (
 func TestFetchAllPlayers_TwoPages(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Cosmos-Block-Height", "100")
 		hits++
 		if r.URL.Path != "/structs/player" {
 			t.Errorf("unexpected path %q", r.URL.Path)
@@ -53,7 +54,7 @@ func TestFetchAllPlayers_TwoPages(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	players, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL, 2)
+	players, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL, 2, 100)
 	if err != nil {
 		t.Fatalf("fetchAllPlayers: %v", err)
 	}
@@ -83,6 +84,7 @@ func TestFetchAllPlayers_TwoPages(t *testing.T) {
 
 func TestFetchAllPlayers_Empty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Cosmos-Block-Height", "100")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"Player":     []any{},
 			"pagination": map[string]any{},
@@ -90,7 +92,7 @@ func TestFetchAllPlayers_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	players, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL, 100)
+	players, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL, 100, 100)
 	if err != nil {
 		t.Fatalf("fetchAllPlayers: %v", err)
 	}
@@ -101,11 +103,12 @@ func TestFetchAllPlayers_Empty(t *testing.T) {
 
 func TestFetchAllPlayers_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Cosmos-Block-Height", "100")
 		http.Error(w, "boom", http.StatusBadGateway)
 	}))
 	defer srv.Close()
 
-	_, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL, 10)
+	_, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL, 10, 100)
 	if err == nil {
 		t.Fatal("expected error on HTTP 502")
 	}
@@ -116,6 +119,7 @@ func TestFetchAllPlayers_EscapesPaginationKey(t *testing.T) {
 	rawKey := "MS0xMDA="
 	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Cosmos-Block-Height", "100")
 		gotKey = r.URL.Query().Get("pagination.key")
 		if gotKey == "" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -131,7 +135,7 @@ func TestFetchAllPlayers_EscapesPaginationKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	players, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL+"/", 1)
+	players, err := fetchAllPlayers(context.Background(), srv.Client(), srv.URL+"/", 1, 100)
 	if err != nil {
 		t.Fatalf("fetchAllPlayers: %v", err)
 	}
@@ -233,6 +237,7 @@ func TestApplyDefenderPlanetary_CorrectsAndIdempotent(t *testing.T) {
 func TestFetchAllPlanetAttributes_TwoPages(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Cosmos-Block-Height", "100")
 		hits++
 		if r.URL.Path != "/structs/planet_attribute" {
 			t.Errorf("unexpected path %q", r.URL.Path)
@@ -267,7 +272,7 @@ func TestFetchAllPlanetAttributes_TwoPages(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	recs, err := fetchAllPlanetAttributes(context.Background(), srv.Client(), srv.URL, 2)
+	recs, err := fetchAllPlanetAttributes(context.Background(), srv.Client(), srv.URL, 2, 100)
 	if err != nil {
 		t.Fatalf("fetchAllPlanetAttributes: %v", err)
 	}
@@ -285,30 +290,34 @@ func TestFetchAllPlanetAttributes_TwoPages(t *testing.T) {
 	}
 }
 
-func TestPlanetAttributeRows_FiltersAndLabels(t *testing.T) {
-	rows, skipped := planetAttributeRows([]payload.PlanetAttribute{
+func TestPlanetAttributeRows_ValidatesCompleteSnapshot(t *testing.T) {
+	rows, err := planetAttributeRows([]payload.PlanetAttribute{
 		{AttributeID: "12-2-27693", Value: "2470534"},
 		{AttributeID: "13-2-27693", Value: "0"},
-		{AttributeID: "12-5-1", Value: "1"},     // struct object type
-		{AttributeID: "99-2-1", Value: "1"},      // unknown attr type
-		{AttributeID: "12-2-1-extra", Value: "1"}, // wrong arity
-		{AttributeID: "12-2-bad", Value: "x"},    // bad value
-		{AttributeID: "0-2-1", Value: ""},        // empty → 0
+		{AttributeID: "0-2-1", Value: "18446744073709551615"},
 	})
-	if skipped != 4 {
-		t.Errorf("skipped = %d want 4", skipped)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("valid snapshot: rows=%v err=%v", rows, err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("len(rows) = %d want 3", len(rows))
+	if rows[0].AttributeType != "blockStartOreMine" || rows[0].Val != 2470534 || rows[1].Val != 0 || rows[2].Val.String() != "18446744073709551615" {
+		t.Fatalf("incorrect exact snapshot: %+v", rows)
 	}
-	if rows[0].ID != "12-2-27693" || rows[0].ObjectID != "2-27693" ||
-		rows[0].AttributeType != "blockStartOreMine" || rows[0].Val != 2470534 {
-		t.Errorf("rows[0] = %+v", rows[0])
+	for _, bad := range []payload.PlanetAttribute{
+		{AttributeID: "12-5-1", Value: "1"},
+		{AttributeID: "99-2-1", Value: "1"},
+		{AttributeID: "12-2-1-extra", Value: "1"},
+		{AttributeID: "12-2-bad", Value: "1"},
+		{AttributeID: "12-2-1", Value: ""},
+		{AttributeID: "12-2-1", Value: "-1"},
+		{AttributeID: "12-2-1", Value: "18446744073709551616"},
+		{AttributeID: "12-2-1", Value: "1.2"},
+	} {
+		got, err := planetAttributeRows([]payload.PlanetAttribute{{AttributeID: "0-2-1", Value: "1"}, bad})
+		if err == nil || got != nil {
+			t.Fatalf("partial snapshot accepted: bad=%+v rows=%v err=%v", bad, got, err)
+		}
 	}
-	if rows[1].AttributeType != "blockStartOreRefine" || rows[1].Val != 0 {
-		t.Errorf("rows[1] = %+v", rows[1])
-	}
-	if rows[2].AttributeType != "planetaryShield" || rows[2].Val != 0 {
-		t.Errorf("rows[2] = %+v", rows[2])
+	if _, err := planetAttributeRows([]payload.PlanetAttribute{{AttributeID: "0-2-1", Value: "1"}, {AttributeID: "0-2-1", Value: "2"}}); err == nil {
+		t.Fatal("duplicate attribute accepted")
 	}
 }

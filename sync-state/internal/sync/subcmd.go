@@ -582,6 +582,7 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 	// unreachable LCD is a warning, never a reason to block ingest.
 	if cfg.PlayerRankSweep {
 		report, serr := backfill.SweepPlayerRanks(ctx, backfill.PlayerRankInputs{
+			ChainID: chainID,
 			Pool:      pool.Pool,
 			LCDBase:   cfg.LCDURL,
 			PageLimit: cfg.LCDPageLimit,
@@ -602,6 +603,7 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 	// LCD store before handlers run; unreachable LCD is a warning.
 	if cfg.PlanetAttributeSweep {
 		report, serr := backfill.SweepPlanetAttributes(ctx, backfill.PlanetAttributeInputs{
+			ChainID: chainID,
 			Pool:      pool.Pool,
 			LCDBase:   cfg.LCDURL,
 			PageLimit: cfg.LCDPageLimit,

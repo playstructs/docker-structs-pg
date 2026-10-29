@@ -31,12 +31,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"sync-state/internal/lcd"
 	"sync-state/internal/payload"
 	"sync-state/internal/readmodel"
 )
@@ -45,7 +45,8 @@ import (
 // Mirrors fields on sync.Config so backfill stays free of an import
 // cycle with the sync package.
 type PlayerRankInputs struct {
-	Pool *pgxpool.Pool
+	Pool    *pgxpool.Pool
+	ChainID string
 
 	// LCDBase is the Cosmos LCD base URL (e.g. http://structsd:1317).
 	LCDBase string
@@ -58,6 +59,7 @@ type PlayerRankInputs struct {
 
 // PlayerRankReport summarises one sweep.
 type PlayerRankReport struct {
+	Height         int64
 	Fetched        int
 	Updated        int64
 	AlreadyCorrect int64
@@ -85,7 +87,19 @@ func SweepPlayerRanks(ctx context.Context, in PlayerRankInputs) (PlayerRankRepor
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
 
-	players, err := fetchAllPlayers(ctx, client, in.LCDBase, pageLimit)
+	boundary, err := readBoundary(ctx, in.Pool, in.ChainID)
+	if err != nil {
+		return r, err
+	}
+	r.Height = boundary.height
+	if boundary.height == 0 {
+		return r, nil // No committed indexed snapshot exists yet.
+	}
+	gateway := lcd.Client{BaseURL: in.LCDBase, HTTP: client}
+	if err := gateway.ValidateChain(ctx, in.ChainID); err != nil {
+		return r, err
+	}
+	players, err := fetchAllPlayers(ctx, client, in.LCDBase, pageLimit, boundary.height)
 	if err != nil {
 		return r, fmt.Errorf("LCD fetch: %w", err)
 	}
@@ -95,7 +109,7 @@ func SweepPlayerRanks(ctx context.Context, in PlayerRankInputs) (PlayerRankRepor
 		return r, nil
 	}
 
-	if err := applyGuildRanks(ctx, in.Pool, players, &r); err != nil {
+	if err := applyGuildRanks(ctx, in.Pool, players, &r, boundary); err != nil {
 		return r, err
 	}
 	r.Elapsed = time.Since(started)
@@ -116,7 +130,7 @@ UPDATE structs.player p
 const countPresentSQL = `SELECT COUNT(*) FROM structs.player WHERE id = ANY($1::text[])`
 
 // applyGuildRanks runs the batched UPDATE in a single transaction.
-func applyGuildRanks(ctx context.Context, pool *pgxpool.Pool, players []payload.Player, r *PlayerRankReport) error {
+func applyGuildRanks(ctx context.Context, pool *pgxpool.Pool, players []payload.Player, r *PlayerRankReport, boundary snapshotBoundary) error {
 	ids := make([]string, len(players))
 	ranks := make([]string, len(players))
 	for i, p := range players {
@@ -139,13 +153,19 @@ func applyGuildRanks(ctx context.Context, pool *pgxpool.Pool, players []payload.
 		return err
 	}
 
-	// Chain ids the DB has never seen mean ingest is behind the LCD
-	// snapshot; worth surfacing but not an error.
+	if err := boundary.check(ctx, tx); err != nil {
+		return err
+	}
+
+	// A complete snapshot at this same height must resolve every player.
 	var present int64
 	if err := tx.QueryRow(ctx, countPresentSQL, ids).Scan(&present); err != nil {
 		return fmt.Errorf("count present: %w", err)
 	}
 	r.MissingInDB = len(players) - int(present)
+	if r.MissingInDB != 0 {
+		return fmt.Errorf("same-height snapshot contains %d players absent from indexed state", r.MissingInDB)
+	}
 
 	tag, err := tx.Exec(ctx, updateGuildRankSQL, ids, ranks)
 	if err != nil {
@@ -360,67 +380,27 @@ func PrintDefenderPlanetaryReport(w io.Writer, r DefenderPlanetaryReport) {
 
 // fetchAllPlayers pages GET {lcd}/structs/player until pagination.next_key
 // is empty. Same loop shape as update-cache's fetchAllPages.
-func fetchAllPlayers(ctx context.Context, client *http.Client, lcdBase string, pageLimit int) ([]payload.Player, error) {
+func fetchAllPlayers(ctx context.Context, client *http.Client, lcdBase string, pageLimit int, height int64) ([]payload.Player, error) {
 	var all []payload.Player
-	var nextKey string
-	for {
-		u := fmt.Sprintf("%s/structs/player?pagination.limit=%d", trimTrailingSlash(lcdBase), pageLimit)
-		if nextKey != "" {
-			u += "&pagination.key=" + url.QueryEscape(nextKey)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	seen := map[string]bool{}
+	gateway := lcd.Client{BaseURL: lcdBase, HTTP: client}
+	err := gateway.Pages(ctx, "/structs/player", "Player", height, pageLimit, func(raw json.RawMessage) error {
+		p, err := payload.DecodeRequired[struct {
+			ID string `json:"id"`
+			GuildRank payload.Uint64 `json:"guildRank"`
+		}](raw, "id", "guildRank")
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
+		if !validObjectID(p.ID, "1") || seen[p.ID] {
+			return fmt.Errorf("invalid or duplicate player ID %q", p.ID)
 		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, u, truncate(string(body), 200))
-		}
-
-		var page playerPage
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("parse response: %w", err)
-		}
-		if len(page.Player) == 0 {
-			break
-		}
-		all = append(all, page.Player...)
-
-		if page.Pagination.NextKey == nil || *page.Pagination.NextKey == "" {
-			break
-		}
-		nextKey = *page.Pagination.NextKey
+		seen[p.ID] = true
+		all = append(all, payload.Player{ID: p.ID, GuildRank: p.GuildRank})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return all, nil
-}
-
-// playerPage matches the LCD QueryAllPlayerResponse JSON shape.
-type playerPage struct {
-	Player     []payload.Player `json:"Player"`
-	Pagination struct {
-		NextKey *string `json:"next_key"`
-	} `json:"pagination"`
-}
-
-func trimTrailingSlash(s string) string {
-	for len(s) > 0 && s[len(s)-1] == '/' {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }

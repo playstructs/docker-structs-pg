@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -14,13 +13,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"sync-state/internal/lcd"
 	"sync-state/internal/payload"
 	"sync-state/internal/readmodel"
 )
 
 // PlanetAttributeInputs is the dependency bundle runIngest hands the sweep.
 type PlanetAttributeInputs struct {
-	Pool *pgxpool.Pool
+	Pool    *pgxpool.Pool
+	ChainID string
 
 	LCDBase    string
 	PageLimit  int
@@ -29,10 +30,11 @@ type PlanetAttributeInputs struct {
 
 // PlanetAttributeReport summarises one SweepPlanetAttributes run.
 type PlanetAttributeReport struct {
+	Height   int64
 	Fetched  int
 	Upserted int64 // rows inserted or whose val/attribute_type changed
 	Zeroed   int64 // local rows cleared to 0 because the chain no longer holds them
-	Skipped  int   // non-planet or unknown attrType ids
+	Skipped  int   // retained report field; invalid rows now refuse the entire snapshot
 	Elapsed  time.Duration
 }
 
@@ -79,23 +81,30 @@ func SweepPlanetAttributes(ctx context.Context, in PlanetAttributeInputs) (Plane
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
 
-	records, err := fetchAllPlanetAttributes(ctx, client, in.LCDBase, pageLimit)
+	boundary, err := readBoundary(ctx, in.Pool, in.ChainID)
+	if err != nil {
+		return r, err
+	}
+	r.Height = boundary.height
+	if boundary.height == 0 {
+		return r, nil
+	}
+	gateway := lcd.Client{BaseURL: in.LCDBase, HTTP: client}
+	if err := gateway.ValidateChain(ctx, in.ChainID); err != nil {
+		return r, err
+	}
+	records, err := fetchAllPlanetAttributes(ctx, client, in.LCDBase, pageLimit, boundary.height)
 	if err != nil {
 		return r, fmt.Errorf("LCD fetch: %w", err)
 	}
 	r.Fetched = len(records)
 
-	rows, skipped := planetAttributeRows(records)
-	r.Skipped = skipped
-	// Refuse an empty usable set: the zero-missing UPDATE would otherwise
-	// clear every planet attribute row when the LCD is misconfigured or
-	// returns an empty page.
-	if len(rows) == 0 {
-		return r, fmt.Errorf("LCD returned no usable planet attribute rows (fetched=%d skipped=%d); refusing to reconcile",
-			r.Fetched, r.Skipped)
+	rows, err := planetAttributeRows(records)
+	if err != nil {
+		return r, err
 	}
 
-	if err := applyPlanetAttributes(ctx, in.Pool, rows, &r); err != nil {
+	if err := applyPlanetAttributes(ctx, in.Pool, rows, &r, boundary); err != nil {
 		return r, err
 	}
 	r.Elapsed = time.Since(started)
@@ -106,41 +115,32 @@ type planetAttrRow struct {
 	ID            string
 	ObjectID      string
 	AttributeType string
-	Val           int64
+	Val           payload.Uint64
 }
 
-// planetAttributeRows filters to planet objectTypeId=2 with a known label.
-func planetAttributeRows(records []payload.PlanetAttribute) ([]planetAttrRow, int) {
+// planetAttributeRows rejects the complete snapshot on an invalid or duplicate
+// row. Skipping a row would make the subsequent zero-missing repair destructive.
+func planetAttributeRows(records []payload.PlanetAttribute) ([]planetAttrRow, error) {
 	out := make([]planetAttrRow, 0, len(records))
-	skipped := 0
+	seen := map[string]bool{}
 	for _, rec := range records {
-		id := strings.TrimSpace(rec.AttributeID)
-		parts := strings.Split(id, "-")
-		if len(parts) != 3 || parts[1] != "2" {
-			skipped++
-			continue
+		parts := strings.Split(rec.AttributeID, "-")
+		if len(parts) != 3 || !validObjectID(strings.Join(parts[1:], "-"), "2") || seen[rec.AttributeID] {
+			return nil, fmt.Errorf("invalid or duplicate planet attribute ID %q", rec.AttributeID)
 		}
 		attrType, err := strconv.Atoi(parts[0])
-		if err != nil || attrType < 0 || attrType >= len(planetAttrLabels) {
-			skipped++
-			continue
+		if err != nil || attrType < 0 || attrType >= len(planetAttrLabels) || strconv.Itoa(attrType) != parts[0] {
+			return nil, fmt.Errorf("unknown planet attribute type %q", rec.AttributeID)
 		}
-		var val int64
-		if rec.Value != "" {
-			val, err = strconv.ParseInt(rec.Value, 10, 64)
-			if err != nil {
-				skipped++
-				continue
-			}
+		var val payload.Uint64
+		raw, _ := json.Marshal(rec.Value)
+		if err := json.Unmarshal(raw, &val); err != nil {
+			return nil, fmt.Errorf("planet attribute %s: %w", rec.AttributeID, err)
 		}
-		out = append(out, planetAttrRow{
-			ID:            id,
-			ObjectID:      parts[1] + "-" + parts[2],
-			AttributeType: planetAttrLabels[attrType],
-			Val:           val,
-		})
+		seen[rec.AttributeID] = true
+		out = append(out, planetAttrRow{ID: rec.AttributeID, ObjectID: parts[1] + "-" + parts[2], AttributeType: planetAttrLabels[attrType], Val: val})
 	}
-	return out, skipped
+	return out, nil
 }
 
 const createChainPATempSQL = `
@@ -148,7 +148,7 @@ CREATE TEMP TABLE chain_pa (
     id text PRIMARY KEY,
     object_id text NOT NULL,
     attribute_type text NOT NULL,
-    val bigint NOT NULL
+    val numeric NOT NULL
 ) ON COMMIT DROP`
 
 const upsertPlanetAttributeFromChainSQL = `
@@ -176,7 +176,7 @@ UPDATE structs.planet_attribute p
    AND p.val IS DISTINCT FROM 0
    AND NOT EXISTS (SELECT 1 FROM chain_pa c WHERE c.id = p.id)`
 
-func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []planetAttrRow, r *PlanetAttributeReport) error {
+func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []planetAttrRow, r *PlanetAttributeReport, boundary snapshotBoundary) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
@@ -192,6 +192,22 @@ func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []plane
 		return err
 	}
 
+	if err := boundary.check(ctx, tx); err != nil {
+		return err
+	}
+
+	if err := applyPlanetAttributesInTx(ctx, tx, rows, r); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func applyPlanetAttributesInTx(ctx context.Context, tx pgx.Tx, rows []planetAttrRow, r *PlanetAttributeReport) error {
 	if _, err := tx.Exec(ctx, createChainPATempSQL); err != nil {
 		return fmt.Errorf("create temp chain_pa: %w", err)
 	}
@@ -199,7 +215,7 @@ func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []plane
 	if len(rows) > 0 {
 		copySrc := make([][]any, len(rows))
 		for i, row := range rows {
-			copySrc[i] = []any{row.ID, row.ObjectID, row.AttributeType, row.Val}
+			copySrc[i] = []any{row.ID, row.ObjectID, row.AttributeType, row.Val.PgValue()}
 		}
 		_, err := tx.CopyFrom(ctx,
 			pgx.Identifier{"chain_pa"},
@@ -229,10 +245,6 @@ func applyPlanetAttributes(ctx context.Context, pool *pgxpool.Pool, rows []plane
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	committed = true
 	return nil
 }
 
@@ -254,54 +266,19 @@ func PrintPlanetAttributeReport(w io.Writer, r PlanetAttributeReport) {
 // pagination.next_key is empty. Path matches update-cache
 // (/structs/{entity}); /structs/structs/planet_attribute is a 501 on this
 // chain's grpc-gateway (Unimplemented).
-func fetchAllPlanetAttributes(ctx context.Context, client *http.Client, lcdBase string, pageLimit int) ([]payload.PlanetAttribute, error) {
+func fetchAllPlanetAttributes(ctx context.Context, client *http.Client, lcdBase string, pageLimit int, height int64) ([]payload.PlanetAttribute, error) {
 	var all []payload.PlanetAttribute
-	var nextKey string
-	for {
-		u := fmt.Sprintf("%s/structs/planet_attribute?pagination.limit=%d",
-			trimTrailingSlash(lcdBase), pageLimit)
-		if nextKey != "" {
-			u += "&pagination.key=" + url.QueryEscape(nextKey)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	gateway := lcd.Client{BaseURL: lcdBase, HTTP: client}
+	err := gateway.Pages(ctx, "/structs/planet_attribute", "planetAttributeRecords", height, pageLimit, func(raw json.RawMessage) error {
+		record, err := payload.DecodeRequired[payload.PlanetAttribute](raw, "attributeId", "value")
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, u, truncate(string(body), 200))
-		}
-
-		var page planetAttributePage
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("parse response: %w", err)
-		}
-		if len(page.PlanetAttributeRecords) == 0 {
-			break
-		}
-		all = append(all, page.PlanetAttributeRecords...)
-
-		if page.Pagination.NextKey == nil || *page.Pagination.NextKey == "" {
-			break
-		}
-		nextKey = *page.Pagination.NextKey
+		all = append(all, record)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return all, nil
-}
-
-// planetAttributePage matches the LCD QueryAllPlanetAttributeResponse JSON.
-type planetAttributePage struct {
-	PlanetAttributeRecords []payload.PlanetAttribute `json:"planetAttributeRecords"`
-	Pagination             struct {
-		NextKey *string `json:"next_key"`
-	} `json:"pagination"`
 }
