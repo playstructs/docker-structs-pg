@@ -33,6 +33,7 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		{"structs.vault", "owner_id", "character varying"},
 		{"structs.vault", "address", "character varying"},
 		{"structs.vault", "account_number", "numeric"},
+		{"structs.vault", "account_created", "boolean"},
 		{"structs.asset_owner", "owner_id", "character varying"},
 		{"structs.asset_owner", "is_vault", "boolean"},
 		{"structs.infusion", "owner_id", "character varying"},

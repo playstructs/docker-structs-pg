@@ -39,14 +39,18 @@ func (vaultAddressHandler) Handle(ctx context.Context, tx pgx.Tx, b BlockContext
 	}
 	// Vault identity is immutable. accountCreated=false still establishes the
 	// association; it must not mint a deposit or grant signing authority.
-	if _, err := tx.Exec(ctx, `INSERT INTO structs.vault(owner_id,address,account_number)
-        VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, p.OwnerID, p.VaultAddress, p.AccountNumber.PgValue()); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO structs.vault(owner_id,address,account_number,account_created)
+        VALUES ($1,$2,$3,$4) ON CONFLICT (owner_id) DO UPDATE
+        SET account_created=EXCLUDED.account_created
+        WHERE structs.vault.address=EXCLUDED.address AND structs.vault.account_number=EXCLUDED.account_number
+          AND structs.vault.account_created IS NULL`,
+		p.OwnerID, p.VaultAddress, p.AccountNumber.PgValue(), p.AccountCreated); err != nil {
 		return err
 	}
 	var matches bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM structs.vault
-        WHERE owner_id=$1 AND address=$2 AND account_number=$3)`,
-		p.OwnerID, p.VaultAddress, p.AccountNumber.PgValue()).Scan(&matches); err != nil {
+        WHERE owner_id=$1 AND address=$2 AND account_number=$3 AND account_created=$4)`,
+		p.OwnerID, p.VaultAddress, p.AccountNumber.PgValue(), p.AccountCreated).Scan(&matches); err != nil {
 		return err
 	}
 	if !matches {

@@ -42,6 +42,41 @@ func TestEconomy_VaultIdentityWithoutMovement(t *testing.T) {
 	})
 }
 
+func TestEconomy_VaultAccountOriginIsEvidenceNotADefault(t *testing.T) {
+	for _, created := range []bool{false, true} {
+		t.Run(map[bool]string{false: "adopted", true: "created"}[created], func(t *testing.T) {
+			inTx(t, connect(t), func(tx pgx.Tx) {
+				ctx, bc := context.Background(), bctx()
+				if _, err := tx.Exec(ctx, `INSERT INTO structs.vault(owner_id,address,account_number)
+                    VALUES('1-990991','vault-origin-fixture',0)`); err != nil {
+					t.Fatal(err)
+				}
+				var unknown bool
+				if err := tx.QueryRow(ctx, `SELECT account_created IS NULL FROM structs.vault WHERE owner_id='1-990991'`).Scan(&unknown); err != nil || !unknown {
+					t.Fatalf("historical origin was invented: %v %v", unknown, err)
+				}
+				apply := func(value bool) error {
+					return (vaultAddressHandler{}).Handle(ctx, tx, bc, mustJSON(t, map[string]any{
+						"ownerId": "1-990991", "vaultAddress": "vault-origin-fixture", "accountNumber": "0", "accountCreated": value,
+					}))
+				}
+				for range 2 {
+					if err := apply(created); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := apply(!created); err == nil {
+					t.Fatal("conflicting origin changed spendability evidence")
+				}
+				var actual bool
+				if err := tx.QueryRow(ctx, `SELECT account_created FROM structs.vault WHERE owner_id='1-990991'`).Scan(&actual); err != nil || actual != created {
+					t.Fatalf("origin=%v want=%v err=%v", actual, created, err)
+				}
+			})
+		})
+	}
+}
+
 func TestEconomy_RevisionResetAndPhaseReplay(t *testing.T) {
 	inTx(t, connect(t), func(tx pgx.Tx) {
 		ctx, bc := context.Background(), bctx()
