@@ -19,6 +19,13 @@ change takes table locks and is not a rollout for the old SQL cache writer.
 Reversal refuses stored values above the former signed integer range. No new
 container activation or wider automatic target is implied by this build pin.
 
+The webapp also needs `role-structs-webapp-20261030-gameplay-reads` for existing
+raid, shield, activity, catalog and statistics reads when its database role is
+not a superuser. This grants SELECT on the required relations only; it does not
+alter role attributes or permit writes to indexed chain state. Verification
+checks explicit ACLs on legacy superusers as well as effective restricted-role
+access.
+
 ```sh
 docker build --build-arg STRUCTS_PG_REF=<full-tested-commit> -t structs/structs-pg:<candidate-tag> .
 ```

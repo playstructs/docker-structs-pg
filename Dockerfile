@@ -78,7 +78,7 @@ RUN addgroup --system structs && \
     adduser --system --home /src/structs --shell /bin/bash --group structs
 
 # Clone down structs-pg for database schematics
-ARG STRUCTS_PG_REF=69b221c28c065b57d50d0badd649f1905c58aa79
+ARG STRUCTS_PG_REF=400e1c1056a4c7b0dbe5465ac729375c77572c21
 ENV STRUCTS_PG_REF=${STRUCTS_PG_REF} \
     STRUCTS_PG_MIGRATION_MODE=pinned \
     STRUCTS_PG_MIGRATION_TARGET=table-signer-tx-20261030-authority-contract
