@@ -4,6 +4,13 @@ The image bundles one exact structs-pg commit, recorded by `STRUCTS_PG_REF`
 and the `io.structs.pg.revision` image label. Publish that commit before the
 image build. A branch name or a moving tag is not a valid build pin.
 
+The current pin also includes issued device activation identities required by
+the updated webapp. This additive change binds pending consent to a UUID instead
+of only the reusable short code, and removes that consent when its code expires
+or is deleted. It remains after the coordinated transition in the Sqitch plan;
+the compatible automatic target below is unchanged. Do not deploy the new webapp
+against a schema that ends before `table-player-address-20261030-activation-instance`.
+
 ```sh
 docker build --build-arg STRUCTS_PG_REF=<full-tested-commit> -t structs/structs-pg:<candidate-tag> .
 ```
