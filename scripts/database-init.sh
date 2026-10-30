@@ -63,6 +63,7 @@ if ! postgres_acquire_datadir_lock; then
   exit 0
 fi
 
+postgres_apply_tsa_hba
 postgres_apply_memory_settings
 postgres_apply_preload_libraries
 postgres_apply_stats_settings

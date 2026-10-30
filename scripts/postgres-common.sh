@@ -189,3 +189,24 @@ EOF
   chown postgres:postgres "${dropin}"
   echo "function tracking: pl (${dropin})"
 }
+
+# A dedicated TSA login follows the stack's existing webapp connection policy.
+# Copy the TLS rule (CIDR, authentication method and options) rather than
+# introducing a broader trust rule. Respect an explicitly configured TSA rule.
+postgres_apply_tsa_hba() {
+  local hba temporary
+  hba="$(pg_conf_dir)/pg_hba.conf"
+  if awk '$1 !~ /^#/ {n=split($3,users,","); for (i=1;i<=n;i++) if (users[i]=="structs_tsa") found=1} END {exit !found}' "${hba}"; then
+    return 0
+  fi
+  temporary="$(mktemp "${hba}.tsa.XXXXXX")"
+  if awk '{print} $1=="hostssl" && $2=="structs" && $3=="structs_webapp" {$3="structs_tsa"; print; found=1} END {exit !found}' "${hba}" >"${temporary}"; then
+    chmod --reference="${hba}" "${temporary}"
+    chown --reference="${hba}" "${temporary}"
+    mv "${temporary}" "${hba}"
+    echo "TSA database access follows the existing webapp TLS rule"
+  else
+    rm -f "${temporary}"
+    echo "No webapp TLS rule to inherit; configure structs_tsa access explicitly" >&2
+  fi
+}
