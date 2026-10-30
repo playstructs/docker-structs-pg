@@ -27,16 +27,17 @@ import (
 type Subcommand string
 
 const (
-	CmdIngest          Subcommand = "ingest"
-	CmdBootstrap       Subcommand = "bootstrap"
-	CmdDoctor          Subcommand = "doctor"
-	CmdListHandlers    Subcommand = "list-handlers"
-	CmdReplay          Subcommand = "replay"
-	CmdRewind          Subcommand = "rewind"
-	CmdVerify          Subcommand = "verify"
-	CmdInspect         Subcommand = "inspect"
-	CmdReprocessErrors Subcommand = "reprocess-errors"
-	CmdInitGenesis     Subcommand = "init-genesis"
+	CmdIngest                Subcommand = "ingest"
+	CmdBootstrap             Subcommand = "bootstrap"
+	CmdDoctor                Subcommand = "doctor"
+	CmdListHandlers          Subcommand = "list-handlers"
+	CmdReplay                Subcommand = "replay"
+	CmdRewind                Subcommand = "rewind"
+	CmdVerify                Subcommand = "verify"
+	CmdInspect               Subcommand = "inspect"
+	CmdReprocessErrors       Subcommand = "reprocess-errors"
+	CmdInitGenesis           Subcommand = "init-genesis"
+	CmdReconcileCurrentBlock Subcommand = "reconcile-current-block"
 )
 
 // SplitArgs separates the subcommand verb from the remaining args. If the
@@ -49,7 +50,7 @@ func SplitArgs(args []string) (Subcommand, []string) {
 	switch Subcommand(args[0]) {
 	case CmdIngest, CmdBootstrap, CmdDoctor, CmdListHandlers,
 		CmdReplay, CmdRewind, CmdVerify, CmdInspect, CmdReprocessErrors,
-		CmdInitGenesis:
+		CmdInitGenesis, CmdReconcileCurrentBlock:
 		return Subcommand(args[0]), args[1:]
 	default:
 		return CmdIngest, args
@@ -83,6 +84,9 @@ func Dispatch(ctx context.Context, cmd Subcommand, cfg Config, stdout, stderr io
 
 	case CmdInitGenesis:
 		return runInitGenesis(ctx, cfg, stderr)
+
+	case CmdReconcileCurrentBlock:
+		return runReconcileCurrentBlock(ctx, cfg, stderr)
 
 	case CmdReplay, CmdRewind, CmdInspect:
 		fmt.Fprintf(stderr, "subcommand %q is planned for a later phase; not implemented in this build\n", cmd)
@@ -582,7 +586,7 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 	// unreachable LCD is a warning, never a reason to block ingest.
 	if cfg.PlayerRankSweep {
 		report, serr := backfill.SweepPlayerRanks(ctx, backfill.PlayerRankInputs{
-			ChainID: chainID,
+			ChainID:   chainID,
 			Pool:      pool.Pool,
 			LCDBase:   cfg.LCDURL,
 			PageLimit: cfg.LCDPageLimit,
@@ -603,7 +607,7 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 	// LCD store before handlers run; unreachable LCD is a warning.
 	if cfg.PlanetAttributeSweep {
 		report, serr := backfill.SweepPlanetAttributes(ctx, backfill.PlanetAttributeInputs{
-			ChainID: chainID,
+			ChainID:   chainID,
 			Pool:      pool.Pool,
 			LCDBase:   cfg.LCDURL,
 			PageLimit: cfg.LCDPageLimit,
@@ -656,6 +660,10 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 		return 1
 	}
 	indexedHeight = cursor.LastHeight
+	if err := db.RequireEconomyCoverage(ctx, pool.Pool, cursor); err != nil {
+		fmt.Fprintf(stderr, "ingest: %v\n", err)
+		return 1
+	}
 	t := cursor.LastBlockTime
 	indexedTime = &t
 	needed, berr := readmodel.NeedsBackfill(ctx, pool.Pool, indexedHeight)
@@ -682,7 +690,6 @@ func runIngest(ctx context.Context, cfg Config, stderr io.Writer) int {
 	} else if n > 0 {
 		fmt.Fprintf(stderr, "api_inventory_drift: repaired %d key(s) from outstanding reconciler batches\n", n)
 	}
-
 
 	router := events.NewRouter(cfg.StrictUnknownEvents)
 	fmt.Fprintf(stderr, "Event registry: %d handlers (use `sync-state list-handlers` to inspect)\n",

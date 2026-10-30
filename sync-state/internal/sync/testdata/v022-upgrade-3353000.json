@@ -1,0 +1,18 @@
+{
+  "chain_id": "structstestnet-111",
+  "height": "3353000",
+  "captured_at": "2026-10-30T13:09:00Z",
+  "source": "local RPC after staged v0.22.0 activation",
+  "files": {
+    "v022-upgrade-3353000-block.json.gz": {
+      "bytes_uncompressed": 3867,
+      "sha256_uncompressed": "a47eb8b58cbb2538f9a3f6ea739104dcd3b8d4cf6212839b9dade85f04427270",
+      "bytes_gzip": 1848
+    },
+    "v022-upgrade-3353000-block_results.json.gz": {
+      "bytes_uncompressed": 4537262,
+      "sha256_uncompressed": "8551477ec606f3925ee82cf99722a59dd940d4c780f2bd54fb5a62c9edf8545f",
+      "bytes_gzip": 527696
+    }
+  }
+}

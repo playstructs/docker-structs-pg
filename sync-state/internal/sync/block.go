@@ -109,6 +109,11 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 	}
 	numEvents := 0
 	dirty := readmodel.NewDirty()
+	if opts.ReconcileCurrentBlock {
+		if err := s.reconcileCurrentBoundary(ctx, tx, bundle, dirty); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents); err != nil {
 		return nil, fmt.Errorf("dispatch h=%d: %w", bundle.Height, err)
 	}
@@ -156,12 +161,24 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		})
 		return nil, fmt.Errorf("native claims h=%d: %w", bundle.Height, err)
 	}
+	if opts.ReconcileCurrentBlock {
+		if err := buf.ValidateExistingLedger(ctx, tx); err != nil {
+			return nil, fmt.Errorf("reconcile ledger h=%d: %w", bundle.Height, err)
+		}
+	}
 	deltas, err := buf.Flush(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
 	}
+	if err := db.RecordEconomyCoverage(ctx, tx, bundle.ChainID, bundle.Height, bundle.BlockHashHex); err != nil {
+		return nil, fmt.Errorf("economy source coverage h=%d: %w", bundle.Height, err)
+	}
 	res := &blockApplyResult{}
-	if opts.DeferProjections {
+	if opts.ReconcileCurrentBlock {
+		if _, err := readmodel.BackfillInTx(ctx, tx, bundle.Height, &bundle.BlockTime); err != nil {
+			return nil, fmt.Errorf("reconcile projections h=%d: %w", bundle.Height, err)
+		}
+	} else if opts.DeferProjections {
 		res.Dirty = dirty
 		res.LedgerDeltas = deltas
 	} else if err := readmodel.Recompute(ctx, tx, dirty, bundle.Height, bundle.BlockTime, readmodel.InventoryFromDeltas(deltas)); err != nil {

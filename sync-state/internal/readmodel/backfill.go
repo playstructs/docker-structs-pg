@@ -31,13 +31,28 @@ WHERE model = ANY($1::text[]) AND source_height = $2
 }
 
 func Backfill(ctx context.Context, pool *pgxpool.Pool, height int64, sourceTime *time.Time) (BackfillReport, error) {
-	started := time.Now()
 	report := BackfillReport{Height: height, Rows: map[string]int64{}}
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return report, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	report, err = BackfillInTx(ctx, tx, height, sourceTime)
+	if err != nil {
+		return report, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return report, fmt.Errorf("commit: %w", err)
+	}
+	return report, nil
+}
+
+// BackfillInTx lets complete-block reconciliation replace projections in the
+// same transaction as its authoritative repairs. Readiness cannot become
+// visible between an incomplete repair and the rebuild.
+func BackfillInTx(ctx context.Context, tx pgx.Tx, height int64, sourceTime *time.Time) (BackfillReport, error) {
+	started := time.Now()
+	report := BackfillReport{Height: height, Rows: map[string]int64{}}
 	if err := Lock(ctx, tx); err != nil {
 		return report, err
 	}
@@ -89,9 +104,6 @@ SELECT 1 FROM sync_state.sync_cursor WHERE last_height <> $1
 			return report, fmt.Errorf("count %s: %w", table, err)
 		}
 		report.Rows[table] = n
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return report, fmt.Errorf("commit: %w", err)
 	}
 	report.Elapsed = time.Since(started)
 	return report, nil

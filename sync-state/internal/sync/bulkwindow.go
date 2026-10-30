@@ -14,6 +14,10 @@ import (
 
 // applyOpts tweaks per-block writes when running inside a bulk outer tx.
 type applyOpts struct {
+	// ReconcileCurrentBlock verifies the cursor boundary, resolves legacy
+	// infusion phases and atomically rebuilds every API projection. This is
+	// only used by the explicit maintenance command, never normal ingestion.
+	ReconcileCurrentBlock bool
 	// SkipCurrentBlockHeartbeat defers pg_notify('grass', ...) to the
 	// bulk window close so the webapp sees one pulse per window during
 	// catch-up instead of one per block.

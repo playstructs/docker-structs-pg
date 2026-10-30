@@ -25,6 +25,10 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		}
 	}
 	columns := []struct{ table, column, typ string }{
+		{"sync_state.economy_contract", "contract", "text"},
+		{"sync_state.economy_contract", "activation_height", "bigint"},
+		{"sync_state.economy_contract", "last_height", "bigint"},
+		{"sync_state.economy_contract", "last_block_hash", "text"},
 		{"structs.defusion", "block_height", "bigint"},
 		{"structs.defusion", "retired_height", "bigint"},
 		{"structs.defusion_current", "pending_state", "text"},
@@ -91,6 +95,7 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		table   string
 		columns []string
 	}{
+		{"sync_state.economy_contract", []string{"chain_id"}},
 		{"structs.defusion", []string{"chain_id", "block_height", "tx_index", "event_index", "denom"}},
 		{"structs.vault", []string{"owner_id"}},
 		{"structs.vault", []string{"address"}},
@@ -119,7 +124,7 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 			return fmt.Errorf("v0.22 schema missing usable unique key %s(%v)", key.table, key.columns)
 		}
 		privileges := []string{"SELECT", "INSERT", "UPDATE", "DELETE"}
-		if key.table == "structs.defusion" {
+		if key.table == "structs.defusion" || key.table == "sync_state.economy_contract" {
 			privileges = []string{"SELECT", "INSERT", "UPDATE"}
 		}
 		if key.table == "structs.ledger" {
