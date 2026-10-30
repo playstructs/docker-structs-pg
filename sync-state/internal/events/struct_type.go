@@ -322,7 +322,7 @@ func (structTypeHandler) Handle(ctx context.Context, tx pgx.Tx, _ BlockContext, 
 		// $1..$3
 		p.ID.Int64(), payload.NullableText(p.Type), payload.NullableText(p.Category),
 		// $4..$9: build/health/draw/possible_ambit
-		p.BuildLimit.Int64(), p.BuildDifficulty.Int64(),
+		p.BuildLimit.Int64(), p.BuildDifficulty.PgValue(),
 		p.BuildDraw.Int64(),
 		p.MaxHealth.Int64(),
 		p.PassiveDraw.Int64(),
@@ -369,7 +369,7 @@ func (structTypeHandler) Handle(ctx context.Context, tx pgx.Tx, _ BlockContext, 
 		// $54..$55
 		p.GeneratingRate.Int64(), p.PlanetaryShieldContribution.Int64(),
 		// $56..$57
-		p.OreMiningDifficulty.Int64(), p.OreRefiningDifficulty.Int64(),
+		p.OreMiningDifficulty.PgValue(), p.OreRefiningDifficulty.PgValue(),
 		// $58..$59 unguided defensive rate
 		p.UnguidedDefensiveSuccessRateNumerator.Int64(),
 		p.UnguidedDefensiveSuccessRateDenominator.Int64(),

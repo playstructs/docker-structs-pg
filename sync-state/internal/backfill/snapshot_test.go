@@ -79,24 +79,26 @@ VALUES('12-2-994199','2-994199','planet','blockStartOreMine',25)`); err != nil {
 		t.Fatal(err)
 	}
 	var report PlanetAttributeReport
-	// planet_attribute.val retains the pre-existing INTEGER storage contract.
-	// An out-of-range snapshot must fail atomically, never skip its row and
-	// then zero the previous value through the missing-row reconciliation.
+	// Inject a database rejection for one row. A failed complete snapshot
+	// must never clear previous state through missing-row reconciliation.
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := sp.Exec(ctx, `ALTER TABLE structs.planet_attribute ADD CONSTRAINT snapshot_reject_test CHECK (id <> '12-2-994198')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyPlanetAttributesInTx(ctx, sp, rows, &report); err == nil {
-		t.Fatal("out-of-range planet attribute was coerced")
+		t.Fatal("invalid snapshot was accepted")
 	}
 	if err := sp.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	var original string
 	if err := tx.QueryRow(ctx, `SELECT val::text FROM structs.planet_attribute WHERE id='12-2-994199'`).Scan(&original); err != nil || original != "25" {
 		t.Fatalf("failed snapshot changed existing state: value=%s err=%v", original, err)
 	}
-	rows[0].Val = 3353000
 	if err := applyPlanetAttributesInTx(ctx, tx, rows, &report); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +109,7 @@ VALUES('12-2-994199','2-994199','planet','blockStartOreMine',25)`); err != nil {
 	if err := tx.QueryRow(ctx, `SELECT val::text FROM structs.planet_attribute WHERE id='12-2-994199'`).Scan(&cleared); err != nil {
 		t.Fatal(err)
 	}
-	if exact != "3353000" || cleared != "0" {
+	if exact != "18446744073709551615" || cleared != "0" {
 		t.Fatalf("snapshot precision/clear: exact=%s cleared=%s", exact, cleared)
 	}
 	if needed, err := readmodel.NeedsBackfill(ctx, tx, 101); err != nil || !needed {

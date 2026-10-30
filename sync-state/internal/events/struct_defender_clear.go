@@ -47,7 +47,7 @@ const structDefenderClearAttributeSQL = `
 DELETE FROM structs.struct_attribute WHERE id = '5-' || $1`
 
 const structDefenderClearPrevValSQL = `
-SELECT val FROM structs.struct_attribute WHERE id = '5-' || $1`
+SELECT trunc(val)::text FROM structs.struct_attribute WHERE id = '5-' || $1`
 
 // destroyedProtectedDefenderSQL removes every defender relationship that
 // points at a just-destroyed protected struct. RETURNING gives us the
@@ -69,8 +69,13 @@ func (structDefenderClearHandler) Handle(ctx context.Context, tx pgx.Tx, bctx Bl
 
 	// Capture the protectedStructIndex val before the delete so the
 	// struct_defense_remove emit knows which protected struct to anchor on.
-	var protectedIndex int64
-	if err := tx.QueryRow(ctx, structDefenderClearPrevValSQL, p.DefendingStructID).Scan(&protectedIndex); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	var protectedText string
+	if err := tx.QueryRow(ctx, structDefenderClearPrevValSQL, p.DefendingStructID).Scan(&protectedText); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("struct_defender_clear prev val def=%s: %w", p.DefendingStructID, err)
+	}
+
+	protectedIndex, err := parseAttributeValue(protectedText)
+	if err != nil {
 		return fmt.Errorf("struct_defender_clear prev val def=%s: %w", p.DefendingStructID, err)
 	}
 
@@ -125,7 +130,7 @@ func clearDefendersOfDestroyedProtected(ctx context.Context, tx pgx.Tx, bctx Blo
 		if _, err := tx.Exec(ctx, structDefenderClearAttributeSQL, defenderID); err != nil {
 			return fmt.Errorf("delete protectedStructIndex attr for defender=%s: %w", defenderID, err)
 		}
-		if err := emitStructDefenseRemove(ctx, tx, bctx, int64(protectedIndex), defenderID); err != nil {
+		if err := emitStructDefenseRemove(ctx, tx, bctx, uint64(protectedIndex), defenderID); err != nil {
 			return fmt.Errorf("defense_remove for defender=%s protected=%s: %w",
 				defenderID, protectedStructID, err)
 		}

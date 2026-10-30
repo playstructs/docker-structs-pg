@@ -91,7 +91,7 @@ UPDATE structs.struct
 // structAttrPrevSelectSQL grabs the existing val so we can pass OLD.val
 // to the planet_activity emit functions, mirroring the dropped SQL
 // trigger's access to OLD.val.
-const structAttrPrevSelectSQL = `SELECT val FROM structs.struct_attribute WHERE id = $1`
+const structAttrPrevSelectSQL = `SELECT trunc(val)::text FROM structs.struct_attribute WHERE id = $1`
 
 func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.StructAttribute](raw)
@@ -106,20 +106,21 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		return fmt.Errorf("struct_attribute: %w", err)
 	}
 
-	var oldVal int64
-	if err := tx.QueryRow(ctx, structAttrPrevSelectSQL, p.AttributeID).Scan(&oldVal); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	var oldText string
+	if err := tx.QueryRow(ctx, structAttrPrevSelectSQL, p.AttributeID).Scan(&oldText); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("struct_attribute prev id=%s: %w", p.AttributeID, err)
 	}
 
+	oldVal, err := parseAttributeValue(oldText)
+	if err != nil {
+		return fmt.Errorf("struct_attribute prev id=%s: %w", p.AttributeID, err)
+	}
 	rawObjectID := strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
 
 	// Empty or "0" → val 0; keep the row so updated_since sees clears.
-	var val int64
-	if p.Value != "" {
-		val, err = strconv.ParseInt(p.Value, 10, 64)
-		if err != nil {
-			return fmt.Errorf("struct_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
-		}
+	val, err := parseAttributeValue(p.Value)
+	if err != nil {
+		return fmt.Errorf("struct_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
 	}
 
 	// Status clear would make /api/struct/player/{id} report COALESCE(0)
@@ -140,7 +141,7 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		nullIfEmpty(objTypeLabel),
 		subIndex,
 		nullIfEmpty(attrLabel),
-		val,
+		payload.Uint64(val).PgValue(),
 	)
 	if err != nil {
 		return fmt.Errorf("struct_attribute upsert id=%s: %w", p.AttributeID, err)
@@ -154,14 +155,14 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		bctx.Buf.StatStructHealth = append(bctx.Buf.StatStructHealth, buffers.StatRow{
 			Time:        bctx.BlockTime.UTC(),
 			ObjectIndex: objIndex,
-			Value:       strconv.FormatInt(val, 10),
+			Value:       strconv.FormatUint(val, 10),
 			BlockHeight: bctx.Height,
 		})
 	case 1: // status
 		bctx.Buf.StatStructStatus = append(bctx.Buf.StatStructStatus, buffers.StatRow{
 			Time:        bctx.BlockTime.UTC(),
 			ObjectIndex: objIndex,
-			Value:       strconv.FormatInt(val, 10),
+			Value:       strconv.FormatUint(val, 10),
 			BlockHeight: bctx.Height,
 		})
 		if val&structDestroyedBit != 0 {
@@ -194,7 +195,7 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 // Note: the SQL omits a struct_health row on val-zero (we send "value=0"
 // only as a stat). We match. protectedStructIndex going to 0 still emits
 // struct_defense_remove via the oldVal > 0 branch below.
-func emitStructAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType int, oldVal, newVal int64, structID string) error {
+func emitStructAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType int, oldVal, newVal uint64, structID string) error {
 	switch attrType {
 	case 0: // health
 		if newVal == 0 {
@@ -257,8 +258,8 @@ func emitStructAttributeOnStructPlanet(ctx context.Context, tx pgx.Tx, bctx Bloc
 // anchored on the planet of the *protected* struct (not the defender).
 // The protected struct ID is reconstructed as "5-{val}" — same string
 // concat the SQL does (`'5-' || OLD.val` / `'5-' || NEW.val`).
-func emitStructDefenseRemove(ctx context.Context, tx pgx.Tx, bctx BlockContext, protectedIndex int64, defenderStructID string) error {
-	protectedStructID := "5-" + strconv.FormatInt(protectedIndex, 10)
+func emitStructDefenseRemove(ctx context.Context, tx pgx.Tx, bctx BlockContext, protectedIndex uint64, defenderStructID string) error {
+	protectedStructID := "5-" + strconv.FormatUint(protectedIndex, 10)
 	planetID, err := getActivityLocationID(ctx, tx, protectedStructID)
 	if err != nil {
 		return fmt.Errorf("resolve planet for protected=%s: %w", protectedStructID, err)
@@ -272,8 +273,8 @@ func emitStructDefenseRemove(ctx context.Context, tx pgx.Tx, bctx BlockContext, 
 	})
 }
 
-func emitStructDefenseAdd(ctx context.Context, tx pgx.Tx, bctx BlockContext, protectedIndex int64, defenderStructID string) error {
-	protectedStructID := "5-" + strconv.FormatInt(protectedIndex, 10)
+func emitStructDefenseAdd(ctx context.Context, tx pgx.Tx, bctx BlockContext, protectedIndex uint64, defenderStructID string) error {
+	protectedStructID := "5-" + strconv.FormatUint(protectedIndex, 10)
 	planetID, err := getActivityLocationID(ctx, tx, protectedStructID)
 	if err != nil {
 		return fmt.Errorf("resolve planet for protected=%s: %w", protectedStructID, err)

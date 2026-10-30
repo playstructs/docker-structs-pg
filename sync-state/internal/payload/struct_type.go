@@ -19,7 +19,7 @@ type StructType struct {
 	Type            string   `json:"type"`
 	Category        string   `json:"category"`
 	BuildLimit      JSONInt  `json:"buildLimit"`
-	BuildDifficulty JSONInt  `json:"buildDifficulty"`
+	BuildDifficulty Uint64   `json:"buildDifficulty"`
 	BuildDraw       JSONInt  `json:"buildDraw"`
 	MaxHealth       JSONInt  `json:"maxHealth"`
 	PassiveDraw     JSONInt  `json:"passiveDraw"`
@@ -77,8 +77,8 @@ type StructType struct {
 	PostDestructionDamage       JSONInt  `json:"postDestructionDamage"`
 	GeneratingRate              JSONInt  `json:"generatingRate"`
 	PlanetaryShieldContribution JSONInt  `json:"planetaryShieldContribution"`
-	OreMiningDifficulty         JSONInt  `json:"oreMiningDifficulty"`
-	OreRefiningDifficulty       JSONInt  `json:"oreRefiningDifficulty"`
+	OreMiningDifficulty         Uint64   `json:"oreMiningDifficulty"`
+	OreRefiningDifficulty       Uint64   `json:"oreRefiningDifficulty"`
 
 	UnguidedDefensiveSuccessRateNumerator   JSONInt `json:"unguidedDefensiveSuccessRateNumerator"`
 	UnguidedDefensiveSuccessRateDenominator JSONInt `json:"unguidedDefensiveSuccessRateDenominator"`

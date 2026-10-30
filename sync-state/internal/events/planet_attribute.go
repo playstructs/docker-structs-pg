@@ -101,12 +101,9 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	}
 
 	// Empty or "0" → newVal 0; keep the row so updated_since sees clears.
-	var newVal int64
-	if p.Value != "" {
-		newVal, err = strconv.ParseInt(p.Value, 10, 64)
-		if err != nil {
-			return fmt.Errorf("planet_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
-		}
+	newVal, err := parseAttributeValue(p.Value)
+	if err != nil {
+		return fmt.Errorf("planet_attribute: invalid val %q for id=%s: %w", p.Value, p.AttributeID, err)
 	}
 
 	objTypeLabel := ""
@@ -121,7 +118,7 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		rawObjectID,
 		nullIfEmpty(objTypeLabel),
 		nullIfEmpty(attrLabel),
-		newVal,
+		payload.Uint64(newVal).PgValue(),
 	); err != nil {
 		return fmt.Errorf("planet_attribute upsert id=%s: %w", p.AttributeID, err)
 	}
@@ -142,13 +139,13 @@ const (
 	planetAttrTypeBlockStartOreRefine = 13
 )
 
-const planetAttributePrevValSQL = `SELECT val FROM structs.planet_attribute WHERE id = $1`
+const planetAttributePrevValSQL = `SELECT trunc(val)::text FROM structs.planet_attribute WHERE id = $1`
 
 // planetAttributePrevVal returns the currently-stored val for the attribute,
 // or 0 when no row exists (a not-yet-set attribute reads as zero, matching
 // the chain's proto3 default semantics used by the keep-zero clear path).
-func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (int64, error) {
-	var val int64
+func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (uint64, error) {
+	var val string
 	err := tx.QueryRow(ctx, planetAttributePrevValSQL, id).Scan(&val)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
@@ -156,7 +153,7 @@ func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (int64, e
 	if err != nil {
 		return 0, fmt.Errorf("planet_attribute prev val id=%s: %w", id, err)
 	}
-	return val, nil
+	return parseAttributeValue(val)
 }
 
 // emitPlanetAttributeActivity buffers a planet_activity row when a
@@ -164,7 +161,7 @@ func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (int64, e
 // values; ore clocks (v0.21.0) reuse the existing grass categories with
 // detail {planet_id, block}. Any other attribute, non-planet object, or
 // no-op change is skipped.
-func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType, objTypeID, objIndex int, oldVal, newVal int64) error {
+func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, attrType, objTypeID, objIndex int, oldVal, newVal uint64) error {
 	if oldVal == newVal {
 		return nil
 	}

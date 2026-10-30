@@ -11,6 +11,14 @@ or is deleted. It remains after the coordinated transition in the Sqitch plan;
 the compatible automatic target below is unchanged. Do not deploy the new webapp
 against a schema that ends before `table-player-address-20261030-activation-instance`.
 
+The writer also requires `table-work-20261030-uint64`. Attribute values, work
+clocks and the three catalog difficulties retain the full unsigned chain range;
+startup refuses the former integer storage. The migration preserves view grants
+and work dirty-trigger settings. Keep it in the coordinated pause: the type
+change takes table locks and is not a rollout for the old SQL cache writer.
+Reversal refuses stored values above the former signed integer range. No new
+container activation or wider automatic target is implied by this build pin.
+
 ```sh
 docker build --build-arg STRUCTS_PG_REF=<full-tested-commit> -t structs/structs-pg:<candidate-tag> .
 ```
