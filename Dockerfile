@@ -78,7 +78,7 @@ RUN addgroup --system structs && \
     adduser --system --home /src/structs --shell /bin/bash --group structs
 
 # Clone down structs-pg for database schematics
-ARG STRUCTS_PG_REF=01bee9df86706f7c33aeee24b4099028ae0a29d3
+ARG STRUCTS_PG_REF=b754c58612ec01cb66e0e5080d5b79403f7d0dc5
 ENV STRUCTS_PG_REF=${STRUCTS_PG_REF} \
     STRUCTS_PG_MIGRATION_MODE=pinned \
     STRUCTS_PG_MIGRATION_TARGET=table-signer-tx-20261030-authority-contract
@@ -95,7 +95,8 @@ RUN test "${#STRUCTS_PG_REF}" = 40 && \
     test "$(git -C structs-pg rev-parse HEAD)" = "${STRUCTS_PG_REF}" && \
     test -f structs-pg/deploy/table-sync-state-20261030-economy-contract.sql && \
     test -f structs-pg/deploy/table-player-address-20261030-activation-instance.sql && \
-    test -f structs-pg/deploy/role-structs-webapp-20261030-address-permission.sql
+    test -f structs-pg/deploy/role-structs-webapp-20261030-address-permission.sql && \
+    test -f structs-pg/deploy/role-structs-webapp-20261030-device-metadata.sql
 COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
 RUN chmod +x /src/scripts/*.sh
