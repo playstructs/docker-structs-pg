@@ -30,6 +30,13 @@ verifies that change instead of attempting a backwards deployment. Git, registry
 connection, Sqitch deployment and verification errors terminate the process;
 container restart policy can retry them. No failure is treated as success.
 
+The previous container runs unbounded `sqitch deploy`. If it pulls this schema
+before replacement, the ledger gate refuses the incompatible transition, but
+Sqitch's default `--mode all` also reverts every change applied in that run.
+The compatible prefix does not remain deployed. Its old loop then retries the
+same deploy/revert cycle. Stop that migrator and use the target-bounded command;
+do not enable transition gates or change rollback mode to make the error disappear.
+
 For a deliberate development workflow, `STRUCTS_PG_MIGRATION_MODE=branch` plus
 an explicit `STRUCTS_PG_BRANCH` tracks that remote branch. It still respects the
 configured migration target. Release deployments should keep pinned mode.
@@ -102,3 +109,9 @@ targets, explicit gates and failure propagation against temporary Git repos.
 The Go integration suite runs against the Sqitch schema. The captured testnet
 upgrade replay test additionally requires a marked disposable restore through
 `V022_UPGRADE_REHEARSAL_DATABASE_URL`; ordinary integration runs skip it.
+
+`python3 tests/test_migrations_integration.py --image sha256:<local-image-id>`
+tests the actual packaged Sqitch and migration helper in a temporary database
+container with no network. It reproduces the legacy gate-triggered full rollback,
+then verifies compatible-target deployment, unchanged ledger identity and a second
+verification-only run. The temporary container is removed afterward.
