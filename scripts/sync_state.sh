@@ -20,6 +20,7 @@
 #   sync-state verify           -- run data-quality checks, write a report
 #   sync-state reprocess-errors -- replay unresolved handler_error_log rows
 #   sync-state init-genesis     -- load genesis ledger credits
+#   sync-state reconcile-current-block -- repair the exact indexed boundary
 #
 # Configuration (env vars; all optional):
 #

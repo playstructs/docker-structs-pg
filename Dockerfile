@@ -1,12 +1,12 @@
 # Build update-cache Go binary
-FROM golang:1.25 AS update-cache-builder
+FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS update-cache-builder
 WORKDIR /build
 COPY update-cache/ .
 RUN go mod download && \
     CGO_ENABLED=0 go build -o /update-cache ./cmd/
 
 # Build sync-state Go binary
-FROM golang:1.25 AS sync-state-builder
+FROM golang:1.25.14@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80 AS sync-state-builder
 WORKDIR /build
 COPY sync-state/ .
 RUN go mod download && \
@@ -78,10 +78,22 @@ RUN addgroup --system structs && \
     adduser --system --home /src/structs --shell /bin/bash --group structs
 
 # Clone down structs-pg for database schematics
+ARG STRUCTS_PG_REF=5a13941d8fd9d557561f6384650497cc5a81efae
+ENV STRUCTS_PG_REF=${STRUCTS_PG_REF} \
+    STRUCTS_PG_MIGRATION_MODE=pinned \
+    STRUCTS_PG_MIGRATION_TARGET=table-signer-tx-20261030-authority-contract
+LABEL io.structs.pg.revision=${STRUCTS_PG_REF}
 WORKDIR /src
 RUN mkdir /src/scripts
 
-RUN git clone https://github.com/playstructs/structs-pg.git structs-pg
+RUN test "${#STRUCTS_PG_REF}" = 40 && \
+    case "${STRUCTS_PG_REF}" in *[!0-9a-f]*) exit 1;; esac && \
+    git init structs-pg && \
+    git -C structs-pg remote add origin https://github.com/playstructs/structs-pg.git && \
+    git -C structs-pg fetch --depth=1 origin "${STRUCTS_PG_REF}" && \
+    git -C structs-pg checkout --detach FETCH_HEAD && \
+    test "$(git -C structs-pg rev-parse HEAD)" = "${STRUCTS_PG_REF}" && \
+    test -f structs-pg/deploy/table-sync-state-20261030-economy-contract.sql
 COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
 RUN chmod +x /src/scripts/*.sh
