@@ -80,8 +80,8 @@ RUN addgroup --system structs && \
 # Clone down structs-pg for database schematics
 ARG STRUCTS_PG_REF=400e1c1056a4c7b0dbe5465ac729375c77572c21
 ENV STRUCTS_PG_REF=${STRUCTS_PG_REF} \
-    STRUCTS_PG_MIGRATION_MODE=pinned \
-    STRUCTS_PG_MIGRATION_TARGET=table-signer-tx-20261030-authority-contract
+    STRUCTS_PG_MIGRATION_MODE=main \
+    STRUCTS_PG_MIGRATION_TARGET=latest
 LABEL io.structs.pg.revision=${STRUCTS_PG_REF}
 WORKDIR /src
 RUN mkdir /src/scripts

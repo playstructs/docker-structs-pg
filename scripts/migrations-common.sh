@@ -9,7 +9,7 @@ structs_migration_checkout() {
     echo "Refusing migrations from modified tracked sources" >&2
     return 1
   }
-  local mode="${STRUCTS_PG_MIGRATION_MODE:-pinned}"
+  local mode="${STRUCTS_PG_MIGRATION_MODE:-main}"
   local branch="${STRUCTS_PG_BRANCH:-origin}"
   local ref="${STRUCTS_PG_REF:-}"
   case "${mode}" in
@@ -28,7 +28,12 @@ structs_migration_checkout() {
       git checkout --detach "${ref}" || return
       [[ "$(git rev-parse HEAD)" == "${ref}" ]] || return 1
       ;;
-    branch)
+    main|branch)
+      # Default automation follows main. Keep the old Compose sentinel working;
+      # an explicit branch override still selects that branch.
+      if [[ "${mode}" == "main" && "${branch}" == "origin" ]]; then
+        branch=main
+      fi
       if [[ -z "${branch}" || "${branch}" == "origin" ]] || ! git check-ref-format "refs/heads/${branch}"; then
         echo "Branch migration mode requires an explicit STRUCTS_PG_BRANCH name" >&2
         return 1
@@ -45,7 +50,7 @@ structs_migration_checkout() {
 }
 
 structs_migrate() {
-  local target="${STRUCTS_PG_MIGRATION_TARGET:-table-signer-tx-20261030-authority-contract}"
+  local target="${STRUCTS_PG_MIGRATION_TARGET:-latest}"
   local ledger="${STRUCTS_LEDGER_WRITER_CONTRACT:-}"
   local signer="${STRUCTS_SIGNER_CONTRACT:-}"
   if [[ ! "${target}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_/-]*$ ]]; then
@@ -61,6 +66,34 @@ structs_migrate() {
     return 1
   fi
   structs_migration_checkout || return
+  # A genuinely empty database has no old writer/signer state to transition.
+  # Inspect the database, not a volume marker: a lost marker must never opt an
+  # existing deployment into an incompatible migration.
+  if [[ -z "${ledger}" || -z "${signer}" ]]; then
+    local fresh
+    fresh=$(psql "${SQITCH_PG_CONNECTION}" -XqAt -v ON_ERROR_STOP=1 <<'SQL'
+-- migration_fresh_database
+SELECT to_regclass('sqitch.changes') IS NOT NULL AS registry_exists \gset
+SELECT NOT EXISTS (
+  SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname='structs'
+) AS application_empty \gset
+\if :registry_exists
+SELECT :'application_empty'::boolean AND NOT EXISTS (SELECT 1 FROM sqitch.changes);
+\else
+SELECT :'application_empty'::boolean;
+\endif
+SQL
+    ) || return
+    case "${fresh}" in
+      t)
+        ledger="${ledger:-denomination-v1}"
+        signer="${signer:-v022-1}"
+        ;;
+      f) ;;
+      *) echo "Unexpected migration initialization state" >&2; return 1 ;;
+    esac
+  fi
   local options="${PGOPTIONS:-}"
   if [[ -n "${ledger}" ]]; then
     options+=" -c structs.ledger_writer_contract=${ledger}"

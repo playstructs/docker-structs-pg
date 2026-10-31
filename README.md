@@ -57,7 +57,7 @@ Use [docker-compose.example.yml](docker-compose.example.yml) for recommended `st
 |--------|-----|
 | Volume pairing and memory env | [docs/postgres-volumes.md](docs/postgres-volumes.md) |
 | Checkpoint / WAL failures, `pg_resetwal` | [docs/postgres-recovery.md](docs/postgres-recovery.md) |
-| Pinned schemas, compatible automation and v0.22 recovery | [docs/v022-migrations.md](docs/v022-migrations.md) |
+| Automatic main migrations, pinned staging and v0.22 recovery | [docs/v022-migrations.md](docs/v022-migrations.md) |
 
 Environment variables (optional):
 

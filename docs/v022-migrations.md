@@ -8,7 +8,7 @@ The current pin also includes issued device activation identities required by
 the updated webapp. This additive change binds pending consent to a UUID instead
 of only the reusable short code, and removes that consent when its code expires
 or is deleted. It remains after the coordinated transition in the Sqitch plan;
-the compatible automatic target below is unchanged. Do not deploy the new webapp
+fresh installations deploy it automatically. Do not deploy the new webapp
 against a schema that ends before `table-player-address-20261030-activation-instance`.
 
 The writer also requires `table-work-20261030-uint64`. Attribute values, work
@@ -16,8 +16,9 @@ clocks and the three catalog difficulties retain the full unsigned chain range;
 startup refuses the former integer storage. The migration preserves view grants
 and work dirty-trigger settings. Keep it in the coordinated pause: the type
 change takes table locks and is not a rollout for the old SQL cache writer.
-Reversal refuses stored values above the former signed integer range. No new
-container activation or wider automatic target is implied by this build pin.
+Reversal refuses stored values above the former signed integer range. The build
+pin records the bundled schema; runtime migration selection is configured
+separately below.
 
 The webapp also needs `role-structs-webapp-20261030-gameplay-reads` for existing
 raid, shield, activity, catalog and statistics reads when its database role is
@@ -33,35 +34,48 @@ docker build --build-arg STRUCTS_PG_REF=<full-tested-commit> -t structs/structs-
 Building a candidate does not authorize a database deployment. The full switch
 also requires the matching v0.22 TSA worker and application transaction code.
 
-## Automatic compatible deployment
+## Automatic deployment from main
 
 Both init and auto-migrate use `scripts/migrations-common.sh`. Defaults are:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STRUCTS_PG_MIGRATION_MODE` | `pinned` | Use the exact bundled commit; do not pull main |
-| `STRUCTS_PG_REF` | Image build pin | Full 40-character commit SHA |
-| `STRUCTS_PG_MIGRATION_TARGET` | `table-signer-tx-20261030-authority-contract` | Stop at the tested compatible boundary |
-| `STRUCTS_PG_BRANCH` | `origin` | Legacy Compose sentinel; accepted in pinned mode |
-| `STRUCTS_LEDGER_WRITER_CONTRACT` | Unset | Explicit `denomination-v1` for the coordinated ledger switch |
-| `STRUCTS_SIGNER_CONTRACT` | Unset | Explicit `v022-1` for the coordinated signer switch |
+| `STRUCTS_PG_MIGRATION_MODE` | `main` | Fetch remote main on every run |
+| `STRUCTS_PG_REF` | Image build pin | Bundled full commit SHA; used at runtime only in pinned mode |
+| `STRUCTS_PG_MIGRATION_TARGET` | `latest` | Deploy and verify all pending Sqitch changes |
+| `STRUCTS_PG_BRANCH` | `origin` | Legacy Compose sentinel for main; `main` also works |
+| `STRUCTS_LEDGER_WRITER_CONTRACT` | Unset | Explicit `denomination-v1` for an existing database's coordinated ledger switch |
+| `STRUCTS_SIGNER_CONTRACT` | Unset | Explicit `v022-1` for an existing database's coordinated signer switch |
 
-The recurring migrator remains enabled for its configured target. If the target
-is already deployed, including when the database is beyond it, the migrator
-verifies that change instead of attempting a backwards deployment. Git, registry
-connection, Sqitch deployment and verification errors terminate the process;
-container restart policy can retry them. No failure is treated as success.
+New migrations pushed to main are applied on the next recurring run (every 120
+seconds). A fresh installation accepts the existing `STRUCTS_PG_BRANCH=main`
+configuration without another mode setting. An explicit branch name overrides
+main; `STRUCTS_PG_MIGRATION_MODE=branch` remains supported and requires a name.
+Git fetch failures stop the run rather than deploying a stale checkout.
 
-The previous container runs unbounded `sqitch deploy`. If it pulls this schema
-before replacement, the ledger gate refuses the incompatible transition, but
-Sqitch's default `--mode all` also reverts every change applied in that run.
-The compatible prefix does not remain deployed. Its old loop then retries the
-same deploy/revert cycle. Stop that migrator and use the target-bounded command;
-do not enable transition gates or change rollback mode to make the error disappear.
+Fresh databases initialize through the latest change automatically. The helper
+checks that there are no relations in the `structs` schema and no applied Sqitch
+changes before supplying the v0.22 writer/signer contracts. It does not trust a
+volume initialization marker. Existing databases still require the coordinated
+transition below if those guarded changes have not been applied. Databases that
+already completed that transition accept subsequent migrations normally.
 
-For a deliberate development workflow, `STRUCTS_PG_MIGRATION_MODE=branch` plus
-an explicit `STRUCTS_PG_BRANCH` tracks that remote branch. It still respects the
-configured migration target. Release deployments should keep pinned mode.
+Explicit settings still override these defaults. Remove an old migration target
+or set `STRUCTS_PG_MIGRATION_TARGET=latest` to follow all changes. The guild Compose
+file must also default its target to `latest`; an older Compose file's explicit
+boundary overrides the image. No running deployment is changed by an image build.
+
+For reproducible staging, select `STRUCTS_PG_MIGRATION_MODE=pinned`, keep
+`STRUCTS_PG_BRANCH=origin` (or unset), and set `STRUCTS_PG_REF` to a full SHA.
+A named `STRUCTS_PG_MIGRATION_TARGET` can deliberately stop at a reviewed change.
+If that change is already deployed, including when the database is beyond it,
+the migrator verifies it instead of attempting a backwards deployment.
+
+Git, registry connection, Sqitch deployment and verification errors terminate
+the process; container restart policy can retry them. No failure is treated as
+success. A guarded transition failure uses Sqitch's normal rollback behavior;
+stop an old deployment's migrator and coordinate its writer/signer switch instead
+of bypassing the guards.
 
 ## Coordinated activation
 
@@ -126,8 +140,9 @@ guess phases, lower the cursor alone, or use `--allow-replay` as a substitute.
 
 ## Validation
 
-`python3 tests/test_migrations.py` exercises pinning, branch opt-in, compatible
-targets, explicit gates and failure propagation against temporary Git repos.
+`python3 tests/test_migrations.py` exercises automatic main updates, pinning,
+explicit branches, fresh initialization, bounded targets, explicit gates and
+failure propagation against temporary Git repos.
 The Go integration suite runs against the Sqitch schema. The captured testnet
 upgrade replay test additionally requires a marked disposable restore through
 `V022_UPGRADE_REHEARSAL_DATABASE_URL`; ordinary integration runs skip it.
@@ -136,4 +151,7 @@ upgrade replay test additionally requires a marked disposable restore through
 tests the actual packaged Sqitch and migration helper in a temporary database
 container with no network. It reproduces the legacy gate-triggered full rollback,
 then verifies compatible-target deployment, unchanged ledger identity and a second
-verification-only run. The temporary container is removed afterward.
+verification-only run. It also initializes a fresh database through the plan tip
+without explicit transition contracts and repeats the migration. Use
+`--scripts-dir scripts` to test local helpers against the image's PostgreSQL and
+Sqitch installation. The temporary container is removed afterward.

@@ -39,8 +39,9 @@ with open(os.environ['CALL_LOG'],'a') as f:
 sys.exit(int(os.environ.get('SQITCH_EXIT','0')))
 ''')
         (self.bin / 'psql').write_text(f'#!{sys.executable}\n' + '''import os, sys
-sys.stdin.read()
-print(os.environ.get('REGISTRY_DEPLOYED','f'))
+query = sys.stdin.read()
+setting = 'REGISTRY_EMPTY' if 'migration_fresh_database' in query else 'REGISTRY_DEPLOYED'
+print(os.environ.get(setting,'f'))
 sys.exit(int(os.environ.get('PSQL_EXIT','0')))
 ''')
         for file in self.bin.iterdir():
@@ -56,7 +57,9 @@ sys.exit(int(os.environ.get('PSQL_EXIT','0')))
         return subprocess.check_output(['git', *args], text=True, stderr=subprocess.DEVNULL).strip()
 
     def run_script(self, script='database-migrate.sh', **env):
-        return subprocess.run(['bash', str(ROOT / 'scripts' / script)], env={**self.env, **env},
+        environment = {**self.env, **env}
+        environment = {key: value for key, value in environment.items() if value is not None}
+        return subprocess.run(['bash', str(ROOT / 'scripts' / script)], env=environment,
                               capture_output=True, text=True, timeout=8)
 
     def calls(self):
@@ -77,6 +80,56 @@ sys.exit(int(os.environ.get('PSQL_EXIT','0')))
         self.assertEqual(self.git('-C', str(self.checkout), 'rev-parse', 'HEAD'), self.second)
         self.assertEqual(self.calls()[0]['args'][-2:], ['--to', BOUNDARY])
 
+    def test_default_and_main_mode_follow_remote_main(self):
+        for mode in [None, '', 'main']:
+            for branch in [None, '', 'origin', 'main']:
+                with self.subTest(mode=mode, branch=branch):
+                    self.git('-C', str(self.checkout), 'checkout', '--detach', self.first)
+                    result = self.run_script(STRUCTS_PG_MIGRATION_MODE=mode,
+                                             STRUCTS_PG_BRANCH=branch)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self.git('-C', str(self.checkout), 'rev-parse', 'HEAD'), self.second)
+                    self.assertEqual(self.calls()[-1]['args'][-2:], ['--to', BOUNDARY])
+
+    def test_main_mode_preserves_explicit_branch_override(self):
+        self.git('-C', str(self.origin), 'branch', 'release/test', self.first)
+        result = self.run_script(STRUCTS_PG_MIGRATION_MODE='main', STRUCTS_PG_BRANCH='release/test')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('-C', str(self.checkout), 'rev-parse', 'HEAD'), self.first)
+
+    def test_main_mode_fetches_new_commits_on_each_run(self):
+        self.assertEqual(self.run_script(STRUCTS_PG_MIGRATION_MODE='main').returncode, 0)
+        (self.origin / 'migration.sql').write_text('third\n')
+        self.git('-C', str(self.origin), 'commit', '-am', 'third')
+        third = self.git('-C', str(self.origin), 'rev-parse', 'HEAD')
+        result = self.run_script(STRUCTS_PG_MIGRATION_MODE='main')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('-C', str(self.checkout), 'rev-parse', 'HEAD'), third)
+
+    def test_main_mode_fetch_failure_does_not_deploy_stale_checkout(self):
+        self.origin.rename(self.root / 'unavailable')
+        result = self.run_script(STRUCTS_PG_MIGRATION_MODE='main')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
+
+    def test_default_target_deploys_latest_on_fresh_database(self):
+        result = self.run_script(STRUCTS_PG_MIGRATION_MODE=None,
+                                 STRUCTS_PG_MIGRATION_TARGET=None,
+                                 STRUCTS_PG_BRANCH='main', REGISTRY_EMPTY='t')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git('-C', str(self.checkout), 'rev-parse', 'HEAD'), self.second)
+        self.assertEqual(self.calls()[0]['args'], ['deploy', '--verify', '--target',
+                                                 'db:postgres://test@localhost/test'])
+        self.assertEqual(self.calls()[0]['options'],
+                         ' -c structs.ledger_writer_contract=denomination-v1 -c structs.signer_contract=v022-1')
+
+    def test_existing_database_does_not_automatically_acknowledge_transition(self):
+        result = self.run_script(STRUCTS_PG_MIGRATION_MODE='main',
+                                 STRUCTS_PG_MIGRATION_TARGET='', REGISTRY_EMPTY='f')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--to', self.calls()[0]['args'])
+        self.assertEqual(self.calls()[0]['options'], '')
+
     def test_contracts_are_explicit_and_preserve_existing_options(self):
         result = self.run_script(STRUCTS_PG_MIGRATION_TARGET='latest',
                                  STRUCTS_LEDGER_WRITER_CONTRACT='denomination-v1',
@@ -96,6 +149,7 @@ sys.exit(int(os.environ.get('PSQL_EXIT','0')))
         for env in [{'STRUCTS_PG_REF': 'main'}, {'STRUCTS_PG_REF': ''},
                     {'STRUCTS_PG_MIGRATION_MODE': 'unknown'}, {'STRUCTS_PG_BRANCH': 'main'},
                     {'STRUCTS_PG_MIGRATION_MODE': 'branch'}, {'STRUCTS_PG_DIR': '/does-not-exist'},
+                    {'STRUCTS_PG_MIGRATION_MODE': 'main', 'STRUCTS_PG_BRANCH': '--invalid'},
                     {'STRUCTS_PG_MIGRATION_TARGET': '--help'}, {'SQITCH_PG_CONNECTION': ''},
                     {'STRUCTS_SIGNER_CONTRACT': 'v021'}, {'STRUCTS_LEDGER_WRITER_CONTRACT': 'anything'}]:
             with self.subTest(env=env):
