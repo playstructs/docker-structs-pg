@@ -276,7 +276,7 @@ func Run(ctx context.Context, in Inputs) (*Report, error) {
 	}
 
 	// 9. tx indexer
-	if c := probeTxIndexer(ctx, in.RPC); c != nil {
+	if c := probeTxIndexer(ctx, in.RPC, r.Tip); c != nil {
 		r.Checks = append(r.Checks, *c)
 		if c.Severity == FATAL {
 			r.Fatal = true
@@ -559,10 +559,12 @@ func probeABCIRetention(ctx context.Context, c *rpc.Client, tip int64) *Check {
 	}
 }
 
-// probeTxIndexer hits /tx_search with a trivial query. Indexer="null" returns
-// an error envelope; "kv" and "psql" both return a normal envelope.
-func probeTxIndexer(ctx context.Context, c *rpc.Client) *Check {
-	r, err := c.TxSearch(ctx, "tx.height>=1", 1)
+// probeTxIndexer checks one block, including an empty one. A range starting
+// at genesis makes CometBFT count the entire transaction history even with
+// per_page=1. Indexer="null" returns an error envelope; enabled indexers
+// return a normal envelope whether or not this block contains a transaction.
+func probeTxIndexer(ctx context.Context, c *rpc.Client, height int64) *Check {
+	r, err := c.TxSearch(ctx, fmt.Sprintf("tx.height=%d", height), 1)
 	if err != nil {
 		// distinguish "indexer disabled" (deterministic rpc error mentioning indexer)
 		// from transient failure
