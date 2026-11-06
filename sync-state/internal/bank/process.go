@@ -215,12 +215,17 @@ func parseAmountDenom(s string) (amount, denom string, ok bool) {
 // Bank events tend to have unique keys per event so first-match is
 // sufficient.
 func findAttr(ev rpc.Event, k string) string {
+	value, _ := lookupAttr(ev, k)
+	return value
+}
+
+func lookupAttr(ev rpc.Event, k string) (string, bool) {
 	for _, a := range ev.Attributes {
 		if a.Key == k {
-			return a.Value
+			return a.Value, true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // findAmount reads one normalized coin after processEvent has validated the

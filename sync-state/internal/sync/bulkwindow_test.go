@@ -23,6 +23,7 @@ func TestEffectiveWindowSize(t *testing.T) {
 }
 
 func TestBulkLagThreshold(t *testing.T) {
+	withEnv(t, map[string]string{"SYNC_STATE_BULK_WINDOW": ""})
 	cfg := LoadConfig([]string{"-bulk-lag-threshold", "25"})
 	if cfg.BulkLagThreshold != 25 {
 		t.Fatalf("BulkLagThreshold = %d, want 25", cfg.BulkLagThreshold)
@@ -30,8 +31,8 @@ func TestBulkLagThreshold(t *testing.T) {
 	if !cfg.BulkEnabled {
 		t.Fatal("BulkEnabled should default true")
 	}
-	if cfg.BulkWindow != 100 {
-		t.Fatalf("BulkWindow default = %d, want 100", cfg.BulkWindow)
+	if cfg.BulkWindow != 500 {
+		t.Fatalf("BulkWindow default = %d, want 500", cfg.BulkWindow)
 	}
 	if cfg.BulkStatementTimeout != 5*time.Minute {
 		t.Fatalf("BulkStatementTimeout = %s, want 5m", cfg.BulkStatementTimeout)

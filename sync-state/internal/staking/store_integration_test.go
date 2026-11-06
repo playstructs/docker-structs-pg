@@ -9,11 +9,71 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"sync-state/internal/readmodel"
 )
 
 const storeChain = "native-snapshot-integration"
 const storeAddressB = "structs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
 const storeAddressC = "structs1rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+
+func TestInvalidateNoOwnerIDsSkipsDatabase(t *testing.T) {
+	dirty := readmodel.NewDirty()
+	dirty.Provider("4-1")
+	if err := Invalidate(t.Context(), nil, storeChain, 100, dirty, Changes{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInvalidateValidatorWithoutOwners(t *testing.T) {
+	ctx, tx := storeTx(t)
+	if err := Invalidate(ctx, tx, storeChain, 100, readmodel.NewDirty(), Changes{Validators: []string{validatorA}}); err != nil {
+		t.Fatal(err)
+	}
+	var height int64
+	if err := tx.QueryRow(ctx, `SELECT height FROM sync_state.native_staking_invalidation WHERE chain_id=$1 AND validator=$2`,
+		storeChain, validatorA).Scan(&height); err != nil || height != 100 {
+		t.Fatalf("validator invalidation: height=%d err=%v", height, err)
+	}
+}
+
+func TestInvalidateDiscoversOwners(t *testing.T) {
+	ctx, tx := storeTx(t)
+	const player, guild = "1-997101", "0-997101"
+	if _, err := tx.Exec(ctx, `INSERT INTO structs.guild(id,index,name) VALUES ($1,0,'staking test')`, guild); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO structs.player(id,primary_address) VALUES ($1,$2)`, player, testAddress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO structs.vault(owner_id,address,account_number) VALUES ($1,$2,1),($3,$4,2)`,
+		player, storeAddressB, guild, storeAddressC); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		mark func(*readmodel.Dirty, string)
+		id   string
+		want string
+	}{
+		{"address", (*readmodel.Dirty).Address, storeAddressB, storeAddressB},
+		{"player", (*readmodel.Dirty).Player, player, storeAddressB},
+		{"guild", (*readmodel.Dirty).Guild, guild, storeAddressC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dirty := readmodel.NewDirty()
+			tc.mark(dirty, tc.id)
+			chain := storeChain + "-" + tc.name
+			if err := Invalidate(ctx, tx, chain, 100, dirty, Changes{}); err != nil {
+				t.Fatal(err)
+			}
+			var height int64
+			if err := tx.QueryRow(ctx, `SELECT required_height FROM sync_state.native_staking_snapshot WHERE chain_id=$1 AND address=$2`, chain, tc.want).Scan(&height); err != nil || height != 100 {
+				t.Fatalf("owner %s: height=%d err=%v", tc.want, height, err)
+			}
+		})
+	}
+}
 
 func storeTx(t *testing.T) (context.Context, pgx.Tx) {
 	t.Helper()

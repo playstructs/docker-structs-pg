@@ -27,6 +27,33 @@ func TestCoins_ExactSetsAndInvalidAmounts(t *testing.T) {
 	}
 }
 
+func TestTransferWithEmptyRecipient(t *testing.T) {
+	event := transferEventTest("sender", "", "1000000ualpha")
+	buf := buffers.New()
+	if err := ProcessBlock(context.Background(), nil, buf, 1907566, time.Now(), "test", nil,
+		[]rpc.TxResult{{Events: []rpc.Event{event}}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(buf.Ledger) != 2 {
+		t.Fatalf("expected both transfer legs, got %+v", buf.Ledger)
+	}
+	debit, credit := buf.Ledger[0], buf.Ledger[1]
+	if debit.Address != "sender" || debit.Counterparty != "" || debit.Direction != "debit" ||
+		credit.Address != "" || credit.Counterparty != "sender" || credit.Direction != "credit" ||
+		debit.AmountP != "1000000" || credit.AmountP != debit.AmountP {
+		t.Fatalf("incorrect transfer legs: %+v", buf.Ledger)
+	}
+
+	missing := rpc.Event{Type: "transfer", Attributes: []rpc.Attribute{
+		{Key: "sender", Value: "sender"}, {Key: "amount", Value: "1000000ualpha"},
+	}}
+	for _, invalid := range []rpc.Event{missing, transferEventTest("", "recipient", "1000000ualpha")} {
+		if err := validateBankFields(invalid); err == nil {
+			t.Fatalf("accepted malformed transfer: %+v", invalid)
+		}
+	}
+}
+
 func withMessage(ev rpc.Event, msg string) rpc.Event {
 	ev.Attributes = append(ev.Attributes, rpc.Attribute{Key: "msg_index", Value: msg})
 	return ev

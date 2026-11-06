@@ -1,19 +1,14 @@
 # Bulk-load mode (deferred commit + buffered COPY)
 
-Bulk mode reduces catch-up time in two layers:
+Bulk mode commits a window of blocks in one PostgreSQL transaction. The writer
+applies blocks in chain order and flushes authoritative ledger, activity and
+stat rows per block so subsequent handlers can read the current state. It
+advances the cursor and emits a heartbeat when the window commits.
 
-1. **Phase 1 — deferred commit.** Every **N blocks** commit in one PostgreSQL
-   transaction instead of one transaction per block.
-2. **Phase 2 — buffered COPY.** Every append-only structs.* row written during
-   the window (ledger, defusion, planet_activity, stat_*) is buffered in memory
-   and flushed via `pgx.CopyFrom` immediately before the outer commit. Streaming
-   mode uses the same buffer with a per-block flush — UPSERT/UPDATE writes
-   continue to run inline so `IS DISTINCT FROM` guards and prev-row reads keep
-   their normal semantics.
-
-**Event order, handler logic, and per-row INSERT/UPSERT semantics are
-unchanged** — only commit frequency, cursor/heartbeat cadence, and the wire
-protocol used for the append-only inserts differ.
+With `-mirror-raw`, bulk mode groups raw event and attribute copies within the
+window transaction. It flushes after a complete block when the buffer reaches
+8,192 rows and flushes the remainder before updating the cursor. Raw block and
+transaction-result records still use the per-block path.
 
 ## When it activates
 
@@ -29,22 +24,23 @@ Bulk mode is **automatic** during catch-up:
 | Flag | Env | Default | Purpose |
 |------|-----|---------|---------|
 | `-bulk-enabled` | `SYNC_STATE_BULK_ENABLED` | `true` | Master switch |
-| `-bulk-window` | `SYNC_STATE_BULK_WINDOW` | `100` | Blocks per outer tx |
+| `-bulk-window` | `SYNC_STATE_BULK_WINDOW` | `500` | Maximum blocks per bulk transaction |
 | `-bulk-lag-threshold` | `SYNC_STATE_BULK_LAG_THRESHOLD` | `50` | Min lag to enter bulk |
 | `-bulk-statement-timeout` | `SYNC_STATE_BULK_STATEMENT_TIMEOUT` | `5m` | Outer tx statement timeout |
 | `-bulk-async-commit` | `SYNC_STATE_BULK_ASYNC_COMMIT` | `true` | `synchronous_commit=off` on bulk windows |
 | `-bulk-defer-projections` | `SYNC_STATE_BULK_DEFER_PROJECTIONS` | `true` | Skip `api_*` recompute during catch-up; rebuild all once before streaming resumes (`false` = once per window) |
 
-`-batch` still controls RPC fetch parallelism. When bulk is active, the apply
-window is capped at `-bulk-window`.
+During bulk catch-up, sync-state fetches the next `-bulk-window` blocks while
+it applies the current window. `-parallelism` controls the number of concurrent
+block fetches. In streaming mode, `-batch` sets the fetch window size.
 
 ## Observability
 
 Log lines include mode:
 
 ```
-synced h=5000 (window 4901-5000, bulk, 180.2 blocks/s, lag=803609)
-window done (bulk): 100 blocks [4901..5000] in 554ms (180.5 blocks/s)
+fetched h=5000 (window 4501-5000, bulk, 5865.9 blocks/s, lag=81603)
+window done (bulk): 500 blocks [4501..5000] in 682ms (733.7 blocks/s)
 ```
 
 At tip:
@@ -136,6 +132,3 @@ ordering issue.
   `IS DISTINCT FROM` guards intact)
 - Webapp at tip: unchanged (streaming mode emits `pg_notify('grass', …)` per
   block as before)
-- `sync_state.raw_*` mirror (when `-mirror-raw` is set) still uses
-  `pgx.CopyFrom` per block — not window-batched. That extra batching is
-  bookkeeping-only and stays a Phase 3 nice-to-have.

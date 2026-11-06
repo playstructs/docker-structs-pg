@@ -233,7 +233,7 @@ func LoadConfig(args []string) Config {
 	fs.BoolVar(&cfg.BulkEnabled, "bulk-enabled", envOrBool("SYNC_STATE_BULK_ENABLED", true),
 		"ingest: when lag >= bulk-lag-threshold, commit every bulk-window blocks "+
 			"in one transaction instead of one tx per block (catch-up only)")
-	fs.IntVar(&cfg.BulkWindow, "bulk-window", envOrInt("SYNC_STATE_BULK_WINDOW", 100),
+	fs.IntVar(&cfg.BulkWindow, "bulk-window", envOrInt("SYNC_STATE_BULK_WINDOW", 500),
 		"ingest: max blocks per bulk outer transaction (caps fetch window when bulk is active)")
 	fs.IntVar(&cfg.BulkLagThreshold, "bulk-lag-threshold", envOrInt("SYNC_STATE_BULK_LAG_THRESHOLD", 50),
 		"ingest: switch to bulk mode when tip - cursor >= this many blocks")

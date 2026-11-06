@@ -186,7 +186,7 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 	}
 
 	if s.cfg.MirrorRaw {
-		if err := s.writeRawMirror(ctx, tx, bundle); err != nil {
+		if err := s.writeRawMirror(ctx, tx, bundle, opts.RawEvents); err != nil {
 			return nil, fmt.Errorf("raw mirror h=%d: %w", bundle.Height, err)
 		}
 	}
@@ -364,7 +364,7 @@ func stripWhitespace(s string) string {
 	return ""
 }
 
-func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) error {
+func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle, window *rawEventBatch) error {
 	if len(b.RawTxs) != len(b.TxResults) {
 		return fmt.Errorf("raw transaction/result count mismatch")
 	}
@@ -408,10 +408,12 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) 
 	}
 
 	// events + attributes
-	var evRows []db.RawMirrorEvent
-	var attrRows []db.RawMirrorAttribute
+	batch := window
+	if batch == nil {
+		batch = &rawEventBatch{}
+	}
 	addEv := func(txIdx *int, evIdx int, ev rpc.Event) {
-		evRows = append(evRows, db.RawMirrorEvent{
+		batch.events = append(batch.events, db.RawMirrorEvent{
 			ChainID:    b.ChainID,
 			Height:     b.Height,
 			TxIndex:    txIdx,
@@ -424,7 +426,7 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) 
 				continue
 			}
 			seen[a.Key] = struct{}{}
-			attrRows = append(attrRows, db.RawMirrorAttribute{
+			batch.attributes = append(batch.attributes, db.RawMirrorAttribute{
 				ChainID:      b.ChainID,
 				Height:       b.Height,
 				TxIndex:      txIdx,
@@ -444,12 +446,27 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle) 
 			addEv(&idx, evIdx, ev)
 		}
 	}
-	if err := db.WriteRawEvents(ctx, tx, evRows); err != nil {
+	// Flush only at block boundaries: each writer replaces the entire set
+	// of rows for its heights. Splitting one height would delete its prefix.
+	if window == nil || len(batch.events)+len(batch.attributes) >= 8192 {
+		return batch.flush(ctx, tx)
+	}
+	return nil
+}
+
+type rawEventBatch struct {
+	events     []db.RawMirrorEvent
+	attributes []db.RawMirrorAttribute
+}
+
+func (b *rawEventBatch) flush(ctx context.Context, tx pgx.Tx) error {
+	if err := db.WriteRawEvents(ctx, tx, b.events); err != nil {
 		return err
 	}
-	if err := db.WriteRawAttributes(ctx, tx, attrRows); err != nil {
+	if err := db.WriteRawAttributes(ctx, tx, b.attributes); err != nil {
 		return err
 	}
+	*b = rawEventBatch{}
 	return nil
 }
 

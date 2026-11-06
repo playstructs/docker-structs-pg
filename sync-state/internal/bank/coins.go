@@ -80,7 +80,10 @@ func validateBankFields(ev rpc.Event) error {
 		fields = []string{"validator"}
 	}
 	for _, name := range fields {
-		if findAttr(ev, name) == "" {
+		// Testnet h=1907566 includes a successful transfer to the empty
+		// address. Preserve that recipient while still requiring its key.
+		value, present := lookupAttr(ev, name)
+		if !present || (value == "" && name != "recipient") {
 			return fmt.Errorf("missing %s attribute", name)
 		}
 	}

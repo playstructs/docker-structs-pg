@@ -39,7 +39,8 @@
 #                              already indexed; duplicates legacy ledger rows
 #                              unless derived tables were cleared first)
 #   SYNC_STOP_HEIGHT          default 0 (follow tip forever)
-#   SYNC_BATCH_SIZE           default 200
+#   SYNC_BATCH_SIZE           default 200 (streaming fetch window)
+#   SYNC_STATE_BULK_WINDOW    default 500 (blocks per catch-up transaction)
 #   SYNC_PARALLELISM          default 8
 #   SYNC_POLL_INTERVAL        default 3s   (private RPC); 30s recommended for public RPC
 #   SYNC_HTTP_TIMEOUT         default 30s

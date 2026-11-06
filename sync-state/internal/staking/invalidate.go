@@ -56,6 +56,9 @@ LEFT JOIN structs.reactor r ON r.id=wanted.id`, ids)
 	for _, address := range addresses {
 		dirty.Address(address)
 	}
+	if len(dirty.Addresses) == 0 && len(dirty.Players) == 0 && len(dirty.Guilds) == 0 {
+		return nil
+	}
 	rows, err := tx.Query(ctx, `SELECT address FROM structs.asset_owner
 WHERE address=ANY($1::varchar[]) OR owner_id=ANY($2::varchar[]) OR owner_id=ANY($3::varchar[])`,
 		dirty.AddressIDs(), dirty.PlayerIDs(), dirty.GuildIDs())

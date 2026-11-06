@@ -14,6 +14,8 @@ import (
 
 // applyOpts tweaks per-block writes when running inside a bulk outer tx.
 type applyOpts struct {
+	// RawEvents groups optional raw event and attribute copies within this transaction.
+	RawEvents *rawEventBatch
 	// ReconcileCurrentBlock verifies the cursor boundary, resolves legacy
 	// infusion phases and atomically rebuilds every API projection. This is
 	// only used by the explicit maintenance command, never normal ingestion.
@@ -90,6 +92,11 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		DeferProjections:          true,
 	}
 
+	var rawEvents rawEventBatch
+	if s.cfg.MirrorRaw {
+		opts.RawEvents = &rawEvents
+	}
+
 	// Reuse one buffer; applyBlockInTx flushes it after every block. The
 	// api_* projections are pure functions of authoritative state (address
 	// inventory deltas are additive), so recomputing the union of the
@@ -113,6 +120,9 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	}
 
 	last := blocks[len(blocks)-1]
+	if err := rawEvents.flush(ctx, tx); err != nil {
+		return fmt.Errorf("bulk raw events h=%d..%d: %w", blocks[0].Height, last.Height, err)
+	}
 	if !s.cfg.BulkDeferProjections {
 		if err := readmodel.Recompute(ctx, tx, windowDirty, last.Height, last.BlockTime, readmodel.InventoryFromDeltas(windowDeltas)); err != nil {
 			return fmt.Errorf("bulk api projections h=%d..%d: %w", blocks[0].Height, last.Height, err)
