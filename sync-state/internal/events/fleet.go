@@ -200,17 +200,12 @@ func emitFleetMoveSide(ctx context.Context, tx pgx.Tx, bctx BlockContext, fleetI
 			detail["fleet_list"] = ids
 		}
 	}
-	seq, err := nextPlanetActivitySeq(ctx, tx, planetID)
-	if err != nil {
-		return fmt.Errorf("seq: %w", err)
-	}
 	detailJSON, err := json.Marshal(detail)
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
 	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
 		Time:        bctx.BlockTime.UTC(),
-		Seq:         int64(seq),
 		PlanetID:    planetID,
 		Category:    category,
 		Detail:      detailJSON,
@@ -246,10 +241,8 @@ SELECT d.defending_struct_id, d.protected_struct_id
 // fleetDefensePair is one carried defense relationship.
 type fleetDefensePair struct{ defender, protected string }
 
-// fleetPlanetaryDefenses collects the carried defenses into a slice
-// before the caller emits anything: insertStructAttrActivity runs
-// nextPlanetActivitySeq, and pgx forbids a second statement on the same
-// tx while a Rows cursor is still open.
+// fleetPlanetaryDefenses collects carried defenses before their activity
+// rows are buffered by the caller.
 func fleetPlanetaryDefenses(ctx context.Context, tx pgx.Tx, fleetID, planetID string) ([]fleetDefensePair, error) {
 	rows, err := tx.Query(ctx, fleetPlanetaryDefensesSQL, fleetID, planetID)
 	if err != nil {

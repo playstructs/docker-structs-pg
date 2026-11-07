@@ -34,7 +34,7 @@ func TestRawEventBatchReplay(t *testing.T) {
 	event := rpc.Event{Type: "transfer", Attributes: []rpc.Attribute{
 		{Key: "sender", Value: "expected"}, {Key: "sender", Value: "duplicate"},
 	}}
-	large := make([]rpc.Event, 4200)
+	large := make([]rpc.Event, rawEventBatchLimit/2+1)
 	for i := range large {
 		large[i] = event
 	}
@@ -63,7 +63,7 @@ func TestRawEventBatchReplay(t *testing.T) {
 	err = tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM sync_state.raw_events WHERE chain_id=$1),
 		count(*), count(*) FILTER (WHERE height=3 AND tx_index=0 AND event_index=0)
 		FROM sync_state.raw_attributes WHERE chain_id=$1 AND value='expected'`, chain).Scan(&events, &attrs, &txAttrs)
-	if err != nil || events != 4202 || attrs != 4202 || txAttrs != 1 {
+	if err != nil || events != len(large)+2 || attrs != len(large)+2 || txAttrs != 1 {
 		t.Fatalf("replayed events=%d attributes=%d tx attributes=%d err=%v", events, attrs, txAttrs, err)
 	}
 }

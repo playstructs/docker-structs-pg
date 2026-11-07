@@ -57,13 +57,8 @@ func (attackHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, r
 		return nil
 	}
 
-	seq, err := nextPlanetActivitySeq(ctx, tx, planetID)
-	if err != nil {
-		return fmt.Errorf("attack: seq: %w", err)
-	}
 	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
 		Time:        bctx.BlockTime.UTC(),
-		Seq:         int64(seq),
 		PlanetID:    planetID,
 		Category:    "struct_attack",
 		Detail:      json.RawMessage(raw),

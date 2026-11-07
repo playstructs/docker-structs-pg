@@ -86,11 +86,10 @@ type DefusionRow struct {
 	CreatedAt              time.Time
 }
 
-// PlanetActivityRow mirrors structs.planet_activity. Seq is assigned by
-// nextPlanetActivitySeq at handler time so monotonicity is preserved.
+// PlanetActivityRow holds an activity awaiting sequence allocation. Flush
+// reserves per-planet ranges in the same transaction before copying the rows.
 type PlanetActivityRow struct {
 	Time        time.Time
-	Seq         int64
 	PlanetID    string
 	Category    string
 	Detail      json.RawMessage
@@ -448,24 +447,75 @@ ON CONFLICT (chain_id,address) DO UPDATE SET receipts_pending=TRUE,retry_after='
 	return nil
 }
 
+// Reserve only rows that survived handler savepoints. The caller flushes once
+// per block, preserving insertion order and ownership attribution. Counter
+// updates roll back with the activity rows if COPY or the transaction fails.
+func reservePlanetActivitySequences(ctx context.Context, tx pgx.Tx, rows []PlanetActivityRow) (map[string]int64, error) {
+	counts := make(map[string]int64)
+	for _, row := range rows {
+		if row.PlanetID == "" {
+			return nil, fmt.Errorf("planet activity: empty planet_id")
+		}
+		counts[row.PlanetID]++
+	}
+	planets := make([]string, 0, len(counts))
+	amounts := make([]int64, 0, len(counts))
+	for planet, count := range counts {
+		planets = append(planets, planet)
+		amounts = append(amounts, count)
+	}
+	// Lock counters in a consistent order. A new planet starts at zero, so
+	// inserting N activities stores N-1; existing planets advance by N.
+	result, err := tx.Query(ctx, `
+INSERT INTO structs.planet_activity_sequence (planet_id, counter)
+SELECT planet_id, amount - 1
+FROM unnest($1::varchar[], $2::integer[]) AS batch(planet_id, amount)
+ORDER BY planet_id
+ON CONFLICT (planet_id) DO UPDATE
+SET counter = planet_activity_sequence.counter + EXCLUDED.counter + 1
+RETURNING planet_id, counter`, planets, amounts)
+	if err != nil {
+		return nil, fmt.Errorf("reserve planet activity sequences: %w", err)
+	}
+	defer result.Close()
+	for result.Next() {
+		var planet string
+		var last int64
+		if err := result.Scan(&planet, &last); err != nil {
+			return nil, err
+		}
+		counts[planet] = last - counts[planet] + 1
+	}
+	if err := result.Err(); err != nil {
+		return nil, fmt.Errorf("reserve planet activity sequences: %w", err)
+	}
+	return counts, nil
+}
+
 // COPY FROM fires row triggers, including planet_activity_attribute
 // which writes structs.planet_activity_player in this same transaction.
 func flushPlanetActivity(ctx context.Context, tx pgx.Tx, rows []PlanetActivityRow) error {
+	next, err := reservePlanetActivitySequences(ctx, tx, rows)
+	if err != nil {
+		return err
+	}
 	cols := []string{"time", "seq", "planet_id", "category", "detail", "block_height"}
 	src := pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {
 		r := rows[i]
+		seq := next[r.PlanetID]
+		next[r.PlanetID]++
 		// detail JSON: pgx writes []byte to a jsonb column verbatim,
 		// so pass the marshalled payload as []byte.
 		return []any{
 			r.Time,
-			r.Seq,
+			seq,
 			r.PlanetID,
 			r.Category,
 			[]byte(r.Detail),
 			r.BlockHeight,
 		}, nil
 	})
-	_, err := tx.CopyFrom(ctx, pgx.Identifier{"structs", "planet_activity"}, cols, src)
+	_, err = tx.CopyFrom(ctx, pgx.Identifier{"structs", "planet_activity"}, cols, src)
 	return err
 }
 

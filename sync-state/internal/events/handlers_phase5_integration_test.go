@@ -11,7 +11,6 @@
 //     seized_ore-only update DOES NOT touch updated_at
 //   - providerAddress / guildBankAddress — address_tag multi-row upserts
 //   - time — no-op safety check
-//   - nextPlanetActivitySeq — monotonic per-planet counter
 package events
 
 import (
@@ -42,47 +41,6 @@ func fixedBctx(height int64) BlockContext {
 		Buf:        buffers.New(),
 		Dirty:      readmodel.NewDirty(),
 	}
-}
-
-// -------- helpers --------
-
-func TestNextPlanetActivitySeq_Monotonic(t *testing.T) {
-	conn := connect(t)
-	inTx(t, conn, func(tx pgx.Tx) {
-		ctx := context.Background()
-		// Reserved-range planet: the counter starts at 0 only for a planet
-		// the chain has never touched (see the id note in
-		// handlers_integration_test.go).
-		planet := "2-999001"
-
-		// First call: 0 (matches SQL: VALUES($1, 0) inserts 0 with no UPDATE).
-		got, err := nextPlanetActivitySeq(ctx, tx, planet)
-		if err != nil {
-			t.Fatalf("call 1: %v", err)
-		}
-		if got != 0 {
-			t.Errorf("first call: got %d want 0", got)
-		}
-		// Subsequent calls: 1, 2, 3 …
-		for want := 1; want <= 3; want++ {
-			got, err := nextPlanetActivitySeq(ctx, tx, planet)
-			if err != nil {
-				t.Fatalf("call %d: %v", want+1, err)
-			}
-			if got != want {
-				t.Errorf("call %d: got %d want %d", want+1, got, want)
-			}
-		}
-
-		// Different planet starts at its own 0.
-		other, err := nextPlanetActivitySeq(ctx, tx, "2-999002")
-		if err != nil {
-			t.Fatalf("other planet: %v", err)
-		}
-		if other != 0 {
-			t.Errorf("other planet first call: got %d want 0", other)
-		}
-	})
 }
 
 // -------- ore_mine --------

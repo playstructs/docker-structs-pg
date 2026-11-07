@@ -138,10 +138,6 @@ func emitStructMovementActivity(ctx context.Context, tx pgx.Tx, bctx BlockContex
 		// constraint (rolled back by ADD_QUEUE's EXCEPTION). Skip cleanly.
 		return nil
 	}
-	seq, err := nextPlanetActivitySeq(ctx, tx, planetID)
-	if err != nil {
-		return fmt.Errorf("seq: %w", err)
-	}
 	detail, err := json.Marshal(map[string]any{
 		"struct_id":     p.ID,
 		"location_type": p.LocationType,
@@ -154,7 +150,6 @@ func emitStructMovementActivity(ctx context.Context, tx pgx.Tx, bctx BlockContex
 	}
 	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
 		Time:        bctx.BlockTime.UTC(),
-		Seq:         int64(seq),
 		PlanetID:    planetID,
 		Category:    "struct_move",
 		Detail:      detail,

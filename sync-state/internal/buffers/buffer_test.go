@@ -20,7 +20,7 @@ func TestSnapshotRestore_TruncatesPostSnapshotRows(t *testing.T) {
 	b.Ledger = append(b.Ledger, LedgerRow{Address: "a"})
 	snap := b.Snapshot()
 	b.Ledger = append(b.Ledger, LedgerRow{Address: "b"})
-	b.PlanetActivity = append(b.PlanetActivity, PlanetActivityRow{PlanetID: "p1", Seq: 1})
+	b.PlanetActivity = append(b.PlanetActivity, PlanetActivityRow{PlanetID: "p1"})
 
 	if got := len(b.Ledger); got != 2 {
 		t.Fatalf("Ledger len pre-restore = %d, want 2", got)

@@ -42,6 +42,11 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 			good.FinalizeBlockEvents = []rpc.Event{{Type: "structs.structs.EventVaultAddress", Attributes: []rpc.Attribute{
 				{Key: "eventVaultAddressDetail", Value: `{"ownerId":"1-990991","vaultAddress":"atomic-vault-test","accountNumber":"0","accountCreated":false}`},
 			}}}
+			good.FinalizeBlockEvents = append(good.FinalizeBlockEvents, rpc.Event{
+				Type: "structs.structs.EventRaid", Attributes: []rpc.Attribute{{
+					Key: "eventRaidDetail", Value: `{"planetId":"2-999920001","fleetId":"9-999920001","status":"started","seizedOre":"0"}`,
+				}},
+			})
 			bad := &BlockBundle{Height: good.Height + 1, ChainID: chain, BlockTime: good.BlockTime, BlockHashHex: "fixture-bad"}
 			bad.FinalizeBlockEvents = []rpc.Event{
 				{Type: "structs.structs.EventReactorCommissionRevisionReset"},
@@ -71,6 +76,8 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 			}
 			for _, query := range []string{
 				`SELECT count(*) FROM structs.vault WHERE address='atomic-vault-test'`,
+				`SELECT count(*) FROM structs.planet_activity_sequence WHERE planet_id='2-999920001'`,
+				`SELECT count(*) FROM structs.planet_activity WHERE planet_id='2-999920001'`,
 				`SELECT count(*) FROM sync_state.sync_cursor WHERE chain_id=$1`,
 				`SELECT count(*) FROM sync_state.block_log WHERE chain_id=$1`,
 				`SELECT count(*) FROM structs.ledger WHERE chain_id=$1 AND block_height=990992`,

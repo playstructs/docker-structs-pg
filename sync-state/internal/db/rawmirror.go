@@ -134,14 +134,14 @@ func WriteRawAttributes(ctx context.Context, tx pgx.Tx, rows []RawMirrorAttribut
 	); err != nil {
 		return fmt.Errorf("clear raw_attributes: %w", err)
 	}
-	src := make([][]any, len(rows))
-	for i, r := range rows {
-		src[i] = []any{r.ChainID, r.Height, r.TxIndex, r.EventIndex, r.Key, r.Value, r.CompositeKey}
-	}
+	src := pgx.CopyFromSlice(len(rows), func(i int) ([]any, error) {
+		r := rows[i]
+		return []any{r.ChainID, r.Height, r.TxIndex, r.EventIndex, r.Key, r.Value, r.CompositeKey}, nil
+	})
 	_, err := tx.CopyFrom(ctx,
 		pgx.Identifier{"sync_state", "raw_attributes"},
 		[]string{"chain_id", "height", "tx_index", "event_index", "key", "value", "composite_key"},
-		pgx.CopyFromRows(src),
+		src,
 	)
 	return err
 }

@@ -289,17 +289,12 @@ func emitStructDefenseAdd(ctx context.Context, tx pgx.Tx, bctx BlockContext, pro
 }
 
 func insertStructAttrActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, planetID, category string, detail map[string]any) error {
-	seq, err := nextPlanetActivitySeq(ctx, tx, planetID)
-	if err != nil {
-		return fmt.Errorf("seq planet=%s: %w", planetID, err)
-	}
 	detailJSON, err := json.Marshal(detail)
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
 	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
 		Time:        bctx.BlockTime.UTC(),
-		Seq:         int64(seq),
 		PlanetID:    planetID,
 		Category:    category,
 		Detail:      detailJSON,

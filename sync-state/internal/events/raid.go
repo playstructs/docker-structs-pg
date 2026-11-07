@@ -76,10 +76,6 @@ func (raidHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw
 // instead of NOW() so replays and backfills land at the correct
 // historical timestamp (TimescaleDB hypertable partitioning).
 func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p payload.Raid) error {
-	seq, err := nextPlanetActivitySeq(ctx, tx, p.PlanetID)
-	if err != nil {
-		return fmt.Errorf("seq: %w", err)
-	}
 	detail, err := json.Marshal(map[string]any{
 		"planet_id":  p.PlanetID,
 		"fleet_id":   p.FleetID,
@@ -91,7 +87,6 @@ func emitRaidStatusActivity(ctx context.Context, tx pgx.Tx, bctx BlockContext, p
 	}
 	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
 		Time:        bctx.BlockTime.UTC(),
-		Seq:         int64(seq),
 		PlanetID:    p.PlanetID,
 		Category:    "raid_status",
 		Detail:      detail,

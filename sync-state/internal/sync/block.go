@@ -431,11 +431,13 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle, 
 	}
 	// Flush only at block boundaries: each writer replaces the entire set
 	// of rows for its heights. Splitting one height would delete its prefix.
-	if window == nil || len(batch.events)+len(batch.attributes) >= 8192 {
+	if window == nil || len(batch.events)+len(batch.attributes) >= rawEventBatchLimit {
 		return batch.flush(ctx, tx)
 	}
 	return nil
 }
+
+const rawEventBatchLimit = 32768
 
 type rawEventBatch struct {
 	events     []db.RawMirrorEvent

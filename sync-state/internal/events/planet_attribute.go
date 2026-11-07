@@ -201,17 +201,12 @@ func emitPlanetAttributeActivity(ctx context.Context, tx pgx.Tx, bctx BlockConte
 		return nil
 	}
 
-	seq, err := nextPlanetActivitySeq(ctx, tx, planetID)
-	if err != nil {
-		return fmt.Errorf("seq planet=%s: %w", planetID, err)
-	}
 	detail, err := json.Marshal(detailMap)
 	if err != nil {
 		return fmt.Errorf("detail marshal: %w", err)
 	}
 	bctx.Buf.PlanetActivity = append(bctx.Buf.PlanetActivity, buffers.PlanetActivityRow{
 		Time:        bctx.BlockTime.UTC(),
-		Seq:         int64(seq),
 		PlanetID:    planetID,
 		Category:    category,
 		Detail:      detail,
