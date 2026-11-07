@@ -31,13 +31,13 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 	if err := db.CheckEconomySchema(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"block", "window", "bank", "bank-window"} {
+	for _, mode := range []string{"block", "window", "bank", "bank-window", "sql", "sql-window"} {
 		t.Run(mode, func(t *testing.T) {
 			chain := "required-failure-" + mode
 			t.Cleanup(func() {
 				_, _ = pool.Exec(ctx, `DELETE FROM sync_state.handler_error_log WHERE chain_id=$1`, chain)
 			})
-			s := NewSyncer(Config{BulkDeferProjections: true}, nil, &db.Pool{Pool: pool}, events.NewRouter(false), chain)
+			s := NewSyncer(Config{BulkDeferProjections: true, MirrorRaw: true}, nil, &db.Pool{Pool: pool}, events.NewRouter(false), chain)
 			good := &BlockBundle{Height: 990991, ChainID: chain, BlockTime: time.Now().UTC(), BlockHashHex: "fixture"}
 			good.FinalizeBlockEvents = []rpc.Event{{Type: "structs.structs.EventVaultAddress", Attributes: []rpc.Attribute{
 				{Key: "eventVaultAddressDetail", Value: `{"ownerId":"1-990991","vaultAddress":"atomic-vault-test","accountNumber":"0","accountCreated":false}`},
@@ -53,6 +53,16 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 				{Type: "structs.structs.EventReactorStakeCap", Attributes: []rpc.Attribute{{Key: "active", Value: "true"}}},
 			}
 			wantErrorKey := "structs.structs.EventReactorStakeCap"
+			sqlFailure := strings.HasPrefix(mode, "sql")
+			if sqlFailure {
+				// Unknown attribute labels violate the database NOT NULL
+				// constraint. This aborts the actual PostgreSQL transaction,
+				// unlike a payload validation error returned before SQL.
+				wantErrorKey = "structs.structs.EventStructAttribute.structAttributeRecord"
+				bad.FinalizeBlockEvents = []rpc.Event{{Type: "structs.structs.EventStructAttribute", Attributes: []rpc.Attribute{{
+					Key: "structAttributeRecord", Value: `{"attributeId":"99-5-999920001","value":"1"}`,
+				}}}}
+			}
 			bankFailure := mode == "bank" || mode == "bank-window"
 			if bankFailure {
 				wantErrorKey = "bank.process_block"
@@ -65,7 +75,7 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 					{Key: "delegator", Value: "delegator-test"}, {Key: "completion_time", Value: "invalid"},
 				}}}
 			}
-			if mode == "window" || mode == "bank-window" {
+			if strings.Contains(mode, "window") {
 				err = s.applyBulkWindow(ctx, []*BlockBundle{good, bad}, bad.Height)
 			} else {
 				bad.FinalizeBlockEvents = append(good.FinalizeBlockEvents, bad.FinalizeBlockEvents...)
@@ -74,12 +84,18 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), map[bool]string{true: "bank", false: "required event"}[bankFailure]) {
 				t.Fatalf("expected required failure, got %v", err)
 			}
+			if sqlFailure && !strings.Contains(err.Error(), "23502") {
+				t.Fatalf("expected database NOT NULL violation, got %v", err)
+			}
 			for _, query := range []string{
 				`SELECT count(*) FROM structs.vault WHERE address='atomic-vault-test'`,
 				`SELECT count(*) FROM structs.planet_activity_sequence WHERE planet_id='2-999920001'`,
 				`SELECT count(*) FROM structs.planet_activity WHERE planet_id='2-999920001'`,
 				`SELECT count(*) FROM sync_state.sync_cursor WHERE chain_id=$1`,
 				`SELECT count(*) FROM sync_state.block_log WHERE chain_id=$1`,
+				`SELECT count(*) FROM sync_state.raw_blocks WHERE chain_id=$1`,
+				`SELECT count(*) FROM sync_state.raw_events WHERE chain_id=$1`,
+				`SELECT count(*) FROM sync_state.raw_attributes WHERE chain_id=$1`,
 				`SELECT count(*) FROM structs.ledger WHERE chain_id=$1 AND block_height=990992`,
 			} {
 				var count int

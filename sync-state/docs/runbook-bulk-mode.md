@@ -7,8 +7,8 @@ advances the cursor and emits a heartbeat when the window commits.
 
 With `-mirror-raw`, bulk mode groups raw event and attribute copies within the
 window transaction. It flushes after a complete block when the buffer reaches
-8,192 rows and flushes the remainder before updating the cursor. Raw block and
-transaction-result records still use the per-block path.
+32,768 combined event/attribute rows and flushes the remainder before updating
+the cursor. Raw block and transaction-result records still use the per-block path.
 
 ## When it activates
 
@@ -60,19 +60,25 @@ flushed.
 Bulk mode preserves chain order:
 
 1. Blocks processed strictly ascending
-2. Events within each block in RPC order (finalize → per-tx)
-3. Per-handler SAVEPOINTs unchanged — a handler-level failure rolls back its
-   savepoint AND truncates any rows it appended to the buffer
+2. Events within each block in protocol execution order (`rpc.OrderedEvents`)
+3. Handlers run directly in the block/window transaction. A required error or
+   panic stops ingestion, rolls back the whole transaction, and discards its
+   buffered rows and dirty sets. Explicit harmless warnings may continue.
 4. `sync_state.block_log` still one row per block inside the outer tx
 5. On failure, the whole window rolls back; cursor unchanged; retry is safe
 
-Phase 2 buffer flush ordering:
+Error reprocessing retains per-handler SAVEPOINTs so it can isolate a failed
+replay and continue. Attribute upserts use PostgreSQL 18 `RETURNING OLD` to
+capture the previous value without a separate SELECT. Identical values remain
+no-ops; activity details preserve the exact old and new uint64 values.
+
+Buffer flush ordering:
 
 | Table | Order within flush | Order across rows |
 |-------|--------------------|-------------------|
 | `structs.ledger` | append order | block order, then chain event order |
 | `structs.defusion` | append order | block order, then chain event order |
-| `structs.planet_activity` | append order; `seq` assigned by `nextPlanetActivitySeq` UPSERT at handler time, so `(planet_id, seq)` stays unique and monotonic | block order, then chain event order |
+| `structs.planet_activity` | append order; sequence ranges allocated once per nonempty block and planet at flush time, preserving unique, monotonic `(planet_id, seq)` | block order, then chain event order |
 | `structs.stat_*` | append order | block order, then chain event order |
 
 `time` on `structs.stat_*` rows now comes from `bctx.BlockTime` instead of

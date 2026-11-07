@@ -65,6 +65,9 @@ var structAttrLabels = [...]string{
 // `view.struct_status.destroyed` off of.
 const structDestroyedBit = 32
 
+// PostgreSQL 18 RETURNING OLD captures the previous value in the same
+// statement as the write. A new row starts at zero; unchanged rows return
+// no result and produce no stats or activity.
 const structAttributeUpsertSQL = `
 INSERT INTO structs.struct_attribute (
     id, object_id, object_type, sub_index, attribute_type, val, updated_at
@@ -72,7 +75,8 @@ INSERT INTO structs.struct_attribute (
 ON CONFLICT (id) DO UPDATE
    SET val        = EXCLUDED.val,
        updated_at = EXCLUDED.updated_at
- WHERE structs.struct_attribute.val IS DISTINCT FROM EXCLUDED.val`
+ WHERE structs.struct_attribute.val IS DISTINCT FROM EXCLUDED.val
+ RETURNING CASE WHEN OLD.id IS NULL THEN '0' ELSE trunc(OLD.val)::text END`
 
 // stat_struct_health / stat_struct_status emits move through the
 // per-block buffer (see internal/buffers); the legacy SQL constants
@@ -88,11 +92,6 @@ UPDATE structs.struct
        destroyed_block  = $2
  WHERE id = $1`
 
-// structAttrPrevSelectSQL grabs the existing val so we can pass OLD.val
-// to the planet_activity emit functions, mirroring the dropped SQL
-// trigger's access to OLD.val.
-const structAttrPrevSelectSQL = `SELECT trunc(val)::text FROM structs.struct_attribute WHERE id = $1`
-
 func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.StructAttribute](raw)
 	if err != nil {
@@ -106,15 +105,6 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 		return fmt.Errorf("struct_attribute: %w", err)
 	}
 
-	var oldText string
-	if err := tx.QueryRow(ctx, structAttrPrevSelectSQL, p.AttributeID).Scan(&oldText); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("struct_attribute prev id=%s: %w", p.AttributeID, err)
-	}
-
-	oldVal, err := parseAttributeValue(oldText)
-	if err != nil {
-		return fmt.Errorf("struct_attribute prev id=%s: %w", p.AttributeID, err)
-	}
 	rawObjectID := strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
 
 	// Empty or "0" → val 0; keep the row so updated_since sees clears.
@@ -135,19 +125,24 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	}
 	attrLabel := structAttrLabelFor(attrType)
 
-	tag, err := tx.Exec(ctx, structAttributeUpsertSQL,
+	var oldText string
+	err = tx.QueryRow(ctx, structAttributeUpsertSQL,
 		p.AttributeID,
 		rawObjectID,
 		nullIfEmpty(objTypeLabel),
 		subIndex,
 		nullIfEmpty(attrLabel),
 		payload.Uint64(val).PgValue(),
-	)
+	).Scan(&oldText)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("struct_attribute upsert id=%s: %w", p.AttributeID, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return nil
+	oldVal, err := parseAttributeValue(oldText)
+	if err != nil {
+		return fmt.Errorf("struct_attribute prev id=%s: %w", p.AttributeID, err)
 	}
 
 	switch attrType {
@@ -172,7 +167,7 @@ func (structAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 			// The chain does not emit EventStructDefenderClear when the
 			// *protected* struct dies, so orphaned defender rows would
 			// otherwise linger. Clean them up here, in the same tx as
-			// the destroy stamp. Gated by the outer RowsAffected check
+			// the destroy stamp. Gated by the outer upsert returning a row
 			// so a re-emitted identical status is a no-op.
 			if err := clearDefendersOfDestroyedProtected(ctx, tx, bctx, rawObjectID, objIndex); err != nil {
 				return fmt.Errorf("struct_attribute destroy defender cleanup id=%s: %w", rawObjectID, err)

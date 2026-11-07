@@ -15,7 +15,7 @@ import (
 )
 
 // SeverityError marks a HandlerError as a real failure: the handler aborted,
-// the SAVEPOINT was rolled back, and the operator likely needs to inspect
+// its transaction must be rolled back, and the operator likely needs to inspect
 // and/or replay via `sync-state reprocess-errors`. This is the default.
 const SeverityError = "error"
 
@@ -121,13 +121,21 @@ func (r *Router) Count() int { return len(r.handlers) }
 // The ingestion caller aborts the block/window on SeverityError and persists
 // diagnostics outside that transaction. Explicit legacy warnings may continue.
 //
-// Each handler runs inside its own SAVEPOINT so a failing PG statement only
-// kills that handler's effect — the per-block tx remains usable for the
-// remaining handlers, raw mirror, current_block, block_log, and cursor
-// writes. Without this, one failure would cascade as SQLSTATE 25P02
-// ("current transaction is aborted") through every subsequent write in
-// the block.
-func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, compositeKey string, raw json.RawMessage) (he *HandlerError, fatal error) {
+// Dispatch isolates each handler with a SAVEPOINT so callers such as error
+// reprocessing can recover from failures and continue using the transaction.
+func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, compositeKey string, raw json.RawMessage) (*HandlerError, error) {
+	return r.dispatch(ctx, tx, bctx, compositeKey, raw, true)
+}
+
+// DispatchAtomic runs a handler directly in the caller's block/window
+// transaction. On a fatal error or any HandlerError other than SeverityWarn,
+// the caller MUST stop dispatching, roll back the transaction, and discard
+// its buffers and dirty sets. No per-handler savepoint or snapshot is made.
+func (r *Router) DispatchAtomic(ctx context.Context, tx pgx.Tx, bctx BlockContext, compositeKey string, raw json.RawMessage) (*HandlerError, error) {
+	return r.dispatch(ctx, tx, bctx, compositeKey, raw, false)
+}
+
+func (r *Router) dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, compositeKey string, raw json.RawMessage, isolated bool) (he *HandlerError, fatal error) {
 	h := r.Lookup(compositeKey)
 	if h == nil {
 		if IgnoreUnknown(compositeKey) {
@@ -158,116 +166,69 @@ func (r *Router) Dispatch(ctx context.Context, tx pgx.Tx, bctx BlockContext, com
 		return nil, nil
 	}
 
-	// SAVEPOINT around the handler so its failures don't poison the
-	// outer per-block tx. pgx.Tx.Begin returns a nested transaction
-	// implemented as SAVEPOINT (commit → RELEASE, rollback → ROLLBACK
-	// TO SAVEPOINT). If the SAVEPOINT itself can't be created (e.g.
-	// outer tx already aborted), fall back to direct dispatch on tx and
-	// let the caller see the cascade.
-	sp, spErr := tx.Begin(ctx)
-	if spErr != nil {
+	failure := func(err error, severity string) *HandlerError {
 		return &HandlerError{
-			CompositeKey: compositeKey,
-			Payload:      raw,
-			Error:        fmt.Sprintf("savepoint begin: %v", spErr),
-			Severity:     SeverityError,
-			TxIndex:      ptrIfNotNeg(bctx.TxIndex),
-			MsgIndex:     ptrIfNotNeg(bctx.MsgIndex),
-			EventIndex:   ptrIfNotNeg(bctx.EventIndex),
-		}, nil
+			CompositeKey: compositeKey, Payload: raw, Error: err.Error(), Severity: severity,
+			TxIndex: ptrIfNotNeg(bctx.TxIndex), MsgIndex: ptrIfNotNeg(bctx.MsgIndex),
+			EventIndex: ptrIfNotNeg(bctx.EventIndex),
+		}
 	}
 
-	// Snapshot the per-block append-only buffer so any rows the handler
-	// pushes before failing get truncated alongside the SAVEPOINT
-	// rollback. Nil-safe — only the sync orchestrator wires Buf.
-	bufSnap := bctx.Buf.Snapshot()
-	dirtySnap := bctx.Dirty.Snapshot()
-
-	// Convert a panic into a source-correlated failure. The caller rolls back
-	// the outer block/window and keeps the diagnostic for complete recovery.
-	defer func() {
-		if rec := recover(); rec != nil {
-			_ = sp.Rollback(ctx)
+	workTx := tx
+	rollback := func() {}
+	commit := func() error { return nil }
+	if isolated {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return failure(fmt.Errorf("savepoint begin: %w", err), SeverityError), nil
+		}
+		workTx = sp
+		bufSnap := bctx.Buf.Snapshot()
+		dirtySnap := bctx.Dirty.Snapshot()
+		restore := func() {
 			bctx.Buf.Restore(bufSnap)
 			bctx.Dirty.Restore(dirtySnap)
-			he = &HandlerError{
-				CompositeKey: compositeKey,
-				Payload:      raw,
-				Error:        fmt.Sprintf("panic: %v", rec),
-				Severity:     SeverityError,
-				Stack:        string(debug.Stack()),
-				TxIndex:      ptrIfNotNeg(bctx.TxIndex),
-				MsgIndex:     ptrIfNotNeg(bctx.MsgIndex),
-				EventIndex:   ptrIfNotNeg(bctx.EventIndex),
+		}
+		rollback = func() {
+			_ = sp.Rollback(ctx)
+			restore()
+		}
+		commit = func() error {
+			err := sp.Commit(ctx)
+			if err != nil {
+				restore()
 			}
+			return err
+		}
+	}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			rollback()
+			he = failure(fmt.Errorf("panic: %v", rec), SeverityError)
+			he.Stack = string(debug.Stack())
 		}
 	}()
 
-	if err := h.Handle(ctx, sp, bctx, raw); err != nil {
-		// ErrSkipWithWarn = handler made a deterministic decision to
-		// skip this event without dirtying the savepoint. Commit (=
-		// RELEASE SAVEPOINT) so any incidental no-op writes the
-		// handler did before deciding to skip still settle into the
-		// outer tx, then emit a severity='warn' row for visibility.
-		// We don't rollback because the contract is "no side effects"
-		// — if the handler violated that, the writes are harmless and
-		// the warn row records what happened either way.
-		if errors.Is(err, ErrSkipWithWarn) {
-			if cerr := sp.Commit(ctx); cerr != nil {
-				bctx.Buf.Restore(bufSnap)
-				bctx.Dirty.Restore(dirtySnap)
-				// Commit-after-warn failure means the outer tx is in
-				// trouble; surface as a real error rather than warn.
-				return &HandlerError{
-					CompositeKey: compositeKey,
-					Payload:      raw,
-					Error:        fmt.Sprintf("savepoint commit after warn: %v (original: %v)", cerr, err),
-					Severity:     SeverityError,
-					TxIndex:      ptrIfNotNeg(bctx.TxIndex),
-					MsgIndex:     ptrIfNotNeg(bctx.MsgIndex),
-					EventIndex:   ptrIfNotNeg(bctx.EventIndex),
-				}, nil
-			}
-			return &HandlerError{
-				CompositeKey: compositeKey,
-				Payload:      raw,
-				Error:        err.Error(),
-				Severity:     SeverityWarn,
-				TxIndex:      ptrIfNotNeg(bctx.TxIndex),
-				MsgIndex:     ptrIfNotNeg(bctx.MsgIndex),
-				EventIndex:   ptrIfNotNeg(bctx.EventIndex),
-			}, nil
-		}
-		// Real error path: ROLLBACK TO SAVEPOINT — the outer tx
-		// survives. Ignore rollback errors (handler error is more
-		// interesting; outer tx may still be alive).
-		_ = sp.Rollback(ctx)
-		bctx.Buf.Restore(bufSnap)
-		bctx.Dirty.Restore(dirtySnap)
-		return &HandlerError{
-			CompositeKey: compositeKey,
-			Payload:      raw,
-			Error:        err.Error(),
-			Severity:     SeverityError,
-			TxIndex:      ptrIfNotNeg(bctx.TxIndex),
-			MsgIndex:     ptrIfNotNeg(bctx.MsgIndex),
-			EventIndex:   ptrIfNotNeg(bctx.EventIndex),
-		}, nil
+	err := h.Handle(ctx, workTx, bctx, raw)
+	// Releasing a savepoint used to expose SQL failures even when a handler
+	// swallowed the error or mislabeled it as a warning. Preserve that check
+	// without sending another query on the atomic ingestion path.
+	if !isolated && (err == nil || errors.Is(err, ErrSkipWithWarn)) && tx.Conn().PgConn().TxStatus() == 'E' {
+		return failure(fmt.Errorf("handler left transaction aborted (result: %v)", err), SeverityError), nil
 	}
-	if err := sp.Commit(ctx); err != nil {
-		bctx.Buf.Restore(bufSnap)
-		bctx.Dirty.Restore(dirtySnap)
-		// RELEASE SAVEPOINT failed — handler's writes are lost; log
-		// and continue. The outer tx is likely still alive.
-		return &HandlerError{
-			CompositeKey: compositeKey,
-			Payload:      raw,
-			Error:        fmt.Sprintf("savepoint commit: %v", err),
-			Severity:     SeverityError,
-			TxIndex:      ptrIfNotNeg(bctx.TxIndex),
-			MsgIndex:     ptrIfNotNeg(bctx.MsgIndex),
-			EventIndex:   ptrIfNotNeg(bctx.EventIndex),
-		}, nil
+	if err != nil {
+		if errors.Is(err, ErrSkipWithWarn) {
+			if cerr := commit(); cerr != nil {
+				return failure(fmt.Errorf("savepoint commit after warn: %w (original: %v)", cerr, err), SeverityError), nil
+			}
+			return failure(err, SeverityWarn), nil
+		}
+		rollback()
+		return failure(err, SeverityError), nil
+	}
+	if err := commit(); err != nil {
+		return failure(fmt.Errorf("savepoint commit: %w", err), SeverityError), nil
 	}
 	return nil, nil
 }
@@ -279,7 +240,7 @@ type HandlerError struct {
 	CompositeKey string
 	Payload      json.RawMessage
 	Error        string
-	// Severity is SeverityError (real failure, rolled back) or
+	// Severity is SeverityError (real failure requiring rollback) or
 	// SeverityWarn (handler returned ErrSkipWithWarn, no rollback).
 	// Defaults to SeverityError when empty so older callers that don't
 	// set it explicitly still get the safer label.

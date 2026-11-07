@@ -230,7 +230,8 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 }
 
 // dispatchEvents walks finalize_block + per-tx events in deterministic order
-// and calls Router.Dispatch on each one. Composite keys are
+// and calls Router.DispatchAtomic on each one. Any hard failure aborts the
+// caller's transaction and discards its buffers and dirty sets. Composite keys are
 // "<event.Type>.<attribute.Key>" per cache.attributes' historical encoding.
 //
 // Within an event we walk attributes in attribute order, dedup'd by key
@@ -279,7 +280,7 @@ func (s *Syncer) dispatchOneEvent(ctx context.Context, tx pgx.Tx, bctx events.Bl
 				TxIndex: coordinatePtr(bctx.TxIndex), MsgIndex: coordinatePtr(bctx.MsgIndex), EventIndex: coordinatePtr(bctx.EventIndex)})
 			return err
 		}
-		he, fatal := s.router.Dispatch(ctx, tx, bctx, ev.Type, raw)
+		he, fatal := s.router.DispatchAtomic(ctx, tx, bctx, ev.Type, raw)
 		if he != nil {
 			*errs = append(*errs, *he)
 			if he.Severity != events.SeverityWarn {
@@ -300,7 +301,7 @@ func (s *Syncer) dispatchOneEvent(ctx context.Context, tx pgx.Tx, bctx events.Bl
 		compositeKey := ev.Type + "." + a.Key
 		raw := encodeAttributeValue(a.Value)
 
-		he, fatal := s.router.Dispatch(ctx, tx, bctx, compositeKey, raw)
+		he, fatal := s.router.DispatchAtomic(ctx, tx, bctx, compositeKey, raw)
 		if he != nil {
 			*errs = append(*errs, *he)
 			if he.Severity != events.SeverityWarn {

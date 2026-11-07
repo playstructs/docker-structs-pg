@@ -150,7 +150,8 @@ Summary: 1 resolved, 1 skipped, 1 failed
 
 - Each replayed block runs in its own per-block transaction. A handler
   that fails leaves its row in `handler_error_log` AND rolls back its
-  own writes (via the same SAVEPOINT isolation the ingester uses).
+  own writes via per-handler SAVEPOINT isolation. Normal ingestion instead
+  aborts its entire block/window on a required failure.
 - Successful rows are marked resolved **after** the per-block commit,
   so we never end up with a "resolved" row whose writes were rolled
   back.

@@ -22,8 +22,8 @@ import (
 // v0.18.0 planet_activity derivation: there is no dedicated chain event for
 // the new shield_change / block_raid_start categories, so this handler emits
 // them from the planetaryShield (attrType 0) and blockStartRaid (attrType 10)
-// attributes. We read the prior structs.planet_attribute.val before writing
-// and emit a timeline row carrying both the old and new value whenever it
+// attributes. The upsert returns the prior structs.planet_attribute.val
+// and we emit a timeline row carrying both the old and new value whenever it
 // changes (including a change to zero). planet_id is the attribute's own
 // object id ("2-<index>").
 //
@@ -71,6 +71,8 @@ var planetAttrLabels = [...]string{
 	"oreRefiningActiveQuantity",
 }
 
+// PostgreSQL 18 returns OLD.val atomically with the write, avoiding a
+// separate lookup. A new row starts at zero; unchanged rows return no result.
 const planetAttributeUpsertSQL = `
 INSERT INTO structs.planet_attribute (
     id, object_id, object_type, attribute_type, val, updated_at
@@ -78,7 +80,8 @@ INSERT INTO structs.planet_attribute (
 ON CONFLICT (id) DO UPDATE
    SET val        = EXCLUDED.val,
        updated_at = EXCLUDED.updated_at
- WHERE structs.planet_attribute.val IS DISTINCT FROM EXCLUDED.val`
+ WHERE structs.planet_attribute.val IS DISTINCT FROM EXCLUDED.val
+ RETURNING CASE WHEN OLD.id IS NULL THEN '0' ELSE trunc(OLD.val)::text END`
 
 func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockContext, raw json.RawMessage) error {
 	p, err := payload.Decode[payload.PlanetAttribute](raw)
@@ -91,13 +94,6 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	attrType, objTypeID, objIndex, err := parsePlanetAttributeID(p.AttributeID)
 	if err != nil {
 		return fmt.Errorf("planet_attribute: %w", err)
-	}
-
-	// Capture the prior stored value before mutating so shield / raid /
-	// ore-clock activity can report the change (including a clear to 0).
-	oldVal, err := planetAttributePrevVal(ctx, tx, p.AttributeID)
-	if err != nil {
-		return err
 	}
 
 	// Empty or "0" → newVal 0; keep the row so updated_since sees clears.
@@ -113,14 +109,24 @@ func (planetAttributeHandler) Handle(ctx context.Context, tx pgx.Tx, bctx BlockC
 	attrLabel := planetAttrLabelFor(attrType)
 	rawObjectID := strconv.Itoa(objTypeID) + "-" + strconv.Itoa(objIndex)
 
-	if _, err := tx.Exec(ctx, planetAttributeUpsertSQL,
+	var oldText string
+	err = tx.QueryRow(ctx, planetAttributeUpsertSQL,
 		p.AttributeID,
 		rawObjectID,
 		nullIfEmpty(objTypeLabel),
 		nullIfEmpty(attrLabel),
 		payload.Uint64(newVal).PgValue(),
-	); err != nil {
+	).Scan(&oldText)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("planet_attribute upsert id=%s: %w", p.AttributeID, err)
+	}
+
+	oldVal, err := parseAttributeValue(oldText)
+	if err != nil {
+		return fmt.Errorf("planet_attribute prev val id=%s: %w", p.AttributeID, err)
 	}
 
 	if err := emitPlanetAttributeActivity(ctx, tx, bctx, attrType, objTypeID, objIndex, oldVal, newVal); err != nil {
@@ -138,23 +144,6 @@ const (
 	planetAttrTypeBlockStartOreMine   = 12
 	planetAttrTypeBlockStartOreRefine = 13
 )
-
-const planetAttributePrevValSQL = `SELECT trunc(val)::text FROM structs.planet_attribute WHERE id = $1`
-
-// planetAttributePrevVal returns the currently-stored val for the attribute,
-// or 0 when no row exists (a not-yet-set attribute reads as zero, matching
-// the chain's proto3 default semantics used by the keep-zero clear path).
-func planetAttributePrevVal(ctx context.Context, tx pgx.Tx, id string) (uint64, error) {
-	var val string
-	err := tx.QueryRow(ctx, planetAttributePrevValSQL, id).Scan(&val)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("planet_attribute prev val id=%s: %w", id, err)
-	}
-	return parseAttributeValue(val)
-}
 
 // emitPlanetAttributeActivity buffers a planet_activity row when a
 // tracked planet-scoped attribute changes. Shield / raid carry old+new
