@@ -1,7 +1,6 @@
 package bank
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -30,7 +29,7 @@ func TestCoins_ExactSetsAndInvalidAmounts(t *testing.T) {
 func TestTransferWithEmptyRecipient(t *testing.T) {
 	event := transferEventTest("sender", "", "1000000ualpha")
 	buf := buffers.New()
-	if err := ProcessBlock(context.Background(), nil, buf, 1907566, time.Now(), "test", nil,
+	if err := ProcessBlock(buf, 1907566, time.Now(), "test", nil,
 		[]rpc.TxResult{{Events: []rpc.Event{event}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +73,7 @@ func TestBank_MixedMessagesOnlySuppressMatchedFunding(t *testing.T) {
 	stream = append(stream, funding...)
 	stream = append(stream, withMessage(transferEventTest("vault", "module", "10ualpha"), "1"))
 	buf := buffers.New()
-	if err := ProcessBlock(context.Background(), nil, buf, 1, time.Now(), "test", nil, []rpc.TxResult{{Events: stream}}); err != nil {
+	if err := ProcessBlock(buf, 1, time.Now(), "test", nil, []rpc.TxResult{{Events: stream}}); err != nil {
 		t.Fatal(err)
 	}
 	sent := map[string]string{}
@@ -104,7 +103,7 @@ func TestBank_RefinementOnlySuppressesMintedVaultCredit(t *testing.T) {
 		stream[i] = withMessage(stream[i], "0")
 	}
 	buf := buffers.New()
-	if err := ProcessBlock(context.Background(), nil, buf, 1, time.Now(), "test", nil, []rpc.TxResult{{Events: stream}}); err != nil {
+	if err := ProcessBlock(buf, 1, time.Now(), "test", nil, []rpc.TxResult{{Events: stream}}); err != nil {
 		t.Fatal(err)
 	}
 	credits := 0
@@ -133,7 +132,7 @@ func TestBank_RedelegationOwnersFollowActualOperations(t *testing.T) {
 		stream[i] = withMessage(stream[i], "0")
 	}
 	buf := buffers.New()
-	if err := ProcessBlock(context.Background(), nil, buf, 1, time.Now(), "test", nil, []rpc.TxResult{{Events: stream}}); err != nil {
+	if err := ProcessBlock(buf, 1, time.Now(), "test", nil, []rpc.TxResult{{Events: stream}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(buf.Defusion) != 2 || buf.Defusion[0].DelegatorAddress != "owner-a" || buf.Defusion[1].DelegatorAddress != "owner-b" {
@@ -145,7 +144,7 @@ func TestBank_EmptyCompletionsHaveNoFinancialLeg(t *testing.T) {
 	for _, kind := range []string{"complete_unbonding", "complete_redelegation"} {
 		ev := rpc.Event{Type: kind, Attributes: []rpc.Attribute{{Key: "amount", Value: ""}, {Key: "validator", Value: "source"}, {Key: "source_validator", Value: "source"}, {Key: "destination_validator", Value: "dest"}, {Key: "delegator", Value: "owner"}}}
 		buf := buffers.New()
-		if err := ProcessBlock(context.Background(), nil, buf, 1, time.Now(), "test", []rpc.Event{ev}, nil); err != nil {
+		if err := ProcessBlock(buf, 1, time.Now(), "test", []rpc.Event{ev}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if len(buf.Ledger) != 0 || len(buf.Defusion) != 0 {

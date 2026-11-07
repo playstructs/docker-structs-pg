@@ -28,7 +28,7 @@ import (
 // the same rows the legacy per-INSERT path used to materialise.
 func processAndFlush(ctx context.Context, tx pgx.Tx, height int64, blockTime time.Time, finalize []rpc.Event, txResults []rpc.TxResult) error {
 	buf := buffers.New()
-	if err := ProcessBlock(ctx, tx, buf, height, blockTime, "test", finalize, txResults); err != nil {
+	if err := ProcessBlock(buf, height, blockTime, "test", finalize, txResults); err != nil {
 		return err
 	}
 	_, err := buf.Flush(ctx, tx)

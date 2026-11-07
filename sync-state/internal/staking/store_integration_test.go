@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -50,26 +51,49 @@ func TestInvalidateDiscoversOwners(t *testing.T) {
 		player, storeAddressB, guild, storeAddressC); err != nil {
 		t.Fatal(err)
 	}
+	// The player insert approved its primary address. The guild vault also
+	// appears as an approved player address, but vault ownership takes priority.
+	const revoked = "structs1ssssssssssssssssssssssssssssssssssssss"
+	if _, err := tx.Exec(ctx, `INSERT INTO structs.player_address(address,player_id,status) VALUES
+		($1,$3,'revoked'), ($2,$3,'approved')`, revoked, storeAddressC, player); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
-		name string
-		mark func(*readmodel.Dirty, string)
-		id   string
-		want string
+		name              string
+		addresses         []string
+		playerID, guildID string
+		want              []string
 	}{
-		{"address", (*readmodel.Dirty).Address, storeAddressB, storeAddressB},
-		{"player", (*readmodel.Dirty).Player, player, storeAddressB},
-		{"guild", (*readmodel.Dirty).Guild, guild, storeAddressC},
+		{name: "address", addresses: []string{storeAddressB}, want: []string{storeAddressB}},
+		{name: "player", playerID: player, want: []string{testAddress, storeAddressB}},
+		{name: "guild", guildID: guild, want: []string{storeAddressC}},
+		{name: "mixed", addresses: []string{testAddress, revoked}, playerID: player, guildID: guild,
+			want: []string{testAddress, storeAddressB, storeAddressC}},
+		{name: "revoked", addresses: []string{revoked}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dirty := readmodel.NewDirty()
-			tc.mark(dirty, tc.id)
+			for _, address := range tc.addresses {
+				dirty.Address(address)
+			}
+			dirty.Player(tc.playerID)
+			dirty.Guild(tc.guildID)
 			chain := storeChain + "-" + tc.name
 			if err := Invalidate(ctx, tx, chain, 100, dirty, Changes{}); err != nil {
 				t.Fatal(err)
 			}
-			var height int64
-			if err := tx.QueryRow(ctx, `SELECT required_height FROM sync_state.native_staking_snapshot WHERE chain_id=$1 AND address=$2`, chain, tc.want).Scan(&height); err != nil || height != 100 {
-				t.Fatalf("owner %s: height=%d err=%v", tc.want, height, err)
+			rows, err := tx.Query(ctx, `SELECT address FROM sync_state.native_staking_snapshot WHERE chain_id=$1 AND required_height=100`, chain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Strings(got)
+			sort.Strings(tc.want)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("discovered %v; want %v", got, tc.want)
 			}
 		})
 	}

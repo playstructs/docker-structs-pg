@@ -6,8 +6,8 @@
 //
 // Safety model: handlers run inside a SAVEPOINT. The router snapshots the
 // buffer lengths before calling Handle and restores them on rollback so
-// a failing handler's appended rows don't leak into the flush. Same
-// pattern wraps the bank.ProcessBlock savepoint in the sync layer.
+// a failing handler's appended rows don't leak into the flush. Bank processing
+// also restores buffer lengths on error before the outer transaction rolls back.
 //
 // This package intentionally has no DB dependency beyond pgx — it does
 // not know about Querier abstractions or business logic.

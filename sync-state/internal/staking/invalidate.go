@@ -59,8 +59,12 @@ LEFT JOIN structs.reactor r ON r.id=wanted.id`, ids)
 	if len(dirty.Addresses) == 0 && len(dirty.Players) == 0 && len(dirty.Guilds) == 0 {
 		return nil
 	}
+	// Separate predicates let PostgreSQL use the address and owner indexes
+	// independently. A wallet can match both branches in the same block.
 	rows, err := tx.Query(ctx, `SELECT address FROM structs.asset_owner
-WHERE address=ANY($1::varchar[]) OR owner_id=ANY($2::varchar[]) OR owner_id=ANY($3::varchar[])`,
+WHERE address=ANY($1::varchar[])
+UNION
+SELECT address FROM structs.asset_owner WHERE owner_id=ANY($2::varchar[] || $3::varchar[])`,
 		dirty.AddressIDs(), dirty.PlayerIDs(), dirty.GuildIDs())
 	if err != nil {
 		return err

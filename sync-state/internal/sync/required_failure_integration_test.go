@@ -31,7 +31,7 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 	if err := db.CheckEconomySchema(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"block", "window", "bank"} {
+	for _, mode := range []string{"block", "window", "bank", "bank-window"} {
 		t.Run(mode, func(t *testing.T) {
 			chain := "required-failure-" + mode
 			t.Cleanup(func() {
@@ -48,26 +48,32 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 				{Type: "structs.structs.EventReactorStakeCap", Attributes: []rpc.Attribute{{Key: "active", Value: "true"}}},
 			}
 			wantErrorKey := "structs.structs.EventReactorStakeCap"
-			if mode == "bank" {
+			bankFailure := mode == "bank" || mode == "bank-window"
+			if bankFailure {
 				wantErrorKey = "bank.process_block"
-				bad.FinalizeBlockEvents = []rpc.Event{{Type: "unbond", Attributes: []rpc.Attribute{
+				// Buffer both transfer legs before the invalid unbond aborts the block.
+				bad.FinalizeBlockEvents = []rpc.Event{{Type: "transfer", Attributes: []rpc.Attribute{
+					{Key: "sender", Value: "bank-rollback-sender"}, {Key: "recipient", Value: "bank-rollback-recipient"},
+					{Key: "amount", Value: "10ualpha"},
+				}}, {Type: "unbond", Attributes: []rpc.Attribute{
 					{Key: "amount", Value: "1ualpha"}, {Key: "validator", Value: "validator-test"},
 					{Key: "delegator", Value: "delegator-test"}, {Key: "completion_time", Value: "invalid"},
 				}}}
 			}
-			if mode == "window" {
+			if mode == "window" || mode == "bank-window" {
 				err = s.applyBulkWindow(ctx, []*BlockBundle{good, bad}, bad.Height)
 			} else {
 				bad.FinalizeBlockEvents = append(good.FinalizeBlockEvents, bad.FinalizeBlockEvents...)
 				err = s.applyBlock(ctx, bad, bad.Height)
 			}
-			if err == nil || !strings.Contains(err.Error(), map[bool]string{true: "bank", false: "required event"}[mode == "bank"]) {
+			if err == nil || !strings.Contains(err.Error(), map[bool]string{true: "bank", false: "required event"}[bankFailure]) {
 				t.Fatalf("expected required failure, got %v", err)
 			}
 			for _, query := range []string{
 				`SELECT count(*) FROM structs.vault WHERE address='atomic-vault-test'`,
 				`SELECT count(*) FROM sync_state.sync_cursor WHERE chain_id=$1`,
 				`SELECT count(*) FROM sync_state.block_log WHERE chain_id=$1`,
+				`SELECT count(*) FROM structs.ledger WHERE chain_id=$1 AND block_height=990992`,
 			} {
 				var count int
 				var args []any

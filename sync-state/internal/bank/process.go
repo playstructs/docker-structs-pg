@@ -1,11 +1,8 @@
 package bank
 
 import (
-	"context"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"sync-state/internal/buffers"
 	"sync-state/internal/rpc"
@@ -24,13 +21,7 @@ import (
 // Cross-event correlation is scoped to execution phase and message, with
 // matching address/amount or staking operation evidence. Financial source
 // coordinates remain the original unfiltered RPC ordinals.
-//
-// tx is kept on the signature for symmetry with the legacy code path and
-// to leave room for future bank handlers that need direct query access;
-// today only the buffer is touched.
 func ProcessBlock(
-	ctx context.Context,
-	tx pgx.Tx,
 	buf *buffers.Buffer,
 	height int64,
 	blockTime time.Time,
@@ -63,18 +54,16 @@ func ProcessBlock(
 			return fmt.Errorf("phase=%d tx=%d event=%d %s: %w", p.Phase, p.TxIndex, p.EventIndex, p.Event.Type, err)
 		}
 	}
-	_ = ctx
-	_ = tx
 	return nil
 }
 
 // ProcessBuffer retains the original stream and coordinates, just like ingest.
-func ProcessBuffer(ctx context.Context, tx pgx.Tx, buf *buffers.Buffer, blockTime time.Time, chainID string, evBuf EventBuffer) error {
+func ProcessBuffer(buf *buffers.Buffer, blockTime time.Time, chainID string, evBuf EventBuffer) error {
 	txs := make([]rpc.TxResult, len(evBuf.Txs))
 	for i, evs := range evBuf.Txs {
 		txs[i].Events = evs
 	}
-	return ProcessBlock(ctx, tx, buf, evBuf.Height, blockTime, chainID, evBuf.Finalize, txs)
+	return ProcessBlock(buf, evBuf.Height, blockTime, chainID, evBuf.Finalize, txs)
 }
 
 // Coin expansion never changes source coordinates or semantic leg numbers.

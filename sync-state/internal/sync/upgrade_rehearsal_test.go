@@ -77,7 +77,7 @@ func TestCapturedV022UpgradeWire(t *testing.T) {
 		t.Fatalf("captured upgrade envelopes were truncated: %v", counts)
 	}
 	buf := buffers.New()
-	if err := bank.ProcessBlock(context.Background(), nil, buf, bundle.Height, bundle.BlockTime, bundle.ChainID,
+	if err := bank.ProcessBlock(buf, bundle.Height, bundle.BlockTime, bundle.ChainID,
 		bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ FROM pg_database WHERE datname=current_database()`).Scan(&allowed); err != nil |
 		t.Fatal(err)
 	}
 	expected := buffers.New()
-	if err := bank.ProcessBlock(ctx, sp, expected, bundle.Height, bundle.BlockTime, bundle.ChainID,
+	if err := bank.ProcessBlock(expected, bundle.Height, bundle.BlockTime, bundle.ChainID,
 		bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
 		t.Fatal(err)
 	}

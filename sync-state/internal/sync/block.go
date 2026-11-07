@@ -118,34 +118,17 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		return nil, fmt.Errorf("dispatch h=%d: %w", bundle.Height, err)
 	}
 
-	// Snapshot the buffer around the bank savepoint so a bank
-	// ProcessBlock failure truncates the rows it appended before
-	// returning. Mirrors the per-handler snapshot/restore in
-	// events.Router.Dispatch.
+	// Bank processing only appends to buf. A bank error aborts the outer
+	// transaction, and restoring the snapshot discards any partial legs.
 	bankBufSnap := buf.Snapshot()
-	if bankSP, bankErr := tx.Begin(ctx); bankErr != nil {
-		pendingErrs = append(pendingErrs, events.HandlerError{
-			CompositeKey: "bank.process_block",
-			Error:        fmt.Sprintf("savepoint begin: %v", bankErr),
-			Severity:     events.SeverityError,
-		})
-	} else if err := bank.ProcessBlock(ctx, bankSP, buf, bundle.Height, bundle.BlockTime, bundle.ChainID, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
-		_ = bankSP.Rollback(ctx)
+	if err := bank.ProcessBlock(buf, bundle.Height, bundle.BlockTime, bundle.ChainID, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
 		buf.Restore(bankBufSnap)
 		pendingErrs = append(pendingErrs, events.HandlerError{
 			CompositeKey: "bank.process_block",
 			Error:        err.Error(),
 			Severity:     events.SeverityError,
 		})
-	} else if err := bankSP.Commit(ctx); err != nil {
-		pendingErrs = append(pendingErrs, events.HandlerError{
-			CompositeKey: "bank.process_block",
-			Error:        fmt.Sprintf("savepoint commit: %v", err),
-			Severity:     events.SeverityError,
-		})
-	}
-	if len(pendingErrs) > 0 && pendingErrs[len(pendingErrs)-1].CompositeKey == "bank.process_block" {
-		return nil, fmt.Errorf("bank h=%d: %s", bundle.Height, pendingErrs[len(pendingErrs)-1].Error)
+		return nil, fmt.Errorf("bank h=%d: %w", bundle.Height, err)
 	}
 
 	// The buffer still flushes per block: the planet_activity COPY trigger

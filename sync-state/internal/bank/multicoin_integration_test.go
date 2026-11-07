@@ -16,7 +16,7 @@ func TestProcessBlock_MultiCoinReplayPreservesEveryDenomination(t *testing.T) {
 		captured := Capture(990990, nil, []rpc.TxResult{{Events: stream}})
 		for attempt := range 2 {
 			buf := buffers.New()
-			if err := ProcessBuffer(ctx, tx, buf, fixedTime(), "multi-coin-test", captured); err != nil {
+			if err := ProcessBuffer(buf, fixedTime(), "multi-coin-test", captured); err != nil {
 				t.Fatal(err)
 			}
 			deltas, err := buf.Flush(ctx, tx)

@@ -62,7 +62,7 @@ func receiptEvents(address, validator string, amount string, completion time.Tim
 func writeReceipts(t *testing.T, ctx context.Context, tx pgx.Tx, height int64, events []rpc.Event) {
 	t.Helper()
 	b := buffers.New()
-	if err := bank.ProcessBlock(ctx, tx, b, height, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), storeChain, nil, []rpc.TxResult{{Events: events}}); err != nil {
+	if err := bank.ProcessBlock(b, height, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), storeChain, nil, []rpc.TxResult{{Events: events}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.Flush(ctx, tx); err != nil {
