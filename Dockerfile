@@ -78,7 +78,7 @@ RUN addgroup --system structs && \
     adduser --system --home /src/structs --shell /bin/bash --group structs
 
 # Clone down structs-pg for database schematics
-ARG STRUCTS_PG_REF=400e1c1056a4c7b0dbe5465ac729375c77572c21
+ARG STRUCTS_PG_REF=fa816f7d75d8446b3df9b65dff52ffc6e16fd8ba
 ENV STRUCTS_PG_REF=${STRUCTS_PG_REF} \
     STRUCTS_PG_MIGRATION_MODE=main \
     STRUCTS_PG_MIGRATION_TARGET=latest
@@ -97,7 +97,8 @@ RUN test "${#STRUCTS_PG_REF}" = 40 && \
     test -f structs-pg/deploy/table-player-address-20261030-activation-instance.sql && \
     test -f structs-pg/deploy/role-structs-webapp-20261030-address-permission.sql && \
     test -f structs-pg/deploy/role-structs-webapp-20261030-device-metadata.sql && \
-    test -f structs-pg/deploy/role-structs-webapp-20261030-work.sql
+    test -f structs-pg/deploy/role-structs-webapp-20261030-work.sql && \
+    test -f structs-pg/deploy/trigger-sync-state-20261107-bulk-deferred.sql
 COPY conf/sqitch.conf /src/structs-pg/
 COPY scripts/ /src/scripts/
 RUN chmod +x /src/scripts/*.sh

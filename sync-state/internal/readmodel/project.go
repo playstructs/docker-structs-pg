@@ -152,10 +152,14 @@ func expandAddresses(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	// Push the bound address set into the UNION view even with a generic plan;
+	// otherwise a single native publication can scan every known owner.
 	rows, err := tx.Query(ctx, `
 SELECT ao.owner_type::text, ao.owner_id, gt.entry
 FROM unnest($1::varchar[]) a(address)
-LEFT JOIN structs.asset_owner ao ON ao.address = a.address
+LEFT JOIN (
+    SELECT * FROM structs.asset_owner WHERE address = ANY($1::varchar[])
+) ao ON ao.address = a.address
 LEFT JOIN structs.address_tag typ
   ON typ.address = a.address AND typ.label = 'Type'
  AND typ.entry = 'Bank Collateral Pool'

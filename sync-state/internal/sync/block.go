@@ -149,7 +149,11 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 			return nil, fmt.Errorf("reconcile ledger h=%d: %w", bundle.Height, err)
 		}
 	}
-	deltas, err := buf.Flush(ctx, tx)
+	flush := buf.Flush
+	if opts.DeferStats {
+		flush = buf.FlushBlock
+	}
+	deltas, err := flush(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
 	}
@@ -387,16 +391,22 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle, 
 			RawJSON: trJSON,
 		})
 	}
-	if err := db.WriteRawTxResults(ctx, tx, trRows); err != nil {
-		return err
-	}
-
 	// events + attributes
 	batch := window
 	if batch == nil {
 		batch = &rawEventBatch{}
 	}
+	if batch.chainID != "" && batch.chainID != b.ChainID {
+		return fmt.Errorf("raw batch contains multiple chains")
+	}
+	batch.chainID = b.ChainID
+	batch.heights = append(batch.heights, b.Height)
+	batch.transactions = append(batch.transactions, trRows...)
+	for _, row := range trRows {
+		batch.bytes += len(row.RawJSON) + len(row.Log) + len(row.TxHash) + 64
+	}
 	addEv := func(txIdx *int, evIdx int, ev rpc.Event) {
+		batch.bytes += len(ev.Type) + 64
 		batch.events = append(batch.events, db.RawMirrorEvent{
 			ChainID:    b.ChainID,
 			Height:     b.Height,
@@ -410,6 +420,7 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle, 
 				continue
 			}
 			seen[a.Key] = struct{}{}
+			batch.bytes += len(ev.Type) + 2*len(a.Key) + len(a.Value) + 64
 			batch.attributes = append(batch.attributes, db.RawMirrorAttribute{
 				ChainID:      b.ChainID,
 				Height:       b.Height,
@@ -432,20 +443,28 @@ func (s *Syncer) writeRawMirror(ctx context.Context, tx pgx.Tx, b *BlockBundle, 
 	}
 	// Flush only at block boundaries: each writer replaces the entire set
 	// of rows for its heights. Splitting one height would delete its prefix.
-	if window == nil || len(batch.events)+len(batch.attributes) >= rawEventBatchLimit {
+	if window == nil || len(batch.events)+len(batch.attributes)+len(batch.transactions) >= rawEventBatchLimit || batch.bytes >= rawMirrorByteLimit {
 		return batch.flush(ctx, tx)
 	}
 	return nil
 }
 
 const rawEventBatchLimit = 32768
+const rawMirrorByteLimit = 8 << 20
 
 type rawEventBatch struct {
-	events     []db.RawMirrorEvent
-	attributes []db.RawMirrorAttribute
+	chainID      string
+	heights      []int64
+	transactions []db.RawMirrorTxResult
+	bytes        int
+	events       []db.RawMirrorEvent
+	attributes   []db.RawMirrorAttribute
 }
 
 func (b *rawEventBatch) flush(ctx context.Context, tx pgx.Tx) error {
+	if err := db.WriteRawTxResultsAtHeights(ctx, tx, b.chainID, b.heights, b.transactions); err != nil {
+		return err
+	}
 	if err := db.WriteRawEvents(ctx, tx, b.events); err != nil {
 		return err
 	}

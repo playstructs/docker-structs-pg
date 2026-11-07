@@ -34,6 +34,10 @@ VALUES ('ownership-test',$1,TIMESTAMPTZ '2026-01-01 00:00:00Z')`, height); err !
 
 func TestEconomicOwnershipProjectionAndRepair(t *testing.T) {
 	integrationTx(t, func(ctx context.Context, tx pgx.Tx) {
+		// Exercise the prepared-plan path used by a long-running native worker.
+		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode=force_generic_plan"); err != nil {
+			t.Fatal(err)
+		}
 		const p1, p2, g1, g2 = "1-992101", "1-992102", "0-992101", "0-992102"
 		seedIsolatedGuild(t, ctx, tx, g1, "owner-guild-one")
 		seedIsolatedGuild(t, ctx, tx, g2, "owner-guild-two")

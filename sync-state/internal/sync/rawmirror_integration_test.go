@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,5 +66,36 @@ func TestRawEventBatchReplay(t *testing.T) {
 		FROM sync_state.raw_attributes WHERE chain_id=$1 AND value='expected'`, chain).Scan(&events, &attrs, &txAttrs)
 	if err != nil || events != len(large)+2 || attrs != len(large)+2 || txAttrs != 1 {
 		t.Fatalf("replayed events=%d attributes=%d tx attributes=%d err=%v", events, attrs, txAttrs, err)
+	}
+
+	var txCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM sync_state.raw_tx_results WHERE chain_id=$1`, chain).Scan(&txCount); err != nil || txCount != 1 {
+		t.Fatalf("replayed transactions=%d err=%v", txCount, err)
+	}
+	// Replacing a previously populated height with an empty block must clear
+	// its transactions too, even when the whole batch has no transaction rows.
+	var empty rawEventBatch
+	if err := s.writeRawMirror(ctx, tx, &BlockBundle{ChainID: chain, Height: 3}, &empty); err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.flush(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM sync_state.raw_tx_results WHERE chain_id=$1`, chain).Scan(&txCount); err != nil || txCount != 0 {
+		t.Fatalf("empty replacement transactions=%d err=%v", txCount, err)
+	}
+
+	// A few very large transaction payloads trigger the byte cap even when
+	// well below the row cap. The complete height is written once.
+	var bytes rawEventBatch
+	huge := BlockBundle{ChainID: chain, Height: 4, RawTxs: []string{"AQ==", "Ag=="}, TxResults: []rpc.TxResult{{Log: strings.Repeat("x", rawMirrorByteLimit/2)}, {Code: 1, GasUsed: "77"}}}
+	if err := s.writeRawMirror(ctx, tx, &huge, &bytes); err != nil {
+		t.Fatal(err)
+	}
+	if len(bytes.heights) != 0 {
+		t.Fatal("byte cap did not flush")
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM sync_state.raw_tx_results WHERE chain_id=$1 AND height=4`, chain).Scan(&txCount); err != nil || txCount != 2 {
+		t.Fatalf("large height transactions=%d err=%v", txCount, err)
 	}
 }

@@ -46,7 +46,12 @@ positions. Queries use 100 rows per page, with limits of 1,024 pairs and
 8,192 entries for one complete address. The cycle has a ten-second HTTP budget;
 SQL publication/retry gets a separate five-second bound. Failed attempts back
 off for thirty seconds, while a newer chain invalidation removes that delay.
-There is a one-second pause between cycles. These bound query work and do not
+`SYNC_STATE_NATIVE_PARALLELISM` / `-native-staking-parallelism` defaults to four
+concurrent address fetches, bounded to 1–8. Publication remains serial under the
+existing maintenance lock, with stale-height validation and atomic claim refresh.
+Successful batches immediately drain the next pending batch. Empty, stale-only
+or failed batches pause one second; failed addresses retain their retry backoff.
+Shutdown cancels and joins every in-flight fetch. These bound query work and do not
 set transaction or withdrawal limits. An account exceeding a bound remains
 unknown until the bounds are deliberately revised and its full query succeeds.
 

@@ -103,11 +103,12 @@ type Config struct {
 	// the pagination.limit sent per request (PAGE_LIMIT, default 10000).
 	// PlayerRankSweep / PlanetAttributeSweep disable each sweep (escape
 	// hatch for a slow or unreachable LCD).
-	LCDURL               string
-	LCDPageLimit         int
-	PlayerRankSweep      bool
-	PlanetAttributeSweep bool
-	NativeStakingRefresh bool
+	LCDURL                   string
+	LCDPageLimit             int
+	PlayerRankSweep          bool
+	PlanetAttributeSweep     bool
+	NativeStakingRefresh     bool
+	NativeStakingParallelism int
 
 	// `sync-state init-genesis` knobs.
 	//
@@ -266,6 +267,8 @@ func LoadConfig(args []string) Config {
 		"ingest: Cosmos LCD base URL for startup sweeps (guild_rank, planet_attribute; same env as update-cache)")
 	fs.BoolVar(&cfg.NativeStakingRefresh, "native-staking-refresh", envOrBool("SYNC_NATIVE_STAKING_REFRESH", true),
 		"ingest: refresh complete native staking claims asynchronously; disabling leaves invalidated claims unknown")
+	fs.IntVar(&cfg.NativeStakingParallelism, "native-staking-parallelism", envOrInt("SYNC_STATE_NATIVE_PARALLELISM", 4),
+		"ingest: concurrent native staking LCD snapshots (1..8); SQL publication remains serial")
 	fs.IntVar(&cfg.LCDPageLimit, "lcd-page-limit", envOrInt("PAGE_LIMIT", 10000),
 		"ingest: pagination.limit sent to the LCD per page during startup sweeps")
 	fs.BoolVar(&cfg.PlayerRankSweep, "player-rank-sweep", envOrBool("SYNC_STATE_PLAYER_RANK_SWEEP", true),
@@ -294,6 +297,7 @@ func LoadConfig(args []string) Config {
 	if cfg.Parallelism <= 0 {
 		cfg.Parallelism = 1
 	}
+	cfg.NativeStakingParallelism = nativeParallelism(cfg.NativeStakingParallelism)
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 1
 	}

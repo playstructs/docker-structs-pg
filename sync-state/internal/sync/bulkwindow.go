@@ -16,6 +16,8 @@ import (
 type applyOpts struct {
 	// RawEvents groups optional raw event and attribute copies within this transaction.
 	RawEvents *rawEventBatch
+	// DeferStats batches append-only statistics; activity still flushes per block.
+	DeferStats bool
 	// ReconcileCurrentBlock verifies the cursor boundary, resolves legacy
 	// infusion phases and atomically rebuilds every API projection. This is
 	// only used by the explicit maintenance command, never normal ingestion.
@@ -46,9 +48,9 @@ type blockApplyResult struct {
 }
 
 // applyBulkWindow runs blocks in ascending order inside one outer PG
-// transaction and commits once at the end. Event order, handler SAVEPOINTs,
-// and per-row INSERT/UPSERT semantics are identical to streaming mode —
-// only commit frequency and deferred cursor/heartbeat differ.
+// transaction and commits once at the end. Event order and ownership-sensitive
+// activity stay at block boundaries. Independent raw/stat rows are batched;
+// cursor, heartbeat and API projections are deferred.
 func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tipHeight int64) error {
 	if len(blocks) == 0 {
 		return nil
@@ -84,12 +86,20 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 			return fmt.Errorf("bulk set synchronous_commit h=%d: %w", blocks[0].Height, err)
 		}
 	}
+	if s.cfg.BulkDeferProjections {
+		// Only transient notifications and the rebuildable work queue honor
+		// this transaction-local flag. Historical attribution stays enabled.
+		if _, err := tx.Exec(ctx, `SET LOCAL structs.bulk_deferred = 'on'`); err != nil {
+			return fmt.Errorf("bulk defer notifications h=%d: %w", blocks[0].Height, err)
+		}
+	}
 
 	opts := applyOpts{
 		SkipCurrentBlockHeartbeat: true,
 		SkipCursorUpsert:          true,
 		SkipStatementTimeout:      true,
 		DeferProjections:          true,
+		DeferStats:                true,
 	}
 
 	var rawEvents rawEventBatch
@@ -97,7 +107,7 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		opts.RawEvents = &rawEvents
 	}
 
-	// Reuse one buffer; applyBlockInTx flushes it after every block. The
+	// Reuse one buffer; activity/ledger flush per block, stats per bounded batch. The
 	// api_* projections are pure functions of authoritative state (address
 	// inventory deltas are additive), so recomputing the union of the
 	// window's dirty sets once gives the same rows as recomputing per block.
@@ -120,6 +130,9 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	}
 
 	last := blocks[len(blocks)-1]
+	if err := buf.FlushStats(ctx, tx); err != nil {
+		return fmt.Errorf("bulk stats h=%d..%d: %w", blocks[0].Height, last.Height, err)
+	}
 	if err := rawEvents.flush(ctx, tx); err != nil {
 		return fmt.Errorf("bulk raw events h=%d..%d: %w", blocks[0].Height, last.Height, err)
 	}

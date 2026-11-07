@@ -1,14 +1,28 @@
 # Bulk-load mode (deferred commit + buffered COPY)
 
 Bulk mode commits a window of blocks in one PostgreSQL transaction. The writer
-applies blocks in chain order and flushes authoritative ledger, activity and
-stat rows per block so subsequent handlers can read the current state. It
-advances the cursor and emits a heartbeat when the window commits.
+applies blocks in chain order and flushes authoritative ledger and activity rows
+per block, preserving historical ownership attribution. Independent append-only
+statistics are copied at 32,768 buffered rows or window end; their original
+timestamps, heights and order are retained. The cursor and heartbeat advance
+only when the complete window commits.
 
-With `-mirror-raw`, bulk mode groups raw event and attribute copies within the
-window transaction. It flushes after a complete block when the buffer reaches
-32,768 combined event/attribute rows and flushes the remainder before updating
-the cursor. Raw block and transaction-result records still use the per-block path.
+With `-mirror-raw`, bulk mode groups transaction results, events and attributes
+within the window transaction. It flushes after a complete block at 32,768
+combined rows or an estimated 8 MiB of payload, then flushes any remainder before
+the cursor update. One large block can exceed these limits; a height is never
+split across replacement copies. Empty transaction heights also replace old
+results on replay. Raw block headers retain the per-block path.
+
+With `-bulk-defer-projections=true`, the writer sets transaction-local
+`structs.bulk_deferred=on`. Migration
+`trigger-sync-state-20261107-bulk-deferred` uses this to skip grid, inventory and
+activity notifications and rebuildable work-queue entries. Historical activity
+attribution and authoritative writes remain enabled. The existing full API/work
+rebuild runs before streaming resumes. Streaming and bulk mode with projection
+deferral disabled retain normal triggers. Commit and rollback clear the flag.
+Older schemas safely ignore the flag; older writers leave the new triggers active.
+Deploy the Sqitch migration to enable this part of the optimization.
 
 ## When it activates
 
@@ -138,3 +152,16 @@ ordering issue.
   `IS DISTINCT FROM` guards intact)
 - Webapp at tip: unchanged (streaming mode emits `pg_notify('grass', …)` per
   block as before)
+
+## Isolated batching benchmarks
+
+Against a disposable database with the current Sqitch schema:
+
+```bash
+INTEGRATION_DATABASE_URL="$TEST_DATABASE_URL" go test ./internal/db ./internal/buffers \
+  -run '^$' -bench 'Benchmark(RawTransaction|Statistics)Window' -benchtime=3x
+```
+
+These rollback-only benchmarks compare 500 small per-block copies with one
+window copy of the same 2,000 rows. They measure COPY/round-trip overhead, not
+whole-chain throughput or RPC fetch time.

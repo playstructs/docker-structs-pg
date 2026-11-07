@@ -11,24 +11,24 @@ import (
 
 // RawMirrorBlock is one row for sync_state.raw_blocks.
 type RawMirrorBlock struct {
-	ChainID    string
-	Height     int64
-	BlockHash  string
-	BlockTime  time.Time
-	Proposer   string
-	NumTxs     int
+	ChainID   string
+	Height    int64
+	BlockHash string
+	BlockTime time.Time
+	Proposer  string
+	NumTxs    int
 }
 
 // RawMirrorTxResult is one row for sync_state.raw_tx_results.
 type RawMirrorTxResult struct {
-	ChainID  string
-	Height   int64
-	TxIndex  int
-	TxHash   string
-	Code     int
-	GasUsed  *int64
-	Log      string
-	RawJSON  json.RawMessage
+	ChainID string
+	Height  int64
+	TxIndex int
+	TxHash  string
+	Code    int
+	GasUsed *int64
+	Log     string
+	RawJSON json.RawMessage
 }
 
 // RawMirrorEvent is one row for sync_state.raw_events.
@@ -74,14 +74,25 @@ func WriteRawTxResults(ctx context.Context, tx pgx.Tx, rows []RawMirrorTxResult)
 	if len(rows) == 0 {
 		return nil
 	}
+	return WriteRawTxResultsAtHeights(ctx, tx, rows[0].ChainID, uniqueHeights(rows), rows)
+}
+
+// WriteRawTxResultsAtHeights replaces complete heights, including heights that
+// now have zero transactions. A bounded bulk batch must never split a height.
+func WriteRawTxResultsAtHeights(ctx context.Context, tx pgx.Tx, chainID string, heights []int64, rows []RawMirrorTxResult) error {
+	if len(heights) == 0 {
+		return nil
+	}
 	// CopyFrom doesn't support ON CONFLICT, so we first delete any matching
 	// rows for this (chain_id, height) range, then bulk-insert.
-	heights := uniqueHeights(rows)
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM sync_state.raw_tx_results WHERE chain_id = $1 AND height = ANY($2)`,
-		rows[0].ChainID, heights,
+		chainID, heights,
 	); err != nil {
 		return fmt.Errorf("clear raw_tx_results: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
 	}
 	src := make([][]any, len(rows))
 	for i, r := range rows {

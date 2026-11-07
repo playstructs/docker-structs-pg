@@ -130,3 +130,49 @@ func TestPlanetActivitySequences_CounterOverflowRollsBack(t *testing.T) {
 		t.Fatalf("counter after rollback = %d, err=%v", counter, err)
 	}
 }
+
+func TestDeferredStatsKeepActivityAtBlockBoundary(t *testing.T) {
+	dsn := os.Getenv("INTEGRATION_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("INTEGRATION_DATABASE_URL not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	const planet = "2-999910009"
+	now := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	b := New()
+	for i := int64(1); i <= 2; i++ {
+		b.StatStructHealth = append(b.StatStructHealth, StatRow{Time: now.Add(time.Duration(i) * time.Second), ObjectIndex: 999910009, Value: "42", BlockHeight: i})
+		b.PlanetActivity = append(b.PlanetActivity, PlanetActivityRow{Time: now, PlanetID: planet, Category: "shield_change", Detail: json.RawMessage(`{}`), BlockHeight: i})
+		if _, err := b.FlushBlock(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+		var activities, stats int64
+		if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM structs.planet_activity WHERE planet_id=$1), (SELECT count(*) FROM structs.stat_struct_health WHERE object_index=999910009)`, planet).Scan(&activities, &stats); err != nil {
+			t.Fatal(err)
+		}
+		if activities != i || stats != 0 {
+			t.Fatalf("block %d: activity=%d stats=%d", i, activities, stats)
+		}
+	}
+	if err := b.FlushStats(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	var heights []int64
+	if err := tx.QueryRow(ctx, `SELECT array_agg(block_height ORDER BY time) FROM structs.stat_struct_health WHERE object_index=999910009`).Scan(&heights); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(heights, []int64{1, 2}) || b.statsLen() != 0 {
+		t.Fatalf("flushed heights=%v buffered=%d", heights, b.statsLen())
+	}
+}

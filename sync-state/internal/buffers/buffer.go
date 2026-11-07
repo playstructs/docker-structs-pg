@@ -244,6 +244,25 @@ func (b *Buffer) Len() int {
 // After a successful flush every slice is reset to zero length so the
 // buffer can be reused for the next block / window.
 func (b *Buffer) Flush(ctx context.Context, tx pgx.Tx) ([]LedgerDelta, error) {
+	return b.flush(ctx, tx, false)
+}
+
+// FlushBlock keeps ownership-sensitive activity and financial writes at the
+// block boundary. Bulk callers retain only independent stat rows, bounded by
+// statBatchLimit, and call FlushStats before committing the outer transaction.
+func (b *Buffer) FlushBlock(ctx context.Context, tx pgx.Tx) ([]LedgerDelta, error) {
+	return b.flush(ctx, tx, true)
+}
+
+const statBatchLimit = 32768
+
+func (b *Buffer) statsLen() int {
+	return len(b.StatOre) + len(b.StatFuel) + len(b.StatCapacity) + len(b.StatLoad) +
+		len(b.StatStructsLoad) + len(b.StatPower) + len(b.StatConnectionCapacity) +
+		len(b.StatConnectionCount) + len(b.StatStructHealth) + len(b.StatStructStatus)
+}
+
+func (b *Buffer) flush(ctx context.Context, tx pgx.Tx, deferStats bool) ([]LedgerDelta, error) {
 	if b == nil {
 		return nil, nil
 	}
@@ -268,67 +287,81 @@ func (b *Buffer) Flush(ctx context.Context, tx pgx.Tx) ([]LedgerDelta, error) {
 		}
 		b.PlanetActivity = b.PlanetActivity[:0]
 	}
+	if !deferStats || b.statsLen() >= statBatchLimit {
+		if err := b.FlushStats(ctx, tx); err != nil {
+			return nil, err
+		}
+	}
+	return deltas, nil
+}
+
+// FlushStats persists only append-only statistics, preserving source order,
+// timestamps, and block heights. It never re-reads current entity ownership.
+func (b *Buffer) FlushStats(ctx context.Context, tx pgx.Tx) error {
+	if b == nil {
+		return nil
+	}
 	if len(b.StatOre) > 0 {
 		if err := flushStat(ctx, tx, "stat_ore", true, b.StatOre); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatOre = b.StatOre[:0]
 	}
 	if len(b.StatFuel) > 0 {
 		if err := flushStat(ctx, tx, "stat_fuel", true, b.StatFuel); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatFuel = b.StatFuel[:0]
 	}
 	if len(b.StatCapacity) > 0 {
 		if err := flushStat(ctx, tx, "stat_capacity", true, b.StatCapacity); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatCapacity = b.StatCapacity[:0]
 	}
 	if len(b.StatLoad) > 0 {
 		if err := flushStat(ctx, tx, "stat_load", true, b.StatLoad); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatLoad = b.StatLoad[:0]
 	}
 	if len(b.StatStructsLoad) > 0 {
 		if err := flushStat(ctx, tx, "stat_structs_load", false, b.StatStructsLoad); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatStructsLoad = b.StatStructsLoad[:0]
 	}
 	if len(b.StatPower) > 0 {
 		if err := flushStat(ctx, tx, "stat_power", true, b.StatPower); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatPower = b.StatPower[:0]
 	}
 	if len(b.StatConnectionCapacity) > 0 {
 		if err := flushStat(ctx, tx, "stat_connection_capacity", false, b.StatConnectionCapacity); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatConnectionCapacity = b.StatConnectionCapacity[:0]
 	}
 	if len(b.StatConnectionCount) > 0 {
 		if err := flushStat(ctx, tx, "stat_connection_count", false, b.StatConnectionCount); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatConnectionCount = b.StatConnectionCount[:0]
 	}
 	if len(b.StatStructHealth) > 0 {
 		if err := flushStat(ctx, tx, "stat_struct_health", false, b.StatStructHealth); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatStructHealth = b.StatStructHealth[:0]
 	}
 	if len(b.StatStructStatus) > 0 {
 		if err := flushStat(ctx, tx, "stat_struct_status", false, b.StatStructStatus); err != nil {
-			return nil, err
+			return err
 		}
 		b.StatStructStatus = b.StatStructStatus[:0]
 	}
-	return deltas, nil
+	return nil
 }
 
 // nullable returns *string when s is non-empty, else nil. Used by the

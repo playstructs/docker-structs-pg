@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"sync-state/internal/lcd"
@@ -32,8 +33,12 @@ func (s *Syncer) startNativeRefresh(ctx context.Context) func() {
 				}
 			}
 			if seeded {
-				if _, err := s.refreshNativeBatch(workerCtx); err != nil && workerCtx.Err() == nil {
+				if n, err := s.refreshNativeBatch(workerCtx); err != nil && workerCtx.Err() == nil {
 					s.logger.Printf("native staking refresh: %v", err)
+				} else if err == nil && n > 0 {
+					// Drain a backlog without adding a one-second pause per eight
+					// addresses. Empty, stale-only and failed batches still back off.
+					continue
 				}
 			}
 			timer := time.NewTimer(time.Second)
@@ -45,6 +50,16 @@ func (s *Syncer) startNativeRefresh(ctx context.Context) func() {
 		}
 	}()
 	return func() { cancel(); <-done }
+}
+
+func nativeParallelism(n int) int {
+	if n <= 0 {
+		return 4
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
 }
 
 // Startup discovers existing owned/observed positions once. Inventory provides
@@ -96,14 +111,40 @@ func (s *Syncer) refreshNativeBatch(ctx context.Context) (int, error) {
 	}
 	client := lcd.Client{BaseURL: s.cfg.LCDURL, HTTP: &http.Client{Timeout: 10 * time.Second}}
 	limits := staking.Limits{PageSize: 100, MaxPairs: 1024, MaxEntries: 8192}
-	published := 0
+	type fetched struct {
+		item     staking.RequestItem
+		snapshot *staking.Snapshot
+		err      error
+	}
+	// Fetch without any SQL locks; publish completed snapshots one at a time.
+	// Buffer the bounded batch so an early SQL error cannot strand a fetcher.
+	results := make(chan fetched, len(items))
+	sem := make(chan struct{}, nativeParallelism(s.cfg.NativeStakingParallelism))
+	var workers sync.WaitGroup
 	for _, item := range items {
-		if batchCtx.Err() != nil {
-			break
-		}
-		snapshot, fetchErr := staking.Fetch(batchCtx, client, s.chainID, item.Address, item.Height, limits)
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-batchCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			snapshot, err := staking.Fetch(batchCtx, client, s.chainID, item.Address, item.Height, limits)
+			results <- fetched{item: item, snapshot: snapshot, err: err}
+		}()
+	}
+	go func() { workers.Wait(); close(results) }()
+	defer func() { cancel(); workers.Wait() }()
+	published := 0
+	for result := range results {
+		item, snapshot, fetchErr := result.item, result.snapshot, result.err
 		if ctx.Err() != nil {
 			return published, ctx.Err()
+		}
+		if batchCtx.Err() != nil && fetchErr == nil {
+			return published, nil
 		}
 		// Use the parent after a fetch deadline to record the retry. SQL has
 		// its own bound, so a busy maintenance lock cannot strand the worker.

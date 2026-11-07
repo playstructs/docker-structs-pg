@@ -147,3 +147,17 @@ func TestConfig_PrimaryEqualSeed_Deduplicated(t *testing.T) {
 		t.Fatalf("RPCURLs() with primary==seed should yield 1 entry, got %v", urls)
 	}
 }
+
+func TestConfig_NativeParallelism(t *testing.T) {
+	withEnv(t, map[string]string{"SYNC_STATE_NATIVE_PARALLELISM": ""})
+	if got := LoadConfig(nil).NativeStakingParallelism; got != 4 {
+		t.Fatalf("default=%d", got)
+	}
+	t.Setenv("SYNC_STATE_NATIVE_PARALLELISM", "2")
+	if got := LoadConfig(nil).NativeStakingParallelism; got != 2 {
+		t.Fatalf("env=%d", got)
+	}
+	if got := LoadConfig([]string{"-native-staking-parallelism=99"}).NativeStakingParallelism; got != 8 {
+		t.Fatalf("flag clamp=%d", got)
+	}
+}

@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -42,7 +43,7 @@ func nativeWorkerFixture(t *testing.T) (*Syncer, context.Context) {
 	t.Cleanup(pool.Close)
 	chain := "native-worker-" + t.Name()
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM structs.api_inventory WHERE owner_type='address' AND owner_id=ANY($1::varchar[])`, []string{nativeWorkerAddress, nativeWorkerOther})
+		_, _ = pool.Exec(context.Background(), `DELETE FROM structs.api_inventory WHERE owner_type='address' AND owner_id=ANY($1::varchar[])`, []string{nativeWorkerAddress, nativeWorkerOther, "structs1qqqqqqqq", "structs1pppppppp"})
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sync_state.native_staking_snapshot WHERE chain_id=$1`, chain)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sync_state.native_staking_invalidation WHERE chain_id=$1`, chain)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sync_state.sync_cursor WHERE chain_id=$1`, chain)
@@ -393,5 +394,76 @@ func TestNativeWorker_PublishesClaimsAndNotificationsAtomically(t *testing.T) {
 	var unchanged bool
 	if err := s.pool.Pool.QueryRow(ctx, `SELECT alpha_value=0 FROM structs.api_leaderboard_player WHERE player_id=$1`, player).Scan(&unchanged); err != nil || !unchanged {
 		t.Fatalf("rolled-back value escaped: unchanged=%v err=%v", unchanged, err)
+	}
+}
+
+func TestNativeWorker_BoundedParallelFetch(t *testing.T) {
+	s, ctx := nativeWorkerFixture(t)
+	s.cfg.NativeStakingParallelism = 2
+	addresses := []string{nativeWorkerAddress, nativeWorkerOther, "structs1qqqqqqqq", "structs1pppppppp"}
+	nativeRequest(t, s, ctx, 100, addresses...)
+	entered, release := make(chan struct{}, 8), make(chan struct{})
+	var active, peak atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/delegations/") {
+			n := active.Add(1)
+			defer active.Add(-1)
+			for old := peak.Load(); n > old; old = peak.Load() {
+				if peak.CompareAndSwap(old, n) {
+					break
+				}
+			}
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		emptyNativeResponse(w, r, s.chainID)
+	}))
+	defer server.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	s.cfg.LCDURL = server.URL
+	done := make(chan error, 1)
+	go func() {
+		n, err := s.refreshNativeBatch(ctx)
+		if err == nil && n != len(addresses) {
+			err = fmt.Errorf("published %d", n)
+		}
+		done <- err
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("fetches did not run concurrently")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("exceeded concurrency limit")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if peak.Load() != 2 {
+		t.Fatalf("peak concurrency=%d", peak.Load())
+	}
+}
+
+func TestNativeParallelismBounds(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{{0, 4}, {-1, 4}, {1, 1}, {4, 4}, {8, 8}, {99, 8}} {
+		if got := nativeParallelism(tc.in); got != tc.want {
+			t.Fatalf("%d -> %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
