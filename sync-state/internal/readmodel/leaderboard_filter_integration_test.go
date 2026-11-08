@@ -100,3 +100,107 @@ func TestFilteredLeaderboardsKeepWholeGroups(t *testing.T) {
 		checkSub(1, "30")
 	})
 }
+
+func TestLeaderboardMetricFiltersAndRepeatedPlanning(t *testing.T) {
+	integrationTx(t, func(ctx context.Context, tx pgx.Tx) {
+		const guild, otherGuild, emptyGuild = "0-992401", "0-992402", "0-992403"
+		const sub, emptySub = "4-992401", "4-992402"
+		for _, id := range []string{guild, otherGuild, emptyGuild} {
+			seedIsolatedGuild(t, ctx, tx, id, "metric-filter")
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO structs.substation(id,owner) VALUES ($1,'1-992401'),($2,'1-992401')`, sub, emptySub); err != nil {
+			t.Fatal(err)
+		}
+		seedIsolatedPlayer(t, ctx, tx, "1-992401", "metric-one", guild, sub)
+		seedIsolatedPlayer(t, ctx, tx, "1-992402", "metric-only-ore", guild, sub)
+		seedIsolatedPlayer(t, ctx, tx, "1-992403", "metric-no-grid", otherGuild, sub)
+		seedIsolatedPlayer(t, ctx, tx, "1-992404", "metric-no-substation", guild, "")
+		if _, err := tx.Exec(ctx, `INSERT INTO structs.grid(id,object_id,object_type,attribute_type,val) VALUES
+('2-1-992401','1-992401','player','capacity',13),
+('3-1-992401','1-992401','player','load',7),
+('7-1-992401','1-992401','player','structsLoad',11),
+('0-1-992401','1-992401','player','ore',999999),
+('0-1-992402','1-992402','player','ore',999999),
+('2-1-992404','1-992404','player','capacity',1000000000000000000009),
+('3-4-992401','4-992401','substation','load',99),
+('6-4-992401','4-992401','substation','connectionCapacity',500),
+('2-4-992401','4-992401','substation','capacity',999999)`); err != nil {
+			t.Fatal(err)
+		}
+		var mode string
+		if err := tx.QueryRow(ctx, `SHOW plan_cache_mode`).Scan(&mode); err != nil || mode != "auto" {
+			t.Fatalf("fixture requires normal planner mode: %s %v", mode, err)
+		}
+		if tx.Conn().Config().DefaultQueryExecMode != pgx.QueryExecModeCacheStatement {
+			t.Fatal("fixture requires ordinary statement caching for other queries")
+		}
+		// Cross the planner's first-five-executions boundary with varying ID
+		// arrays. The aggregates must not settle on a generic named plan.
+		for i := 0; i < 12; i++ {
+			d := NewDirty()
+			d.Guild(guild)
+			d.Substation(sub)
+			if i%2 == 0 {
+				d.Guild(otherGuild)
+				d.Guild(emptyGuild)
+				d.Substation(emptySub)
+			}
+			if err := recomputeGuilds(ctx, tx, d); err != nil {
+				t.Fatal(err)
+			}
+			if err := recomputeSubstations(ctx, tx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, want := range []struct {
+			id, capacity, load, shared string
+			players                    int
+		}{
+			{guild, "1000000000000000000022", "18", "500", 3},
+			{otherGuild, "0", "0", "500", 1},
+			{emptyGuild, "0", "0", "0", 0},
+		} {
+			var capacity, load, shared string
+			var players int
+			if err := tx.QueryRow(ctx, `SELECT member_capacity::text,member_load::text,shared_connection_capacity::text,player_count
+FROM structs.api_leaderboard_guild WHERE guild_id=$1`, want.id).Scan(&capacity, &load, &shared, &players); err != nil {
+				t.Fatal(err)
+			}
+			if capacity != want.capacity || load != want.load || shared != want.shared || players != want.players {
+				t.Fatalf("guild %s: capacity=%s load=%s shared=%s players=%d", want.id, capacity, load, shared, players)
+			}
+		}
+		for _, want := range []struct {
+			id, capacity, load, shared string
+			players                    int
+		}{
+			{sub, "13", "99", "500", 3},
+			{emptySub, "0", "0", "0", 0},
+		} {
+			var capacity, load, shared string
+			var players int
+			if err := tx.QueryRow(ctx, `SELECT member_capacity::text,load::text,shared_connection_capacity::text,player_count
+FROM structs.api_leaderboard_substation WHERE substation_id=$1`, want.id).Scan(&capacity, &load, &shared, &players); err != nil {
+				t.Fatal(err)
+			}
+			if capacity != want.capacity || load != want.load || shared != want.shared || players != want.players {
+				t.Fatalf("substation %s: capacity=%s load=%s shared=%s players=%d", want.id, capacity, load, shared, players)
+			}
+		}
+		var cachedAggregates, cachedDeletes int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_prepared_statements
+WHERE statement LIKE $1`, "%WITH player_metric AS%").Scan(&cachedAggregates); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_prepared_statements
+WHERE statement LIKE 'DELETE FROM structs.api_leaderboard_%'`).Scan(&cachedDeletes); err != nil {
+			t.Fatal(err)
+		}
+		if cachedAggregates != 0 || cachedDeletes != 2 {
+			t.Fatalf("aggregate caching=%d unrelated delete caching=%d", cachedAggregates, cachedDeletes)
+		}
+		if err := tx.QueryRow(ctx, `SHOW plan_cache_mode`).Scan(&mode); err != nil || mode != "auto" {
+			t.Fatalf("refresh changed planner mode: %s %v", mode, err)
+		}
+	})
+}

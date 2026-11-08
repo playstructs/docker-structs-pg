@@ -188,7 +188,7 @@ func LoadConfig(args []string) Config {
 		"Per-request retry budget (exponential backoff)")
 	fs.IntVar(&cfg.LogEvery, "log-every", envOrInt("SYNC_LOG_EVERY", 100),
 		"Log progress every N blocks")
-	fs.DurationVar(&cfg.SlowBlockThreshold, "slow-block-threshold", envOrDuration("SYNC_SLOW_BLOCK_THRESHOLD", 2*time.Second),
+	fs.DurationVar(&cfg.SlowBlockThreshold, "slow-block-threshold", envOrDuration("SYNC_SLOW_BLOCK_THRESHOLD", 500*time.Millisecond),
 		"Emit phase timings for slow streaming blocks and bulk apply windows; 0 disables")
 	fs.BoolVar(&cfg.OneShot, "one-shot", envOrBool("SYNC_ONE_SHOT", false),
 		"Exit when caught up to current tip instead of following")

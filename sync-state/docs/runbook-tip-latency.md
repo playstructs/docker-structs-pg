@@ -138,7 +138,7 @@ detection — the apply step is fast.
 
 ## Slow-block phase timings
 
-`-slow-block-threshold` / `SYNC_SLOW_BLOCK_THRESHOLD` defaults to `2s`.
+`-slow-block-threshold` / `SYNC_SLOW_BLOCK_THRESHOLD` defaults to `500ms`.
 Set it to `0s` to disable timing collection. Successful and failed applies
 emit one JSON object (after the standard log timestamp) when they cross the
 threshold. The existing window progress logs remain available for every window.
@@ -189,3 +189,23 @@ The data represents current state, not a replay of the historical block's
 pre-state; actual trigger queue membership may be smaller than this
 conservative set. The existing full-refresh path above 2,000 dirty keys
 was not changed by the experiment.
+
+### Leaderboard aggregation planning
+
+Guild and substation aggregation reads only the grid attributes used by the
+metrics. The player join retains `capacity`, `load`, and `structsLoad`; the
+substation join retains `load` and `connectionCapacity`. Filtering is part of
+the left join, so members without these attributes still count with zero
+metrics. Shared substation capacity is still counted once for each guild.
+
+These two aggregate statements use parameterized, unnamed extended-protocol
+execution. With PostgreSQL's normal `plan_cache_mode=auto`, each execution
+plans for its actual affected groups. This avoids a reused generic plan that
+estimated about 12,000 members for a 76-player guild. The other ingestion
+statements retain their existing caching and planner settings. A forced
+server-wide generic-plan setting would override this planning behavior.
+
+Read-only tests on 2026-11-08, including planning overhead, reduced a small
+guild query from 21.8 to 1.45 ms and a small substation from 21.1 to 2.84 ms.
+Large-group queries improved from 47.9 to 39.4 ms and 37.4 to 29.9 ms. These
+measure the aggregation queries; they are not whole-block speedup estimates.

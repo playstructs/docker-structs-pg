@@ -583,6 +583,7 @@ WITH player_metric AS (
            + COALESCE(MAX(gr.val) FILTER (WHERE gr.attribute_type = 'structsLoad'), 0) AS load
   FROM structs.player p
   LEFT JOIN structs.grid gr ON gr.object_id = p.id
+    AND gr.attribute_type IN ('capacity', 'load', 'structsLoad')
   %s
   GROUP BY p.id, p.guild_id, p.substation_id
 ),
@@ -592,6 +593,7 @@ substation_metric AS (
          COALESCE(MAX(gr.val) FILTER (WHERE gr.attribute_type = 'connectionCapacity'), 0) AS connection_capacity
   FROM structs.substation s
   LEFT JOIN structs.grid gr ON gr.object_id = s.id
+    AND gr.attribute_type IN ('load', 'connectionCapacity')
   %s
   GROUP BY s.id
 )`
@@ -604,6 +606,9 @@ func recomputeGuilds(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_guild WHERE guild_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
+	// An unnamed extended-protocol execution plans for this ID array on every
+	// call. A cached generic plan estimates nearly all players even for a small
+	// guild, scanning unrelated grid rows. Keep the mode local to this aggregate.
 	_, err := tx.Exec(ctx, guildMetricCTE+`
 INSERT INTO structs.api_leaderboard_guild(
   guild_id, name, onchain_name, player_count, collateral, supply,
@@ -624,7 +629,7 @@ LEFT JOIN structs.guild_meta gm ON gm.id = g.id
 LEFT JOIN player_metric pm ON pm.guild_id = g.id
 LEFT JOIN structs.api_guild_bank gb ON gb.guild_id = g.id AND gb.denom = 'uguild.' || g.id
 WHERE g.id = ANY($1::varchar[])
-GROUP BY g.id, gm.name, g.name, gb.collateral, gb.supply`, ids)
+GROUP BY g.id, gm.name, g.name, gb.collateral, gb.supply`, pgx.QueryExecModeExec, ids)
 	return err
 }
 
@@ -673,6 +678,7 @@ func recomputeSubstations(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_substation WHERE substation_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
+	// Group sizes are skewed; avoid retaining a generic plan across ID arrays.
 	_, err := tx.Exec(ctx, substationMetricCTE+`
 INSERT INTO structs.api_leaderboard_substation(
   substation_id, owner, load, member_capacity,
@@ -684,6 +690,6 @@ FROM structs.substation s
 JOIN substation_metric sm ON sm.id = s.id
 LEFT JOIN player_metric pm ON pm.substation_id = s.id
 WHERE s.id = ANY($1::varchar[])
-GROUP BY s.id, s.owner, sm.load, sm.connection_capacity`, ids)
+GROUP BY s.id, s.owner, sm.load, sm.connection_capacity`, pgx.QueryExecModeExec, ids)
 	return err
 }

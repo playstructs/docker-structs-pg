@@ -46,6 +46,7 @@
 #   SYNC_HTTP_TIMEOUT         default 30s
 #   SYNC_HTTP_RETRIES         default 5
 #   SYNC_LOG_EVERY            default 100
+#   SYNC_SLOW_BLOCK_THRESHOLD default 500ms (phase timings; 0s disables)
 #   SYNC_ONE_SHOT             default false (true => exit when caught up)
 #
 #   --- safety / ownership ---

@@ -70,7 +70,7 @@ func TestSlowTimingThresholdsAndMetadata(t *testing.T) {
 
 func TestSlowTimingConfig(t *testing.T) {
 	withEnv(t, map[string]string{"SYNC_SLOW_BLOCK_THRESHOLD": ""})
-	if got := LoadConfig(nil).SlowBlockThreshold; got != 2*time.Second {
+	if got := LoadConfig(nil).SlowBlockThreshold; got != 500*time.Millisecond {
 		t.Fatal(got)
 	}
 	t.Setenv("SYNC_SLOW_BLOCK_THRESHOLD", "0s")
@@ -79,5 +79,20 @@ func TestSlowTimingConfig(t *testing.T) {
 	}
 	if got := LoadConfig([]string{"-slow-block-threshold=3s"}).SlowBlockThreshold; got != 3*time.Second {
 		t.Fatal(got)
+	}
+}
+
+func TestDefaultTimingReportsHalfSecondFetch(t *testing.T) {
+	withEnv(t, map[string]string{"SYNC_SLOW_BLOCK_THRESHOLD": ""})
+	var out bytes.Buffer
+	s := &Syncer{cfg: LoadConfig(nil), logger: log.New(&out, "", 0)}
+	_, finish := s.startIngestTiming(context.Background(), []*BlockBundle{{Height: 42, FetchDuration: 500 * time.Millisecond}}, false)
+	finish("committed")
+	var report map[string]any
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("default threshold did not report half-second block: %q: %v", out.String(), err)
+	}
+	if report["event"] != "slow_block" || report["fetch_decode_ms"] != float64(500) {
+		t.Fatal(report)
 	}
 }
