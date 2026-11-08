@@ -516,6 +516,7 @@ func (s *Syncer) flushUnknowns(ctx context.Context) {
 }
 
 func (s *Syncer) fetchBundle(ctx context.Context, height int64) (*BlockBundle, error) {
+	started := time.Now()
 	type blockOut struct {
 		r   *rpc.BlockResult
 		err error
@@ -557,6 +558,8 @@ func (s *Syncer) fetchBundle(ctx context.Context, height int64) (*BlockBundle, e
 		RawTxs:              bo.r.Block.Data.Txs,
 		TxResults:           ro.r.TxsResults,
 		FinalizeBlockEvents: ro.r.FinalizeBlockEvents,
+		FetchDuration:       time.Since(started),
+		FetchedAt:           time.Now(),
 	}, nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"sync-state/internal/db"
 	"sync-state/internal/events"
 	"sync-state/internal/readmodel"
+	"sync-state/internal/timing"
 )
 
 // applyOpts tweaks per-block writes when running inside a bulk outer tx.
@@ -55,6 +56,12 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	if len(blocks) == 0 {
 		return nil
 	}
+	ctx, finish := s.startIngestTiming(ctx, blocks, true)
+	outcome := "failed"
+	defer func() { finish(outcome) }()
+	next := timing.Phases(ctx)
+	defer next("")
+	next("begin")
 
 	tx, err := s.pool.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -64,10 +71,13 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	var allPending []pendingHandlerError
 	defer func() {
 		if !committed {
+			next("rollback")
 			_ = tx.Rollback(ctx)
 		}
+		next("handler_error_log")
 		s.writePendingHandlerErrors(ctx, blocks[0].ChainID, allPending)
 	}()
+	next("setup")
 
 	timeout := s.cfg.BulkStatementTimeout
 	if timeout <= 0 {
@@ -115,6 +125,7 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	windowDirty := readmodel.NewDirty()
 	var windowDeltas []buffers.LedgerDelta
 
+	next("")
 	for _, bundle := range blocks {
 		res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, opts)
 		for _, he := range res.PendingErrors {
@@ -130,17 +141,21 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 	}
 
 	last := blocks[len(blocks)-1]
+	next("bulk_stats_flush")
 	if err := buf.FlushStats(ctx, tx); err != nil {
 		return fmt.Errorf("bulk stats h=%d..%d: %w", blocks[0].Height, last.Height, err)
 	}
+	next("bulk_raw_flush")
 	if err := rawEvents.flush(ctx, tx); err != nil {
 		return fmt.Errorf("bulk raw events h=%d..%d: %w", blocks[0].Height, last.Height, err)
 	}
 	if !s.cfg.BulkDeferProjections {
+		next("projections")
 		if err := readmodel.Recompute(ctx, tx, windowDirty, last.Height, last.BlockTime, readmodel.InventoryFromDeltas(windowDeltas)); err != nil {
 			return fmt.Errorf("bulk api projections h=%d..%d: %w", blocks[0].Height, last.Height, err)
 		}
 	}
+	next("cursor_heartbeat_audit")
 	status := db.ComputeStatus(last.Height, tipHeight)
 	lag := tipHeight - last.Height
 	if lag < 0 {
@@ -171,10 +186,14 @@ func (s *Syncer) applyBulkWindow(ctx context.Context, blocks []*BlockBundle, tip
 		return fmt.Errorf("bulk sync_cursor h=%d: %w", last.Height, err)
 	}
 
+	next("commit")
+	outcome = "commit_unconfirmed"
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("bulk commit h=%d..%d: %w", blocks[0].Height, last.Height, err)
 	}
 	committed = true
+	outcome = "committed"
+	next("")
 	if s.cfg.BulkDeferProjections {
 		s.projectionsStale = true
 	}

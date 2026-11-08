@@ -1,7 +1,10 @@
 package sync
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -37,7 +40,9 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 			t.Cleanup(func() {
 				_, _ = pool.Exec(ctx, `DELETE FROM sync_state.handler_error_log WHERE chain_id=$1`, chain)
 			})
-			s := NewSyncer(Config{BulkDeferProjections: true, MirrorRaw: true}, nil, &db.Pool{Pool: pool}, events.NewRouter(false), chain)
+			s := NewSyncer(Config{BulkDeferProjections: true, MirrorRaw: true, SlowBlockThreshold: time.Nanosecond}, nil, &db.Pool{Pool: pool}, events.NewRouter(false), chain)
+			var timingLog bytes.Buffer
+			s.logger = log.New(&timingLog, "", 0)
 			good := &BlockBundle{Height: 990991, ChainID: chain, BlockTime: time.Now().UTC(), BlockHashHex: "fixture"}
 			good.FinalizeBlockEvents = []rpc.Event{{Type: "structs.structs.EventVaultAddress", Attributes: []rpc.Attribute{
 				{Key: "eventVaultAddressDetail", Value: `{"ownerId":"1-990991","vaultAddress":"atomic-vault-test","accountNumber":"0","accountCreated":false}`},
@@ -83,6 +88,19 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), map[bool]string{true: "bank", false: "required event"}[bankFailure]) {
 				t.Fatalf("expected required failure, got %v", err)
+			}
+			var report map[string]any
+			if e := json.Unmarshal(bytes.TrimSpace(timingLog.Bytes()), &report); e != nil {
+				t.Fatalf("timing log: %s: %v", timingLog.String(), e)
+			}
+			if report["outcome"] != "failed" {
+				t.Fatal(report)
+			}
+			phases := report["phases_ms"].(map[string]any)
+			for _, phase := range []string{"dispatch", "rollback", "handler_error_log"} {
+				if _, ok := phases[phase]; !ok {
+					t.Fatalf("missing %s: %v", phase, report)
+				}
 			}
 			if sqlFailure && !strings.Contains(err.Error(), "23502") {
 				t.Fatalf("expected database NOT NULL violation, got %v", err)

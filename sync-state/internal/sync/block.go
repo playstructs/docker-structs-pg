@@ -17,6 +17,7 @@ import (
 	"sync-state/internal/readmodel"
 	"sync-state/internal/rpc"
 	"sync-state/internal/staking"
+	"sync-state/internal/timing"
 )
 
 // BlockBundle is everything we need to ingest one block: the /block and
@@ -30,6 +31,8 @@ type BlockBundle struct {
 	RawTxs              []string // base64 from /block.block.data.txs
 	TxResults           []rpc.TxResult
 	FinalizeBlockEvents []rpc.Event
+	FetchDuration       time.Duration // Fetch, JSON decode and bundle validation; overlaps other fetches.
+	FetchedAt           time.Time
 }
 
 // applyBlock writes everything for one block in a single PG transaction:
@@ -52,6 +55,12 @@ type BlockBundle struct {
 // sync_state.handler_error_log (outside the per-block tx so they survive
 // even when the block tx itself rolled back).
 func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight int64) error {
+	ctx, finish := s.startIngestTiming(ctx, []*BlockBundle{bundle}, false)
+	outcome := "failed"
+	defer func() { finish(outcome) }()
+	next := timing.Phases(ctx)
+	defer next("")
+	next("begin")
 	tx, err := s.pool.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin tx h=%d: %w", bundle.Height, err)
@@ -60,10 +69,13 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 	var pending []pendingHandlerError
 	defer func() {
 		if !committed {
+			next("rollback")
 			_ = tx.Rollback(ctx)
 		}
+		next("handler_error_log")
 		s.writePendingHandlerErrors(ctx, bundle.ChainID, pending)
 	}()
+	next("")
 
 	buf := buffers.New()
 	res, err := s.applyBlockInTx(ctx, tx, bundle, tipHeight, buf, applyOpts{})
@@ -73,10 +85,14 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 	if err != nil {
 		return err
 	}
+	next("commit")
+	outcome = "commit_unconfirmed"
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit h=%d: %w", bundle.Height, err)
 	}
 	committed = true
+	outcome = "committed"
+	next("")
 
 	return nil
 }
@@ -90,6 +106,9 @@ func (s *Syncer) applyBlock(ctx context.Context, bundle *BlockBundle, tipHeight 
 // applyBlockInTx flushes it after bank so api_* recomputation can see
 // this block's authoritative ledger/stat rows.
 func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBundle, tipHeight int64, buf *buffers.Buffer, opts applyOpts) (result *blockApplyResult, resultErr error) {
+	next := timing.Phases(ctx)
+	defer next("")
+	next("setup")
 	pendingErrs := make([]events.HandlerError, 0)
 	defer func() {
 		if result == nil {
@@ -104,16 +123,19 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		}
 	}
 
+	next("projection_lock")
 	if err := readmodel.Lock(ctx, tx); err != nil {
 		return nil, err
 	}
 	numEvents := 0
 	dirty := readmodel.NewDirty()
 	if opts.ReconcileCurrentBlock {
+		next("reconcile_boundary")
 		if err := s.reconcileCurrentBoundary(ctx, tx, bundle, dirty); err != nil {
 			return nil, err
 		}
 	}
+	next("dispatch")
 	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents); err != nil {
 		return nil, fmt.Errorf("dispatch h=%d: %w", bundle.Height, err)
 	}
@@ -121,6 +143,7 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 	// Bank processing only appends to buf. A bank error aborts the outer
 	// transaction, and restoring the snapshot discards any partial legs.
 	bankBufSnap := buf.Snapshot()
+	next("bank")
 	if err := bank.ProcessBlock(buf, bundle.Height, bundle.BlockTime, bundle.ChainID, bundle.FinalizeBlockEvents, bundle.TxResults); err != nil {
 		buf.Restore(bankBufSnap)
 		pendingErrs = append(pendingErrs, events.HandlerError{
@@ -133,6 +156,7 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 
 	// The buffer still flushes per block: the planet_activity COPY trigger
 	// attributes rows using object ownership at flush time.
+	next("native_invalidation")
 	dirty.Ledger(buf.Ledger)
 	nativeChanges, err := bank.NativeChanges(bundle.FinalizeBlockEvents, bundle.TxResults)
 	if err == nil {
@@ -145,6 +169,7 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		return nil, fmt.Errorf("native claims h=%d: %w", bundle.Height, err)
 	}
 	if opts.ReconcileCurrentBlock {
+		next("validate_ledger")
 		if err := buf.ValidateExistingLedger(ctx, tx); err != nil {
 			return nil, fmt.Errorf("reconcile ledger h=%d: %w", bundle.Height, err)
 		}
@@ -153,14 +178,17 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 	if opts.DeferStats {
 		flush = buf.FlushBlock
 	}
+	next("buffer_flush")
 	deltas, err := flush(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("flush authoritative buffer h=%d: %w", bundle.Height, err)
 	}
+	next("coverage")
 	if err := db.RecordEconomyCoverage(ctx, tx, bundle.ChainID, bundle.Height, bundle.BlockHashHex); err != nil {
 		return nil, fmt.Errorf("economy source coverage h=%d: %w", bundle.Height, err)
 	}
 	res := &blockApplyResult{}
+	next("projections")
 	if opts.ReconcileCurrentBlock {
 		if _, err := readmodel.BackfillInTx(ctx, tx, bundle.Height, &bundle.BlockTime); err != nil {
 			return nil, fmt.Errorf("reconcile projections h=%d: %w", bundle.Height, err)
@@ -172,12 +200,14 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 		return nil, fmt.Errorf("api projections h=%d: %w", bundle.Height, err)
 	}
 
+	next("raw_mirror")
 	if s.cfg.MirrorRaw {
 		if err := s.writeRawMirror(ctx, tx, bundle, opts.RawEvents); err != nil {
 			return nil, fmt.Errorf("raw mirror h=%d: %w", bundle.Height, err)
 		}
 	}
 
+	next("cursor_heartbeat_audit")
 	status := db.ComputeStatus(bundle.Height, tipHeight)
 	lag := tipHeight - bundle.Height
 	if lag < 0 {

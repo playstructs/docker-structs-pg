@@ -113,19 +113,40 @@ func Pending(ctx context.Context, q Queryer, chainID string, limit int) ([]Reque
 	if chainID == "" || limit <= 0 || limit > 1000 {
 		return nil, fmt.Errorf("native pending batch needs a chain and limit in 1..1000")
 	}
-	rows, err := q.Query(ctx, `
-SELECT s.address,c.last_height
-FROM sync_state.native_staking_snapshot s
-JOIN sync_state.sync_cursor c ON c.chain_id=s.chain_id
-WHERE s.chain_id=$1 AND (s.pending OR s.receipts_pending OR NOT s.positions_complete) AND s.retry_after<=NOW()
-  AND s.required_height<=c.last_height AND c.last_height>0 AND c.status='current'
-ORDER BY s.retry_after,s.address LIMIT $2`, chainID, limit)
+	rows, err := q.Query(ctx, pendingQuery, chainID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[RequestItem])
 }
+
+// Each branch matches an existing partial index and keeps at most limit rows.
+// A global top-K row must be in the top-K of at least one branch. UNION removes
+// overlaps before the final limit, preserving retry order with at most 3*limit
+// candidates. Ordered index scans can stop early; future heights, delayed work
+// and dead index entries may still require examining additional entries.
+const pendingQuery = `
+WITH boundary AS MATERIALIZED (
+  SELECT last_height FROM sync_state.sync_cursor
+  WHERE chain_id=$1 AND last_height>0 AND status='current'
+), candidates AS (
+  (SELECT s.address,c.last_height,s.retry_after
+   FROM sync_state.native_staking_snapshot s CROSS JOIN boundary c
+   WHERE s.chain_id=$1 AND s.pending AND s.retry_after<=NOW() AND s.required_height<=c.last_height
+   ORDER BY s.retry_after,s.address LIMIT $2)
+  UNION
+  (SELECT s.address,c.last_height,s.retry_after
+   FROM sync_state.native_staking_snapshot s CROSS JOIN boundary c
+   WHERE s.chain_id=$1 AND s.receipts_pending AND s.retry_after<=NOW() AND s.required_height<=c.last_height
+   ORDER BY s.retry_after,s.address LIMIT $2)
+  UNION
+  (SELECT s.address,c.last_height,s.retry_after
+   FROM sync_state.native_staking_snapshot s CROSS JOIN boundary c
+   WHERE s.chain_id=$1 AND NOT s.positions_complete AND s.retry_after<=NOW() AND s.required_height<=c.last_height
+   ORDER BY s.retry_after,s.address LIMIT $2)
+)
+SELECT address,last_height FROM candidates ORDER BY retry_after,address LIMIT $2`
 
 // Publish installs all totals and exposure together. The caller's transaction
 // must also refresh affected projections before committing once they consume

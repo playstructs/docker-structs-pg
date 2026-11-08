@@ -135,3 +135,57 @@ With `-tip-ws=false` (pure poll):
 
 In both cases the actual lag is dominated by the WebSocket/poll
 detection — the apply step is fast.
+
+## Slow-block phase timings
+
+`-slow-block-threshold` / `SYNC_SLOW_BLOCK_THRESHOLD` defaults to `2s`.
+Set it to `0s` to disable timing collection. Successful and failed applies
+emit one JSON object (after the standard log timestamp) when they cross the
+threshold. The existing window progress logs remain available for every window.
+
+- `slow_block`: threshold covers fetch/decode plus apply. `queue_wait_ms`
+  separately measures time a fetched block waited for its turn; it does not
+  contribute to the threshold. Fetch includes RPC retries and validation.
+- `slow_window`: threshold covers the bulk transaction's apply duration.
+  `fetch_sum_ms` is the sum of overlapping fetches, **not** window wall time.
+- `apply_ms` includes opening the transaction, database work, commit/rollback,
+  and writing handler-error diagnostics. `outcome` is `committed`, `failed`,
+  or `commit_unconfirmed` (a commit error cannot prove whether PostgreSQL committed).
+- `phases_ms` separates `projection_lock`, `dispatch`, `bank`,
+  `native_invalidation`, `buffer_flush`, `coverage`, `projections`, `raw_mirror`,
+  `cursor_heartbeat_audit`, and `commit`, plus setup/error/reconciliation phases
+  when used. Bulk windows aggregate per-block phases and add `bulk_stats_flush`
+  and `bulk_raw_flush`.
+- `projection.*` entries are subphases **within** `projections`; do not add them
+  to the parent. They distinguish expansion, inventory, each leaderboard,
+  watermark updates, and `projection.work`. Counts include affected projection
+  IDs and work rows inserted, updated, and deleted.
+
+Timings are application elapsed time, so a phase includes database waits and
+client/server round trips. They do not replace query plans or PostgreSQL
+statistics. Fetch failures that never produce a block bundle retain their
+ordinary RPC error logs. Payloads, addresses, SQL and error text are excluded
+from timing records. Deferred catch-up projection rebuilds retain their
+separate existing rebuild logs.
+
+### Work-refresh investigation (2026-11-08)
+
+An isolated copy of public game state, with 1,943 conservative dirty keys
+inferred from block 3,494,624, reproduced a warm work refresh of about 387 ms.
+The candidate-row query dominated: three scans through
+`struct_updated_at_id_idx` took about 114–117 ms each. Deletion and upsert
+were about 6 ms combined. Adding statistics to the dirty temporary table
+made no material improvement; joining the target list directly was slower.
+
+An experimental per-target lookup (`unnest(v_keys)` with a correlated
+`view.work_live` query and `OFFSET 0` to retain the lookup boundary) reduced
+warm refresh time to about 52–57 ms. Empty, single-target, and burst tests
+produced identical cached work contents; the single-target case did not
+regress. Both forced custom and generic plans improved. This is implemented by
+`function-api-work-20261108-target-lookups` in structs-pg, with an exact
+revert to the previous function. The migration retains locking, dirty-key
+expansion, diff semantics, watermark updates, and the full-refresh fallback.
+The data represents current state, not a replay of the historical block's
+pre-state; actual trigger queue membership may be smaller than this
+conservative set. The existing full-refresh path above 2,000 dirty keys
+was not changed by the experiment.

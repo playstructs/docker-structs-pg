@@ -9,6 +9,7 @@ import (
 
 	"sync-state/internal/buffers"
 	"sync-state/internal/objecttype"
+	"sync-state/internal/timing"
 )
 
 var modelNames = []string{
@@ -256,10 +257,17 @@ func Recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 }
 
 func recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTime any, inv InventoryPlan, fullWork bool) error {
+	next := timing.Phases(ctx)
+	defer next("")
+	next("projection.expand")
 	if err := Expand(ctx, tx, d); err != nil {
 		return err
 	}
 	refreshed := make([]string, 0, len(modelNames))
+	timing.Count(ctx, "projection_players", int64(len(d.Players)))
+	timing.Count(ctx, "projection_guilds", int64(len(d.Guilds)))
+	timing.Count(ctx, "projection_substations", int64(len(d.Substations)))
+	next("projection.inventory")
 	switch inv.mode {
 	case inventorySkip:
 		// Caller already wrote api_inventory (one-shot backfill).
@@ -286,6 +294,7 @@ func recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 		{"leaderboard_substation", recomputeSubstations},
 	}
 	for _, step := range steps {
+		next("projection." + step.model)
 		if err := step.fn(ctx, tx, d); err != nil {
 			return fmt.Errorf("%s: %w", step.model, err)
 		}
@@ -293,9 +302,11 @@ func recompute(ctx context.Context, tx pgx.Tx, d *Dirty, height int64, sourceTim
 	}
 	// Every write above shares this transaction, so one stamp after the
 	// last step is equivalent to stamping each model as it finishes.
+	next("projection.watermarks")
 	if err := refreshModels(ctx, tx, refreshed, height, sourceTime); err != nil {
 		return fmt.Errorf("refresh_state: %w", err)
 	}
+	next("projection.work")
 	if err := refreshWork(ctx, tx, height, sourceTime, fullWork); err != nil {
 		return err
 	}
@@ -336,6 +347,9 @@ SELECT inserted, updated, deleted
 		height, sourceTime).Scan(&inserted, &updated, &deleted); err != nil {
 		return fmt.Errorf("work: api_work_refresh: %w", err)
 	}
+	timing.Count(ctx, "work_inserted", inserted)
+	timing.Count(ctx, "work_updated", updated)
+	timing.Count(ctx, "work_deleted", deleted)
 	return nil
 }
 
@@ -555,7 +569,13 @@ WHERE (a.username, a.guild_id, a.alpha_balance, a.alpha_value)
 	return err
 }
 
-const playerMetricCTE = `
+// Restrict players before aggregating grid rows, including every member of each
+// requested group. Guilds can share substations, so their station metric must
+// remain independent of guild membership. Substation refreshes restrict both.
+var guildMetricCTE = fmt.Sprintf(playerMetricSQL, "WHERE p.guild_id = ANY($1::varchar[])", "")
+var substationMetricCTE = fmt.Sprintf(playerMetricSQL, "WHERE p.substation_id = ANY($1::varchar[])", "WHERE s.id = ANY($1::varchar[])")
+
+const playerMetricSQL = `
 WITH player_metric AS (
   SELECT p.id, p.guild_id, p.substation_id,
          COALESCE(MAX(gr.val) FILTER (WHERE gr.attribute_type = 'capacity'), 0) AS capacity,
@@ -563,6 +583,7 @@ WITH player_metric AS (
            + COALESCE(MAX(gr.val) FILTER (WHERE gr.attribute_type = 'structsLoad'), 0) AS load
   FROM structs.player p
   LEFT JOIN structs.grid gr ON gr.object_id = p.id
+  %s
   GROUP BY p.id, p.guild_id, p.substation_id
 ),
 substation_metric AS (
@@ -571,6 +592,7 @@ substation_metric AS (
          COALESCE(MAX(gr.val) FILTER (WHERE gr.attribute_type = 'connectionCapacity'), 0) AS connection_capacity
   FROM structs.substation s
   LEFT JOIN structs.grid gr ON gr.object_id = s.id
+  %s
   GROUP BY s.id
 )`
 
@@ -582,7 +604,7 @@ func recomputeGuilds(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_guild WHERE guild_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, playerMetricCTE+`
+	_, err := tx.Exec(ctx, guildMetricCTE+`
 INSERT INTO structs.api_leaderboard_guild(
   guild_id, name, onchain_name, player_count, collateral, supply,
   member_capacity, member_load, shared_connection_capacity
@@ -651,7 +673,7 @@ func recomputeSubstations(ctx context.Context, tx pgx.Tx, d *Dirty) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM structs.api_leaderboard_substation WHERE substation_id = ANY($1::varchar[])`, ids); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, playerMetricCTE+`
+	_, err := tx.Exec(ctx, substationMetricCTE+`
 INSERT INTO structs.api_leaderboard_substation(
   substation_id, owner, load, member_capacity,
   shared_connection_capacity, player_count

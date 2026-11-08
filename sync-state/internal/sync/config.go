@@ -42,16 +42,17 @@ type Config struct {
 	DBMaxConns  int
 
 	// Ingest knobs
-	StartHeight    int64 // 0 = resume from sync_cursor; clamped to node's earliest
-	AllowReplay    bool  // permit ingesting heights at or below what the DB already indexed
-	StopHeight     int64 // 0 = follow tip forever
-	BatchSize      int
-	Parallelism    int
-	PollInterval   time.Duration
-	HTTPTimeout    time.Duration
-	HTTPMaxRetries int
-	LogEvery       int
-	OneShot        bool
+	StartHeight        int64 // 0 = resume from sync_cursor; clamped to node's earliest
+	AllowReplay        bool  // permit ingesting heights at or below what the DB already indexed
+	StopHeight         int64 // 0 = follow tip forever
+	BatchSize          int
+	Parallelism        int
+	PollInterval       time.Duration
+	HTTPTimeout        time.Duration
+	HTTPMaxRetries     int
+	LogEvery           int
+	SlowBlockThreshold time.Duration
+	OneShot            bool
 
 	// StatementTimeout is applied via `SET LOCAL statement_timeout`
 	// at the start of every per-block transaction. Any single SQL
@@ -187,6 +188,8 @@ func LoadConfig(args []string) Config {
 		"Per-request retry budget (exponential backoff)")
 	fs.IntVar(&cfg.LogEvery, "log-every", envOrInt("SYNC_LOG_EVERY", 100),
 		"Log progress every N blocks")
+	fs.DurationVar(&cfg.SlowBlockThreshold, "slow-block-threshold", envOrDuration("SYNC_SLOW_BLOCK_THRESHOLD", 2*time.Second),
+		"Emit phase timings for slow streaming blocks and bulk apply windows; 0 disables")
 	fs.BoolVar(&cfg.OneShot, "one-shot", envOrBool("SYNC_ONE_SHOT", false),
 		"Exit when caught up to current tip instead of following")
 	fs.DurationVar(&cfg.StatementTimeout, "statement-timeout", envOrDuration("SYNC_STATE_STATEMENT_TIMEOUT", 60*time.Second),
