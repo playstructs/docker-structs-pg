@@ -112,3 +112,9 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+### v0.23.0 planet sector writer
+
+The sector-aware sync-state writer requires structs-pg's
+`planet-sector-20261110` migration before startup. Install both before the chain
+backfill. See [the writer contract](sync-state/docs/v0.23.0-planet-sector.md).

@@ -25,6 +25,8 @@ func CheckEconomySchema(ctx context.Context, q schemaQuerier) error {
 		}
 	}
 	columns := []struct{ table, column, typ string }{
+		{"structs.planet", "sector", "smallint"},
+		{"view.planet", "sector", "smallint"},
 		{"sync_state.economy_contract", "contract", "text"},
 		{"sync_state.economy_contract", "activation_height", "bigint"},
 		{"sync_state.economy_contract", "last_height", "bigint"},

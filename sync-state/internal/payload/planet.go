@@ -8,6 +8,7 @@ package payload
 // Name is chain UGC; handler only writes structs.planet.name when non-empty.
 type Planet struct {
 	ID                string  `json:"id"`
+	Sector            JSONInt `json:"sector"`
 	MaxOre            JSONInt `json:"maxOre"`
 	Creator           string  `json:"creator"`
 	Owner             string  `json:"owner"`

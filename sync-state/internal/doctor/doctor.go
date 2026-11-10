@@ -687,6 +687,7 @@ var canonicalColumns = []struct{ Schema, Table, Column string }{
 	{"structs", "guild", "name"},
 	{"structs", "guild", "pfp"},
 	{"structs", "planet", "name"},
+	{"structs", "planet", "sector"},
 	{"structs", "struct_defender", "is_planetary"},
 	{"structs", "struct_type", "can_defend"},
 }
@@ -694,7 +695,7 @@ var canonicalColumns = []struct{ Schema, Table, Column string }{
 // probeCanonicalSchema asserts that every column in canonicalColumns
 // either exists OR its table doesn't exist (fresh DB). Anything else
 // is FATAL — the operator has applied a newer sync-state but not the
-// matching retire-cache.sql, and sync-state's INSERTs will fail on the
+// matching Sqitch migrations, and sync-state's INSERTs will fail on the
 // first commit.
 func probeCanonicalSchema(ctx context.Context, pool *pgxpool.Pool) *Check {
 	var missing []string
@@ -729,7 +730,7 @@ func probeCanonicalSchema(ctx context.Context, pool *pgxpool.Pool) *Check {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%d canonical column(s) missing — apply retire-cache.sql step 1 before starting:", len(missing)))
+	b.WriteString(fmt.Sprintf("%d canonical column(s) missing — apply the matching structs-pg Sqitch migrations (including planet sector) before starting:", len(missing)))
 	for _, m := range missing {
 		b.WriteString("\n      " + m)
 	}

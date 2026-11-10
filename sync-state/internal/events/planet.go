@@ -25,16 +25,18 @@ INSERT INTO structs.planet (
     id, max_ore, creator, owner, map,
     space_slots, air_slots, land_slots, water_slots,
     status, location_list_start, location_list_end,
-    created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+    sector, created_at, updated_at
+) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
 ON CONFLICT (id) DO UPDATE
-   SET owner               = EXCLUDED.owner,
+   SET sector              = EXCLUDED.sector,
+       owner               = EXCLUDED.owner,
        map                 = EXCLUDED.map,
        status              = EXCLUDED.status,
        location_list_start = EXCLUDED.location_list_start,
        location_list_end   = EXCLUDED.location_list_end,
        updated_at          = NOW()
- WHERE structs.planet.owner               IS DISTINCT FROM EXCLUDED.owner
+ WHERE structs.planet.sector IS DISTINCT FROM EXCLUDED.sector
+    OR structs.planet.owner               IS DISTINCT FROM EXCLUDED.owner
     OR structs.planet.map                 IS DISTINCT FROM EXCLUDED.map
     OR structs.planet.status              IS DISTINCT FROM EXCLUDED.status
     OR structs.planet.location_list_start IS DISTINCT FROM EXCLUDED.location_list_start
@@ -57,6 +59,11 @@ func (planetHandler) Handle(ctx context.Context, tx pgx.Tx, _ BlockContext, raw 
 	if p.ID == "" {
 		return fmt.Errorf("planet: empty id")
 	}
+	switch p.Sector.Int64() {
+	case 0, 127, 999, 44:
+	default:
+		return fmt.Errorf("planet: invalid sector %d", p.Sector.Int64())
+	}
 	mapJSON := buildAmbitMap(p.Space, p.Air, p.Land, p.Water)
 	if _, err := tx.Exec(ctx, planetUpsertSQL,
 		p.ID,
@@ -71,6 +78,7 @@ func (planetHandler) Handle(ctx context.Context, tx pgx.Tx, _ BlockContext, raw 
 		payload.NullableText(p.Status),
 		payload.NullableText(p.LocationListStart),
 		payload.NullableText(p.LocationListEnd),
+		p.Sector.Int64(),
 	); err != nil {
 		return fmt.Errorf("planet upsert id=%s: %w", p.ID, err)
 	}
