@@ -58,7 +58,7 @@ CREATE TABLE structs.planet(id text PRIMARY KEY,owner text,sector smallint);
 CREATE TABLE structs.current_block(chain text PRIMARY KEY,height bigint);
 GRANT SELECT,UPDATE ON structs.player,structs.planet,structs.fleet TO structs_indexer;
 GRANT SELECT ON structs.current_block TO structs_indexer;''')
-        changes = ['influence-schema-20261111', 'influence-projector-20261111']
+        changes = ['influence-schema-20261111', 'influence-projector-20261111', 'influence-single-sector-20261111']
         for operation in ('deploy', 'verify', 'revert', 'deploy', 'verify'):
             for change in reversed(changes) if operation == 'revert' else changes:
                 migration(operation, change)
