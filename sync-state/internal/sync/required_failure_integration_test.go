@@ -39,6 +39,7 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 			chain := "required-failure-" + mode
 			t.Cleanup(func() {
 				_, _ = pool.Exec(ctx, `DELETE FROM sync_state.handler_error_log WHERE chain_id=$1`, chain)
+				_, _ = pool.Exec(ctx, `DELETE FROM structs.current_block WHERE chain=$1`, chain)
 			})
 			s := NewSyncer(Config{BulkDeferProjections: true, MirrorRaw: true, SlowBlockThreshold: time.Nanosecond}, nil, &db.Pool{Pool: pool}, events.NewRouter(false), chain)
 			var timingLog bytes.Buffer
@@ -81,8 +82,14 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 				}}}
 			}
 			if strings.Contains(mode, "window") {
+				if _, e := pool.Exec(ctx, `INSERT INTO structs.current_block(chain,height) VALUES($1,$2)`, chain, good.Height-1); e != nil {
+					t.Fatal(e)
+				}
 				err = s.applyBulkWindow(ctx, []*BlockBundle{good, bad}, bad.Height)
 			} else {
+				if _, e := pool.Exec(ctx, `INSERT INTO structs.current_block(chain,height) VALUES($1,$2)`, chain, bad.Height-1); e != nil {
+					t.Fatal(e)
+				}
 				bad.FinalizeBlockEvents = append(good.FinalizeBlockEvents, bad.FinalizeBlockEvents...)
 				err = s.applyBlock(ctx, bad, bad.Height)
 			}
@@ -106,6 +113,8 @@ func TestRequiredFailure_RollsBackBlockAndWindow(t *testing.T) {
 				t.Fatalf("expected database NOT NULL violation, got %v", err)
 			}
 			for _, query := range []string{
+				`SELECT count(*) FROM structs.influence_source_cursor WHERE chain_id=$1`,
+				`SELECT count(*) FROM structs.influence_membership_history WHERE chain_id=$1`,
 				`SELECT count(*) FROM structs.vault WHERE address='atomic-vault-test'`,
 				`SELECT count(*) FROM structs.planet_activity_sequence WHERE planet_id='2-999920001'`,
 				`SELECT count(*) FROM structs.planet_activity WHERE planet_id='2-999920001'`,

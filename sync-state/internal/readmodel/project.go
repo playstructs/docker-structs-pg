@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync-state/internal/influence"
 
 	"github.com/jackc/pgx/v5"
 
@@ -64,6 +65,9 @@ func InventoryAlreadyWritten() InventoryPlan {
 func ValidateSchema(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }) error {
+	if err := influence.ValidateSchema(ctx, q); err != nil {
+		return err
+	}
 	var missing []string
 	if err := q.QueryRow(ctx, `
 SELECT COALESCE(array_agg(name ORDER BY name), ARRAY[]::text[])

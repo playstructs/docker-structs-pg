@@ -9,11 +9,14 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"sync-state/internal/backfill"
 	"sync-state/internal/db"
 	"sync-state/internal/doctor"
 	"sync-state/internal/events"
 	"sync-state/internal/genesis"
+	"sync-state/internal/influence"
 	"sync-state/internal/readmodel"
 	"sync-state/internal/reprocess"
 	"sync-state/internal/rpc"
@@ -38,6 +41,7 @@ const (
 	CmdReprocessErrors       Subcommand = "reprocess-errors"
 	CmdInitGenesis           Subcommand = "init-genesis"
 	CmdReconcileCurrentBlock Subcommand = "reconcile-current-block"
+	CmdInfluenceRefresh      Subcommand = "influence-refresh"
 )
 
 // SplitArgs separates the subcommand verb from the remaining args. If the
@@ -50,7 +54,7 @@ func SplitArgs(args []string) (Subcommand, []string) {
 	switch Subcommand(args[0]) {
 	case CmdIngest, CmdBootstrap, CmdDoctor, CmdListHandlers,
 		CmdReplay, CmdRewind, CmdVerify, CmdInspect, CmdReprocessErrors,
-		CmdInitGenesis, CmdReconcileCurrentBlock:
+		CmdInitGenesis, CmdReconcileCurrentBlock, CmdInfluenceRefresh:
 		return Subcommand(args[0]), args[1:]
 	default:
 		return CmdIngest, args
@@ -64,6 +68,17 @@ func SplitArgs(args []string) (Subcommand, []string) {
 // top-level flag parser.
 func Dispatch(ctx context.Context, cmd Subcommand, cfg Config, stdout, stderr io.Writer) int {
 	switch cmd {
+	case CmdInfluenceRefresh:
+		conn, err := pgx.Connect(ctx, cfg.DatabaseURL)
+		if err == nil {
+			defer conn.Close(context.Background())
+			err = influence.Refresh(ctx, conn, stdout)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "influence-refresh: %v\n", err)
+			return 1
+		}
+		return 0
 	case CmdListHandlers:
 		return runListHandlers(stdout)
 

@@ -156,6 +156,16 @@ func replayHeight(ctx context.Context, in CmdInputs, height int64, targets []db.
 	if err := readmodel.Lock(ctx, tx); err != nil {
 		return nil, err
 	}
+	// Once exact influence capture starts, isolated old entity handlers could
+	// alter today's guild/owner attribution without its ordered source facts.
+	// Recover by restoring a canonical boundary and replaying complete blocks.
+	var covered bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM structs.influence_source_cursor WHERE chain_id=$1)`, in.ChainID).Scan(&covered); err != nil {
+		return nil, err
+	}
+	if covered && !in.DryRun {
+		return nil, fmt.Errorf("influence coverage exists: isolated handler replay is unsafe; use complete-block recovery")
+	}
 	buf := buffers.New()
 	dirty := readmodel.NewDirty()
 	bctx := events.BlockContext{

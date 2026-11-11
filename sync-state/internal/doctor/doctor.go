@@ -287,6 +287,11 @@ func Run(ctx context.Context, in Inputs) (*Report, error) {
 	// the cache.* triggers used to handle. Any still-enabled cache-era
 	// trigger means we'd double-write on the next block.
 	if in.Pool != nil {
+		c := probeInfluence(ctx, in.Pool, r.ChainID)
+		r.Checks = append(r.Checks, c)
+		if c.Severity == FATAL {
+			r.Fatal = true
+		}
 		if c := probeDroppedTriggers(ctx, in.Pool); c != nil {
 			r.Checks = append(r.Checks, *c)
 			if c.Severity == FATAL {

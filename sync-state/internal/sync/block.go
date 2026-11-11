@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +15,7 @@ import (
 	"sync-state/internal/buffers"
 	"sync-state/internal/db"
 	"sync-state/internal/events"
+	"sync-state/internal/influence"
 	"sync-state/internal/readmodel"
 	"sync-state/internal/rpc"
 	"sync-state/internal/staking"
@@ -135,9 +137,20 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 			return nil, err
 		}
 	}
+	next("influence_begin")
+	tracker, err := influence.Begin(ctx, tx, bundle.ChainID, bundle.Height, bundle.BlockHashHex, bundle.BlockTime, opts.ReconcileCurrentBlock)
+	if err != nil {
+		return nil, err
+	}
 	next("dispatch")
-	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents); err != nil {
+	if err := s.dispatchEvents(ctx, tx, bundle, buf, dirty, &pendingErrs, &numEvents, tracker); err != nil {
 		return nil, fmt.Errorf("dispatch h=%d: %w", bundle.Height, err)
+	}
+
+	next("influence_finish")
+	if err := tracker.Finish(ctx, tx); err != nil {
+		pendingErrs = append(pendingErrs, events.HandlerError{CompositeKey: "influence.finish", Error: err.Error(), Severity: events.SeverityError})
+		return nil, fmt.Errorf("influence h=%d: %w", bundle.Height, err)
 	}
 
 	// Bank processing only appends to buf. A bank error aborts the outer
@@ -270,7 +283,7 @@ func (s *Syncer) applyBlockInTx(ctx context.Context, tx pgx.Tx, bundle *BlockBun
 //
 // Within an event we walk attributes in attribute order, dedup'd by key
 // (keep first occurrence) to match cache.attributes's UNIQUE constraint.
-func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, buf *buffers.Buffer, dirty *readmodel.Dirty, errs *[]events.HandlerError, numEvents *int) error {
+func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, buf *buffers.Buffer, dirty *readmodel.Dirty, errs *[]events.HandlerError, numEvents *int, trackers ...*influence.Tracker) error {
 	bctx := events.BlockContext{
 		ChainID:   b.ChainID,
 		Height:    b.Height,
@@ -285,6 +298,20 @@ func (s *Syncer) dispatchEvents(ctx context.Context, tx pgx.Tx, b *BlockBundle, 
 		return err
 	}
 	for _, positioned := range ordered {
+		// Failed transactions cannot change canonical game ownership/membership.
+		// Fee/ante events still go through the existing financial processing.
+		if positioned.TxIndex >= 0 && b.TxResults[positioned.TxIndex].Code != 0 && strings.HasPrefix(positioned.Event.Type, "structs.structs.") {
+			*numEvents++
+			continue
+		}
+		if len(trackers) > 0 && (positioned.TxIndex < 0 || b.TxResults[positioned.TxIndex].Code == 0) {
+			if err := trackers[0].Observe(ctx, tx, positioned); err != nil {
+				source, _ := json.Marshal(positioned.Event)
+				*errs = append(*errs, events.HandlerError{CompositeKey: "influence.observe", Payload: source, Error: err.Error(), Severity: events.SeverityError,
+					TxIndex: coordinatePtr(positioned.TxIndex), MsgIndex: coordinatePtr(positioned.MsgIndex), EventIndex: coordinatePtr(positioned.EventIndex)})
+				return err
+			}
+		}
 		bctx.Phase = positioned.Phase
 		bctx.TxIndex = positioned.TxIndex
 		bctx.MsgIndex = positioned.MsgIndex

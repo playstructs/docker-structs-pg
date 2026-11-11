@@ -222,6 +222,9 @@ func TestNativeInvalidation_ActualBlockMarksEmptyCompletionBeforeDeferredProject
 			{Key: "amount", Value: ""}, {Key: "delegator", Value: nativeWorkerAddress},
 			{Key: "validator", Value: "structsvaloper1pa4ch99mktue309avws5xxp70t4rr5egxfmcmp"},
 		}}}}
+	if _, err := tx.Exec(ctx, `INSERT INTO structs.current_block(chain,height) VALUES($1,100)`, s.chainID); err != nil {
+		t.Fatal(err)
+	}
 	result, err := s.applyBlockInTx(ctx, tx, bundle, 101, buffers.New(), applyOpts{DeferProjections: true})
 	if err != nil {
 		t.Fatal(err)
