@@ -121,5 +121,5 @@ backfill. See [the writer contract](sync-state/docs/v0.23.0-planet-sector.md).
 
 Influence delivery additionally requires `influence-grass-20261111`. Sync-state
 writes complete event frames transactionally after each changed block; deploy the
-paired structs-grass outbox/replay relay to deliver them. Stop the previous writer
+paired structs-grass outbox publisher to deliver them. Stop the previous writer
 while applying this schema/writer upgrade. See `sync-state/docs/influence-20261111.md`.

@@ -38,9 +38,18 @@ def main():
     arch = subprocess.check_output(['docker', 'image', 'inspect', image_id, '--format', '{{.Architecture}}'], text=True).strip()
     network = name + '-net'
     broker = name + '-nats'
+    broker_files = tempfile.TemporaryDirectory(prefix='influence-nats-')
+    broker_config = Path(broker_files.name) / 'nats.conf'
+    broker_config.write_text('''authorization {
+ users: [
+  {user: relay, password: fixture, permissions: {publish: {allow: ["structs.influence.>"]}, subscribe: {deny: [">"]}}},
+  {user: reader, password: fixture, permissions: {publish: {deny: [">"]}, subscribe: {allow: ["structs.influence.>"]}}}
+ ]
+}
+''')
     try:
         run('docker', 'network', 'create', '--internal', network)
-        run('docker', 'run', '--pull=never', '-d', '--name', broker, '--network', network, '--network-alias', 'broker', 'nats:latest')
+        run('docker', 'run', '--pull=never', '-d', '--name', broker, '--network', network, '--network-alias', 'broker', '--mount', f'type=bind,src={broker_config},dst=/etc/nats-test.conf,readonly', 'nats:latest', '-c', '/etc/nats-test.conf')
         run('docker', 'run', '--pull=never', '-d', '--name', name, '--network', network, '--user', 'postgres',
             '--tmpfs', '/tmp:rw,size=2147483648', '--entrypoint', '/bin/sh', image_id, '-ec',
             '/usr/lib/postgresql/18/bin/initdb -D /tmp/test-pg --auth=trust >/tmp/init.log; '
@@ -97,7 +106,8 @@ END $$;""", 'influence_upgrade')
                 env={**os.environ, 'GOOS': 'linux', 'GOARCH': arch, 'CGO_ENABLED': '0'})
             run('docker', 'cp', grass_binary, name + ':/usr/local/bin/grass-test')
             run('docker', 'exec', '-e', 'GRASS_TEST_DATABASE_URL=host=/tmp user=postgres dbname=postgres sslmode=disable',
-                '-e', 'GRASS_TEST_NATS_URL=nats://broker:4222', name, '/usr/local/bin/grass-test', '-test.v', '-test.timeout=60s')
+                '-e', 'GRASS_TEST_NATS_URL=nats://relay:fixture@broker:4222',
+                '-e', 'GRASS_TEST_NATS_READER_URL=nats://reader:fixture@broker:4222', name, '/usr/local/bin/grass-test', '-test.v', '-test.timeout=60s')
         # A populated source cursor must make destructive rollback fail.
         sql("INSERT INTO structs.influence_source_cursor VALUES('revert-guard',1,0,'');")
         result = subprocess.run(['docker','exec','-i','-u','postgres',name,'psql','-Xq','-h','/tmp','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'],
@@ -114,6 +124,7 @@ END $$;""", 'influence_upgrade')
     finally:
         subprocess.run(['docker', 'rm', '-f', name, broker], check=False)
         subprocess.run(['docker', 'network', 'rm', network], check=False)
+        broker_files.cleanup()
 
 
 if __name__ == '__main__':

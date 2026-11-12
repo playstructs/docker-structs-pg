@@ -97,6 +97,7 @@ not emit twice. The schema's published-build trigger handles operator-created
 contests, rebuilds and rewinds; no manual notification table writes are needed.
 
 Stop the old writer for the paired migration, deploy schema first, then deploy
-this writer and the updated structs-grass relay. The latter provides multipart
-messages and scoped NATS replay without HTTP requests. See the sibling
+this writer and the updated structs-grass relay. The latter publishes complete multipart
+messages to read-only NATS subscribers. Clients use the API for initial loading
+and recovery after disconnects or detected gaps, not for healthy updates. See the sibling
 `structs-pg/docs/influence-grass-20261111.md` for event semantics and operation.
