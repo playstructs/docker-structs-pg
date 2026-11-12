@@ -68,6 +68,13 @@ func TestInfluenceActualBlock(t *testing.T) {
 			if e = tx.QueryRow(c, `SELECT points::bigint FROM structs.influence_standings WHERE contest_id=$1`, cid).Scan(&points); e != nil || points != 300 {
 				t.Fatalf("score=%d %v", points, e)
 			}
+			var framePoints string
+			if e = tx.QueryRow(c, `SELECT row->>'points' FROM structs.influence_grass_frame f,
+              LATERAL jsonb_array_elements(f.payload->'data'->'standings') row
+              WHERE contest_id=$1 AND height=1 AND payload->>'category'='influence_scores' AND payload->>'mode'='patch'
+              AND row->>'guild_id'='0-99101' AND row->>'sector'='127'`, cid).Scan(&framePoints); e != nil || framePoints != "300" {
+				t.Fatalf("grass score %s %v", framePoints, e)
+			}
 			var guild string
 			if e = tx.QueryRow(c, `SELECT guild_id FROM structs.player WHERE id='1-99101'`).Scan(&guild); e != nil || guild != "0-99101" {
 				t.Fatalf("failed transaction changed player: %s %v", guild, e)

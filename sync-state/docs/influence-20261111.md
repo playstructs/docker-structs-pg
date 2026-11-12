@@ -81,3 +81,22 @@ tests; it is not a replacement for the full-schema block tests. Its maintenance
 test commits temporary fixtures only in its disposable database/container.
 No HTTP endpoints are added in this change. structs-webapp can next consume the
 published standings, planet support/claims and exact history read contract.
+
+## Influence grass delivery
+
+The writer now requires the `influence-grass-20261111` schema migration. After
+`influence_finish_block`, `Tracker.Finish` calls `influence_grass_flush` in the
+same SQL transaction, passing the canonical block time/hash. Bulk ingestion keeps
+this per-block step even though ordinary row notifications are deferred. Network
+publication is performed by structs-grass from the durable outbox, never directly
+by the writer. A failure later in the transaction rolls back all influence frames.
+
+The migration adds personal history, changed-entity tracking, complete snapshots,
+block deltas and publication/rebuild replacements. Repeated canonical blocks do
+not emit twice. The schema's published-build trigger handles operator-created
+contests, rebuilds and rewinds; no manual notification table writes are needed.
+
+Stop the old writer for the paired migration, deploy schema first, then deploy
+this writer and the updated structs-grass relay. The latter provides multipart
+messages and scoped NATS replay without HTTP requests. See the sibling
+`structs-pg/docs/influence-grass-20261111.md` for event semantics and operation.

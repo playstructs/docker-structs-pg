@@ -23,7 +23,7 @@
 #   sync-state reconcile-current-block -- repair the exact indexed boundary
 #   sync-state influence-refresh -- refresh bounded influence chart history (DB owner)
 #
-# Influence requires structs-pg influence-projector-20261111 before this writer.
+# Influence requires structs-pg influence-grass-20261111 before this writer.
 # Exact raid/membership history starts at the verified cutover boundary. See
 # sync-state/docs/influence-20261111.md for contest creation and recovery.
 #

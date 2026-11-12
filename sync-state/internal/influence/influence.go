@@ -186,6 +186,12 @@ func (tr *Tracker) Finish(ctx context.Context, tx pgx.Tx) error {
 		}
 	}
 	_, err := tx.Exec(ctx, `SELECT structs.influence_finish_block($1,$2,$3)`, tr.position.Chain, tr.position.Height, tr.position.Hash)
+	if err != nil {
+		return err
+	}
+	// Persist complete state/history frames inside the canonical transaction.
+	// Bulk mode runs this for every block; only delivery waits for the commit.
+	_, err = tx.Exec(ctx, `SELECT structs.influence_grass_flush($1,$2,$3,$4)`, tr.position.Chain, tr.position.Height, tr.position.Hash, tr.position.Time)
 	return err
 }
 
@@ -200,6 +206,8 @@ func ValidateSchema(ctx context.Context, q interface {
  AND to_regprocedure('structs.influence_finish_block(text,bigint,text)') IS NOT NULL
  AND to_regprocedure('structs.influence_rebuild(bigint)') IS NOT NULL
  AND to_regprocedure('structs.influence_reconcile(bigint)') IS NOT NULL
+ AND to_regprocedure('structs.influence_grass_flush(text,bigint,text,timestamptz)') IS NOT NULL
+ AND to_regclass('structs.influence_grass_frame') IS NOT NULL
  AND to_regclass('structs.influence_score_change_1000') IS NOT NULL
  AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='structs' AND table_name='influence_membership_history' AND column_name='event_time')
  AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='structs' AND table_name='influence_raid' AND column_name='source')`).Scan(&ok)
@@ -207,7 +215,7 @@ func ValidateSchema(ctx context.Context, q interface {
 		return fmt.Errorf("validate influence schema: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("apply structs-pg influence-schema-20261111 and influence-projector-20261111 before this writer")
+		return fmt.Errorf("apply structs-pg through influence-grass-20261111 before this writer")
 	}
 	return nil
 }
